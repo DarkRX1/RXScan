@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DARKRX // Cyber Research Lab</title>
+    <meta
+      name="description"
+      content="DarkRX — purple teamer, security researcher, adversary simulation. Attack systems. Study the telemetry. Build the detection. Break it again."
+    />
+    <meta name="theme-color" content="#00ff41" />
+    <meta name="robots" content="index, follow" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/css/app.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <div id="bg" aria-hidden="true"></div>
+    <header class="nav" id="nav">
+      <div class="nav-inner">
+        <a class="brand" href="#/" aria-label="DARKRX home">
+          <i data-icon="terminal"></i>
+          ./darkrx.sh
+        </a>
+        <nav class="nav-links" id="nav-links" aria-label="Primary">
+          <a href="#/" data-route="/"><i data-icon="home"></i><span>Home</span></a>
+          <a href="#/about" data-route="/about"><i data-icon="user"></i><span>About</span></a>
+          <a href="#/projects" data-route="/projects"><i data-icon="briefcase"></i><span>Projects</span></a>
+          <a href="#/skills" data-route="/skills"><i data-icon="code"></i><span>Skills</span></a>
+          <a href="#/certs" data-route="/certs"><i data-icon="award"></i><span>Certs</span></a>
+          <a href="#/blog" data-route="/blog"><i data-icon="file"></i><span>Blog</span></a>
+          <a href="#/contact" data-route="/contact"><i data-icon="mail"></i><span>Contact</span></a>
+          <a href="#/console" data-route="/console"><i data-icon="lock"></i><span>Admin</span></a>
+        </nav>
+        <div class="nav-status" aria-live="polite">
+          <span id="clock">00:00:00 AM</span>
+          <span class="sep"> | </span>
+          <span class="secure">SECURE</span>
+        </div>
+        <button class="menu-btn" id="menu-btn" type="button" aria-expanded="false" aria-controls="mobile-menu" aria-label="Open menu">
+          <i data-icon="menu"></i>
+        </button>
+      </div>
+      <div class="mobile-menu" id="mobile-menu" hidden>
+        <nav aria-label="Mobile">
+          <a href="#/">Home</a>
+          <a href="#/about">About</a>
+          <a href="#/projects">Projects</a>
+          <a href="#/skills">Skills</a>
+          <a href="#/certs">Certs</a>
+          <a href="#/blog">Blog</a>
+          <a href="#/contact">Contact</a>
+          <a href="#/console">Admin</a>
+        </nav>
+        <p class="mobile-status"><span id="clock-m"></span> | <span class="secure">SECURE</span></p>
+      </div>
+    </header>
+    <main id="main" tabindex="-1"></main>
+    <script src="/js/icons.js"></script>
+    <script src="/js/data.js"></script>
+    <script src="/js/app.js"></script>
+  </body>
+</html>
