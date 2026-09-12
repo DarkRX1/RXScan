@@ -6,7 +6,7 @@ Each phase requires tests, benchmark/regression evidence where applicable, docum
 | --- | --- | --- |
 | 0 | Architecture, tooling, fixtures, benchmark discipline, CI | Complete |
 | 1 | Target model, CLI, Scope Guard, config, ScanPlan | Complete |
-| 2 | Events, findings, stable asset IDs, relationships | Planned |
+| 2 | Events, findings, stable asset IDs, relationships | Complete |
 | 3 | Reactive scheduler, queues, cancellation, backpressure | Planned |
 | 4 | Speed governor, budgets, adaptive control | Planned |
 | 5–10 | Discovery, TCP, UDP, probes, TLS/fingerprints, HTTP | Planned |
@@ -25,3 +25,10 @@ TargetSpec, Scope Guard, ScanPlan, stable IDs/events, scheduler, speed/budgets, 
 - Explicit global and project TOML configuration resolve deterministically; CLI overrides them.
 - Goals, level 1–5, and speed presets/0–100/auto are represented independently in `ScanPlan`.
 - `--explain` describes choices and deferred capability.
+
+## Phase 2 exit criteria
+
+- Canonical assets, findings, evidence, events, and relationships have versioned JSON/JSONL representations and deterministic correlation IDs.
+- Every record has module/version/plan/timestamp provenance; confidence is validated from 0 through 100.
+- Host, IP, and URL assets are admitted through the existing Scope Guard. Recording an observation never grants scheduling authority.
+- Evidence detail capture is capped at 64 KiB and records truncation metadata.

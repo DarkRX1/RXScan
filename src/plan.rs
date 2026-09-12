@@ -4,6 +4,7 @@ use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::model::ScanPlanId;
 use crate::{
     cli::Cli,
     config::{ConfigError, EffectiveConfig},
@@ -130,6 +131,11 @@ pub enum PlanError {
 }
 
 impl ScanPlan {
+    /// A deterministic identifier for correlating records generated from this plan.
+    pub fn stable_id(&self) -> ScanPlanId {
+        ScanPlanId::from_serializable(self)
+    }
+
     pub fn compile(cli: Cli) -> Result<Self, PlanError> {
         let effective =
             EffectiveConfig::load(cli.config.as_deref(), cli.project_config.as_deref())?;

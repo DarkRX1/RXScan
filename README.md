@@ -2,7 +2,7 @@
 
 Simple outside. Serious inside.
 
-RXScan is being built as a standalone, native Rust reconnaissance platform. Phases 0–1 establish typed target normalization, a central deny-by-default scope policy, TOML configuration precedence, and an inspectable scan-plan compiler. It does not execute network activity yet; that begins after the reactive scheduler, budgets, and network phases are in place.
+RXScan is being built as a standalone, native Rust reconnaissance platform. Phases 0–2 establish typed target normalization, a central deny-by-default scope policy, TOML configuration precedence, an inspectable scan-plan compiler, and a stable asset/event/evidence/finding model. It does not execute network activity yet; that begins after the reactive scheduler, budgets, and network phases are in place.
 
 ```text
 rxscan https://target.test --explain
