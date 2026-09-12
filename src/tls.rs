@@ -120,6 +120,21 @@ impl EstablishedTls {
         let request = format!(
             "GET / HTTP/1.0\r\nHost: {host_label}\r\nConnection: close\r\nUser-Agent: rxscan-phase7\r\n\r\n"
         );
+        self.exchange_http(request.as_bytes(), max_bytes, timeout, cancel)
+    }
+
+    /// Send arbitrary bounded request bytes inside the session and read a
+    /// bounded response. Powers Phase 8 HTTP/1.1 exchanges (GET/HEAD with
+    /// explicit paths) over the same observation-only session primitive.
+    /// Tolerates close-without-notify after bytes arrive; errors only when
+    /// nothing was received at all.
+    pub fn exchange_http(
+        &mut self,
+        request: &[u8],
+        max_bytes: usize,
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<u8>, String> {
         self.stream
             .set_write_timeout(Some(Duration::from_millis(500)))
             .map_err(|error| error.to_string())?;
@@ -129,7 +144,7 @@ impl EstablishedTls {
         let started = Instant::now();
         {
             let mut tls = rustls::Stream::new(&mut self.conn, &mut self.stream);
-            tls.write_all(request.as_bytes())
+            tls.write_all(request)
                 .map_err(|error| format!("tls write: {error}"))?;
             tls.flush().map_err(|error| format!("tls flush: {error}"))?;
             let mut response = Vec::new();

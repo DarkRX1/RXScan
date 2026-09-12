@@ -23,3 +23,5 @@ pub mod tcp_discovery;
 pub mod tcp_probe;
 pub mod tcp_scanner;
 pub mod tls;
+pub mod web;
+pub mod web_probe;

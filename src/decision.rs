@@ -19,7 +19,7 @@
 //! Proposals mirror lowering shapes so single-host duplicates share task IDs
 //! and are ignored gracefully instead of rescanning.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -422,13 +422,16 @@ impl crate::execution::DecisionEngine for ServiceDecisionEngine {
     }
 }
 
-/// Combined Phase 7 engine: host→port (V1) plus open-port→service (V2).
-/// Dispatches purely on the completed task kind; each sub-engine owns its
-/// rule. Modules still never self-schedule.
+/// Combined Phase 7+ engine: host→port (V1), open-port→service (V2), and
+/// confirmed-service→web (Phase 8) rules. Dispatches purely on the completed
+/// task kind; each sub-engine owns its rule. Modules still never
+/// self-schedule. `HttpProbe` completions propose nothing: Phase 8 is a
+/// foundation phase, not a crawler.
 #[derive(Clone)]
 pub struct Phase7Engine {
     tcp: TcpDecisionEngine,
     service: ServiceDecisionEngine,
+    web: WebDecisionEngine,
 }
 
 impl Phase7Engine {
@@ -449,7 +452,14 @@ impl Phase7Engine {
                 tcp_selection,
                 speed,
             ),
-            service: ServiceDecisionEngine::new(scope_guard, plan_id, level, goal, speed),
+            service: ServiceDecisionEngine::new(
+                scope_guard.clone(),
+                plan_id.clone(),
+                level,
+                goal,
+                speed,
+            ),
+            web: WebDecisionEngine::new(scope_guard, plan_id, speed),
         }
     }
 }
@@ -459,8 +469,158 @@ impl crate::execution::DecisionEngine for Phase7Engine {
         match completed.kind {
             TaskKind::HostDiscovery => self.tcp.follow_up_tasks(completed, output),
             TaskKind::PortDiscovery => self.service.follow_up_tasks(completed, output),
+            TaskKind::ServiceProbe => self.web.follow_up_tasks(completed, output),
             _ => Vec::new(),
         }
+    }
+}
+
+/// Deterministic Phase 8 rule: confirmed HTTP/HTTPS services → bounded
+/// `HttpProbe` (WebProbe) proposals, one per service finding.
+///
+/// Port hints played no role here either: only findings whose metadata
+/// carries `service: http|https` (protocol evidence from Phase 7) propose.
+/// Level breadth lives inside the web task itself (HEAD vs GET, redirect
+/// cap), so every confirmed web service proposes at every level; speed and
+/// budgets flow through the standard governor/admission path. Proposals
+/// carry the canonical URL plus address/port/service context so task IDs
+/// stay deterministic; scope is pre-validated and duplicates fall to
+/// best-effort scheduler admission.
+#[derive(Clone)]
+pub struct WebDecisionEngine {
+    scope_guard: Arc<dyn ScopeGuard>,
+    plan_id: ScanPlanId,
+    speed: crate::plan::SpeedSetting,
+}
+
+/// Cap on web proposals per single service-task completion (deterministic
+/// first-N by URL). Service tasks normally yield ≤1 finding each.
+pub const MAX_WEB_PROPOSALS_PER_COMPLETION: usize = 64;
+
+impl WebDecisionEngine {
+    pub fn new(
+        scope_guard: Arc<dyn ScopeGuard>,
+        plan_id: ScanPlanId,
+        speed: crate::plan::SpeedSetting,
+    ) -> Self {
+        Self {
+            scope_guard,
+            plan_id,
+            speed,
+        }
+    }
+
+    fn web_task_for_service(
+        &self,
+        address: &str,
+        port: u16,
+        service: &str,
+        parent_service_asset: &str,
+        target_label: &str,
+    ) -> Option<Task> {
+        if service != "http" && service != "https" {
+            return None;
+        }
+        let scheme = if service == "https" { "https" } else { "http" };
+        let url_text = format!("{scheme}://{address}:{port}/");
+        let target = crate::web::WebTarget::parse(&url_text).ok()?;
+        // Scope pre-check on the URL host before proposing.
+        let scope_target = match target.ip_literal() {
+            Some(ip) => TaskScopeTarget::Ip(ip),
+            None => TaskScopeTarget::Host(target.host.clone()),
+        };
+        if !self.scope_guard.permits(&scope_target) {
+            return None;
+        }
+        let mut params = BTreeMap::new();
+        params.insert("target".to_owned(), target_label.to_owned());
+        params.insert("url".to_owned(), target.canonical());
+        params.insert("address".to_owned(), address.to_owned());
+        params.insert("port".to_owned(), port.to_string());
+        params.insert("scheme".to_owned(), scheme.to_owned());
+        params.insert("parent_service".to_owned(), parent_service_asset.to_owned());
+        let governor = crate::execution::SpeedGovernor::new(self.speed, 1).ok()?;
+        let provenance = crate::model::Provenance::new(
+            "rxscan.decision",
+            "8.0.0",
+            self.plan_id.clone(),
+            Timestamp::now(),
+        )
+        .ok()?;
+        Task::new_with_params(
+            TaskKind::HttpProbe,
+            None,
+            Vec::new(),
+            None,
+            self.plan_id.clone(),
+            priority_for_kind(&TaskKind::HttpProbe),
+            governor.default_timeout(),
+            governor.default_retry_policy(),
+            "rxscan.http",
+            provenance,
+            scope_target,
+            params,
+            self.scope_guard.as_ref(),
+        )
+        .ok()
+    }
+}
+
+impl crate::execution::DecisionEngine for WebDecisionEngine {
+    fn follow_up_tasks(&self, completed: &Task, output: &ModuleOutput) -> Vec<Task> {
+        if completed.kind != TaskKind::ServiceProbe {
+            return Vec::new();
+        }
+        let mut proposals = Vec::new();
+        let mut seen: BTreeSet<(String, u16, String)> = BTreeSet::new();
+        for finding in &output.findings {
+            if !(finding.title.contains("service on port")) {
+                continue;
+            }
+            let (Some(service), Some(port_number), Some(address)) = (
+                finding
+                    .metadata
+                    .get("service")
+                    .and_then(serde_json::Value::as_str),
+                finding
+                    .metadata
+                    .get("port")
+                    .and_then(serde_json::Value::as_u64),
+                finding
+                    .metadata
+                    .get("address")
+                    .and_then(serde_json::Value::as_str),
+            ) else {
+                continue;
+            };
+            if service != "http" && service != "https" {
+                continue;
+            }
+            let Ok(port) = u16::try_from(port_number) else {
+                continue;
+            };
+            if port == 0
+                || !seen.insert((address.to_owned(), port, service.to_owned()))
+                || proposals.len() >= MAX_WEB_PROPOSALS_PER_COMPLETION
+            {
+                continue;
+            }
+            let target_label = completed
+                .params
+                .get("target")
+                .cloned()
+                .unwrap_or_else(|| address.to_owned());
+            if let Some(task) = self.web_task_for_service(
+                address,
+                port,
+                service,
+                &finding.affected_asset_id.0,
+                &target_label,
+            ) {
+                proposals.push(task);
+            }
+        }
+        proposals
     }
 }
 

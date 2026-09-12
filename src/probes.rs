@@ -109,7 +109,7 @@ pub struct ProbeCtx<'a> {
 }
 
 impl ProbeCtx<'_> {
-    fn remaining(&self) -> Option<Duration> {
+    pub(crate) fn remaining(&self) -> Option<Duration> {
         let now = Instant::now();
         if now >= self.deadline || self.cancel.is_cancelled() {
             return None;
@@ -121,7 +121,7 @@ impl ProbeCtx<'_> {
         )
     }
 
-    fn connect(&self) -> Result<TcpStream, String> {
+    pub(crate) fn connect(&self) -> Result<TcpStream, String> {
         let remaining = self
             .remaining()
             .ok_or_else(|| "cancelled or task deadline reached".to_owned())?;
@@ -130,7 +130,7 @@ impl ProbeCtx<'_> {
             .map_err(|error| format!("connect: {error}"))
     }
 
-    fn timebox(stream: &TcpStream, millis: u64) {
+    pub(crate) fn timebox(stream: &TcpStream, millis: u64) {
         let _ = stream.set_read_timeout(Some(Duration::from_millis(millis)));
         let _ = stream.set_write_timeout(Some(Duration::from_millis(millis)));
     }
@@ -419,7 +419,7 @@ fn find_header_end(bytes: &[u8]) -> Option<usize> {
         .map(|position| position + 4)
 }
 
-fn extract_title(body: &[u8]) -> Option<String> {
+pub(crate) fn extract_title(body: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(body).to_ascii_lowercase();
     let start = text.find("<title>")? + "<title>".len();
     let end = text[start..].find("</title>")? + start;

@@ -49,3 +49,11 @@ Modules never receive authority to bypass policy. Discovery may be recorded with
 - Scope Guard cannot be bypassed (lowering/admission/promotion/dispatch/module checks; service tasks carry Ip scope with derived-address re-checks; hostname-derived IPs filtered; proposals pre-checked and best-effort admitted).
 - TLS via rustls observe-only verifier (trust never evaluated; chain recorded as evidence); no cipher-suite enumeration; certificates parsed with bounded x509-parser and fingerprinted with SHA-256.
 - Output stays bounded (per-classified-service assets/evidence/findings; unknown-with-banner evidence only; silent runs emit events alone; JSONL byte cap; terminal shows the service table only).
+
+## Phase 8 executor safety notes
+
+- Single request per URL over one connection (explicit HEAD/GET, `Connection: close`); no link extraction paths are ever requested — a no-crawl boundary test asserts advertised-but-unplanned URLs see zero contacts.
+- Redirects re-enter the Scope Guard per hop with visited-set loop detection and a hard hop cap; out-of-scope destinations are recorded with `followed: false` and never resolved to sockets (canary-listener test proves zero contact).
+- Response handling is capped at every layer (header count/bytes, body bytes with surplus handoff so single-segment head+body reads cannot defeat the cap, cookie count/size, endpoint identity length, findings/tasks); truncation is flagged in evidence; malformed input is a miss with notes, never a panic or a guess.
+- TLS reuses the Phase 7 observe-only session primitive (trust never evaluated); certificates are parsed bounded and fingerprinted; no cipher enumeration, no security grading, no version claims beyond observed strings.
+- Cookies are observations only (no jar, no replay); server/product strings are raw observations, never precise version claims; unknown stays unknown.

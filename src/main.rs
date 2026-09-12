@@ -26,7 +26,7 @@ fn main() {
             } else {
                 println!("{}", run::human_summary(&report));
                 if report.output_path.is_none() {
-                    println!("Run with --explain to inspect the effective Phase 7 plan.");
+                    println!("Run with --explain to inspect the effective Phase 8 plan.");
                     println!(
                         "Service probing uses bounded native handshakes (no auth); use --output <path> for typed JSONL."
                     );

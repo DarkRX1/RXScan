@@ -1,6 +1,6 @@
 # Configuration
 
-Phase 1–7 support explicit TOML layers:
+Phase 1–8 support explicit TOML layers:
 
 ```text
 built-in defaults < --config GLOBAL.toml < --project-config PROJECT.toml < CLI
@@ -82,3 +82,13 @@ Invalid values fail fast (exit 2): zero/negative-equivalent, values exceeding ha
 - Depth over count: SSH, HTTP, TLS/HTTPS, FTP, and SMTP were completed first (each with recognition, negative, and bounds tests). Redis, MySQL, and PostgreSQL are included only because each is a minimal safe exchange (one PING / passive handshake / one 8-byte SSLRequest) with dedicated handshake tests and the same allowlist coverage — no scope or quality compromise.
 - Strict unknown handling: port numbers order probes but never prove identity (hint≠proof is regression-tested both directions). Generic banners stay Unknown unless the bytes satisfy a concrete grammar (SSH identification string with valid version and line terminator); bare prefixes, malformed versions, and unterminated fragments stay Unknown with banners preserved. Failed TLS compositions are recorded as notes, never upgraded.
 - Deferred seams (registered as documentation, not probes): IMAP, POP3, LDAP, MQTT, RDP, SMB, DNS-over-TCP, RPC, NTP, Kerberos.
+
+## Phase 8 web policy
+
+- No new CLI flags or TOML keys: web probing follows the existing `--level`, `--goal`, `--speed`, `--ports`, scope, and budget policy. `--explain` reports the web probe policy alongside the other policies.
+- Canonical URLs fill scheme/host defaults (`http://h/` ≡ `http://h:80/`), bracket IPv6, preserve path case and query verbatim, and resolve relative `Location` values per RFC 3986; malformed destinations stop with notes. Endpoint IDs hash the full canonical URL, so distinct scheme/host/port/path identities never collide.
+- Redirects: L1–L2 record only (no follows), L3 follows ≤2, L4–L5 follow ≤4 (hard cap 5). Every destination is scope-checked before contact and visited-set loop-checked; out-of-scope hops are recorded, never contacted. Chains appear in typed evidence/events.
+- HTTP/1.1 with explicit `Host` (non-default ports kept, IPv6 bracketed); HEAD at L1–L2 (headers only), GET from L3 up (bounded body/title). One request per URL, one exchange per connection; cookies observed bounded (≤8, values ≤256B), never replayed.
+- Bounds: ≤64 headers, 16KiB header/body halves, 1KiB body samples, 4 start URLs and 8 findings per task, connect/response timeouts from speed, task-deadline truncation, cancellation, evidence budget. Truncation is flagged, never silent.
+- Speed sets timeouts/concurrency only: identical response bytes classify identically at any speed (regression-tested). Level sets breadth only.
+- Service boundary: only findings with `service: http|https` propose web work; `HttpProbe` completions propose nothing — Phase 8 has no crawling follow-ups by construction.

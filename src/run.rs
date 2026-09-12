@@ -1,15 +1,17 @@
-//! Phase 7 runtime bootstrap: Target -> Scope -> ScanPlan -> Tasks ->
+//! Phase 8 runtime bootstrap: Target -> Scope -> ScanPlan -> Tasks ->
 //! Reactive Scheduler <-> Speed Governor <-> Budgets <-> Backpressure ->
-//! HostDiscovery + TcpDiscovery + ServiceProbe Modules -> Typed Events /
-//! Evidence / Assets / Findings -> Decision Engine (host→port, open-port→
-//! service) -> JSONL Output + human service summary.
+//! HostDiscovery + TcpDiscovery + ServiceProbe + WebProbe Modules -> Typed
+//! Events / Evidence / Assets / Findings -> Decision Engine (host→port,
+//! open-port→service, confirmed-service→web) -> JSONL Output + human service
+//! summary.
 //!
 //! Real bounded discovery: native ICMP echo + TCP reachability (Phase 5),
 //! native TCP connect port scanning (Phase 6, one task per target with a
-//! bounded internal window, no thread per port), and native protocol probing
-//! (Phase 7, one task per open port with a small ordered probe plan, no
-//! authentication). Deeper intents (UDP, HTTP crawling, TLS cipher
-//! enumeration, DNS, fuzzing, fingerprint engine) still run as `Skipped`
+//! bounded internal window, no thread per port), native protocol probing
+//! (Phase 7, one task per open port, no authentication), and bounded HTTP/1.1
+//! web observations (Phase 8: single exchanges, bounded redirects, no
+//! crawling). Deeper intents (UDP, HTTP crawling, TLS cipher enumeration,
+//! DNS, fuzzing, fingerprint engine) still run as `Skipped`
 //! (`module unavailable`). The Decision Engine boundary is live: facts
 //! propose scoped follow-ups admitted via Scope Guard, policy, budgets, and
 //! scheduler dedup.
@@ -72,14 +74,14 @@ pub struct RunReport {
     pub open_ports_summary: String,
 }
 
-/// Execute the full Phase 7 discovery plane from CLI.
+/// Execute the full Phase 8 discovery plane from CLI.
 ///
 /// Steps: compile plan -> scope guard -> lower tasks (bounded CIDR, one port
 /// task per target) -> speed governor -> budgets -> scheduler -> register
-/// HostDiscovery + TcpDiscovery + ServiceProbe + control scaffolds ->
-/// Decision Engine (host→port, open-port→service) -> run -> JSONL output
-/// (scheduler events + discovery/scan/service assets, events, evidence,
-/// findings) + human service summary.
+/// HostDiscovery + TcpDiscovery + ServiceProbe + WebProbe + control scaffolds
+/// -> Decision Engine (host→port, open-port→service, service→web) -> run ->
+/// JSONL output (scheduler events + discovery/scan/service/web assets,
+/// events, evidence, findings) + human service summary.
 pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
     let output_path = cli.output.clone();
     let format = cli.format.clone();
@@ -131,11 +133,16 @@ pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
         service_policy,
         guard.clone(),
     )));
+    let web_policy = crate::web::WebPolicy::new(plan.level, plan.goal, plan.speed);
+    scheduler.register_module(Arc::new(crate::web_probe::WebProbeModule::new(
+        web_policy,
+        guard.clone(),
+    )));
     for module in phase5_control_modules() {
         scheduler.register_module(Arc::new(module));
     }
     // Decision Engine: host facts propose scoped port tasks, open ports
-    // propose scoped service tasks.
+    // propose scoped service tasks, confirmed web services propose web tasks.
     scheduler.set_decision_engine(Arc::new(Phase7Engine::new(
         guard.clone(),
         plan.stable_id(),
@@ -227,7 +234,7 @@ pub fn human_summary_with_opens(
 ) -> String {
     let scheduler = &report.scheduler_report;
     let header = format!(
-        "RXScan Phase 7 run: {} task(s) | completed {} | failed {} | cancelled {} | timed out {} | skipped {} | JSONL bytes {}{}",
+        "RXScan Phase 8 run: {} task(s) | completed {} | failed {} | cancelled {} | timed out {} | skipped {} | JSONL bytes {}{}",
         report.task_count,
         scheduler.completed.len(),
         scheduler.failed.len(),

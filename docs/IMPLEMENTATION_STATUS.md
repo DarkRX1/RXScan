@@ -6,20 +6,20 @@ The repository had no commits and contained an uncommitted Rust Phase-0-style sk
 
 ## Current state
 
-Phases 0 through 7 are complete. RXScan now performs real bounded host discovery, native TCP connect port scanning, and native service/protocol identification through the existing scheduler, with explicit host states, port states, service observations, Decision Engine host→port and open-port→service proposals, and evidence. No UDP scanning, web crawling, directory discovery, fuzzing, DNS enumeration, vulnerability checks, brute force, exploitation, cipher enumeration, or technology fingerprinting exist yet.
+Phases 0 through 8 are complete. RXScan now performs real bounded host discovery, native TCP connect port scanning, native service/protocol identification, and bounded HTTP/1.1 web observations through the existing scheduler, with explicit host/port/service states, Decision Engine host→port, open-port→service, and service→web proposals, and evidence throughout. No UDP scanning, web crawling, directory/content discovery, endpoint/API enumeration, fuzzing, DNS enumeration, vulnerability checks, brute force, exploitation, cipher enumeration, or technology fingerprinting exist yet.
 
 | Area | Current state | Next |
 | --- | --- | --- |
-| Native Rust core | Foundation + data model + control plane + host + TCP + service discovery established (rustls/x509-parser for TLS observation) | Phase 8 web engine |
-| Target, scope, CLI, config, plan | Implemented/tested; level/goal/budget-aware plus discovery/TCP/service policy | Phase 8 executors |
-| Events/assets/findings | Implemented/tested; host + port + service producers emit real typed events/evidence/assets/findings (per-open, per-classified-service) | Phase 8 real producers |
+| Native Rust core | Foundation + data model + control plane + host + TCP + service + web discovery established (rustls/x509-parser for TLS observation) | Phase 9 crawling/content |
+| Target, scope, CLI, config, plan | Implemented/tested; level/goal/budget-aware plus discovery/TCP/service/web policy | Phase 9 executors |
+| Events/assets/findings | Implemented/tested; host + port + service + web producers emit real typed events/evidence/assets/findings (per-open, per-service, per-URL) | Phase 9 real producers |
 | Scheduler/speed/budgets | Implemented, wired to binary, tested; auto is non-adaptive baseline; `max_hosts` bounds CIDR; follow-ups best-effort (dup/scope/budget skip) | Phase 4.1 adaptive governor (optional) |
-| Plan→task lowering | Deterministic, scope-checked, deduped, ONE port task per target (never 65k), CIDR host expansion bounded; service tasks proposed per open port by the engine | Phase 8 dependency expansion |
-| JSONL output | Typed, versioned, provenanced, bounded, tested; includes discovery + scan + service assets/events/evidence/findings; terminal shows service table | Phase 20+ reporting |
-| Network and web modules | Host discovery + TCP port scanning + service probing (SSH/HTTP/TLS/HTTPS/FTP/SMTP/Redis/MySQL/PostgreSQL/generic; ARP/ND deferred); no UDP/crawling/fuzzing/DNS/checks/fingerprint engine | Phase 8 onward |
-| CI/fixtures/benchmark discipline | Established; Phase 5 + 6 + 7 baselines recorded | Add executable fixtures per module |
+| Plan→task lowering | Deterministic, scope-checked, deduped, ONE port task per target (never 65k), CIDR host expansion bounded; service/web tasks proposed per open port/service by the engine | Phase 9 dependency expansion |
+| JSONL output | Typed, versioned, provenanced, bounded, tested; includes discovery + scan + service + web assets/events/evidence/findings; terminal shows service table | Phase 20+ reporting |
+| Network and web modules | Host discovery + TCP port scanning + service probing + bounded HTTP/1.1 web observations (single exchanges, bounded redirects, no crawling); ARP/ND deferred; no UDP/crawling/content-discovery/fuzzing/DNS/checks/fingerprint engine | Phase 9 onward |
+| CI/fixtures/benchmark discipline | Established; Phase 5 + 6 + 7 + 8 baselines recorded | Add executable fixtures per module |
 
-No performance or capability superiority is claimed. No scanning functionality is claimed beyond bounded host discovery, TCP connect port scanning, and safe service identification plus control-plane execution of scaffold tasks.
+No performance or capability superiority is claimed. No scanning functionality is claimed beyond bounded host discovery, TCP connect port scanning, safe service identification, and bounded single-exchange web observations plus control-plane execution of scaffold tasks.
 
 ## Phase 0–1 verification
 
@@ -77,3 +77,9 @@ Verified locally on 2026-09-12 (see validation results in the Phase 4 completion
 - `cargo fmt --check`, `cargo check`, `cargo test` (unit + phase1–7 suites, 161 tests), `cargo clippy --all-targets --all-features -- -D warnings`, `git diff --check` — all pass; Phase 0–6 suites remain green.
 - `cargo run -- 127.0.0.1 --ports 22,80 --level 4` against local SSH/HTTP fixtures — human `PORT/SERVICE/PRODUCT` table shows classified services with observed product hints; JSONL carries service assets, `ServiceIdentified` events with `Runs` relationships, certificate evidence, and per-service findings.
 - `cargo run --example phase7_bench` — controlled local baseline recorded in `docs/benchmark-results/phase7-service-baseline.md` (~480 identifications/sec, first ~2ms, bounded cancel/timeout; no Internet, no competitor claims).
+
+## Phase 8 verification
+
+- `cargo fmt --check`, `cargo check`, `cargo test` (unit + phase1–8 suites, 192 tests), `cargo clippy --all-targets --all-features -- -D warnings`, `git diff --check` — all pass; Phase 0–7 suites remain green.
+- `cargo run -- 127.0.0.1 --ports 18888 --level 4` against a local HTTP fixture — human table shows the service row; `--output` JSONL carries endpoint assets, `EndpointObserved`/`RedirectObserved`/`WebProbeCompleted` events, per-URL evidence with headers/cookies/title, certificate assets for HTTPS, and per-URL findings.
+- `cargo run --example phase8_bench` — controlled local baseline recorded in `docs/benchmark-results/phase8-web-baseline.md` (~475 req/sec, first ~2ms, capped oversized transfers, 3-hop walk ~6ms, bounded silent waits, deterministic; no Internet, no httpx/Nuclei claims).

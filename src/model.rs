@@ -447,6 +447,13 @@ pub enum EventKind {
     TlsObserved,
     HttpObserved,
     ServiceProbeCompleted,
+    // Phase 8 web-foundation lifecycle. Per-URL observations stay in JSONL
+    // (quiet on the terminal); redirects are first-class events so chains,
+    // loops, caps, and out-of-scope stops are all auditable.
+    WebProbeStarted,
+    WebProbeCompleted,
+    RedirectObserved,
+    EndpointObserved,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Event {

@@ -11,8 +11,9 @@ Each phase requires tests, benchmark/regression evidence where applicable, docum
 | 4 | Control-plane completion: plan→task lowering, level/speed policy, budgets, scheduler bootstrap, scaffold executors, JSONL output | Complete |
 | 5 | Host Discovery Engine: real bounded ICMP echo + TCP reachability via scheduler, host-state model, discovery policy, CIDR bounding, evidence/events, JSONL | Complete |
 | 6 | Native TCP Port Discovery Engine: TCP connect scanning via scheduler, port-state model, bounded tasks, Decision Engine V1, open-port JSONL + summary | Complete |
-| 7 | Service Intelligence + Native Protocol Probing: SSH/HTTP/TLS/HTTPS/FTP/SMTP/Redis/MySQL/PostgreSQL/generic probes via scheduler, service assets, Decision Engine open-port→service, evidence-graded confidence | Complete (current) |
-| 8–10 | UDP, TLS cipher enumeration, HTTP crawling, technology fingerprint engine | Not implemented |
+| 7 | Service Intelligence + Native Protocol Probing: SSH/HTTP/TLS/HTTPS/FTP/SMTP/Redis/MySQL/PostgreSQL/generic probes via scheduler, service assets, Decision Engine open-port→service, evidence-graded confidence | Complete |
+| 8 | HTTP/TLS Web Foundation: bounded HTTP/1.1 observations, canonical URLs, bounded redirects, TLS/certificate evidence, Decision Engine service→web, no crawling | Complete (current) |
+| 9–10 | UDP, TLS cipher enumeration, technology fingerprint engine | Not implemented |
 | 11–15 | DNS, crawler, baseline, content, fuzzing | Not implemented |
 | 16–19 | Decision engine workflows, API workflows, checks, graph/correlation | Not implemented |
 | 20–24 | Outputs, resume/diff/projects, packs, benchmark lab, releases | Not implemented |
@@ -20,6 +21,8 @@ Each phase requires tests, benchmark/regression evidence where applicable, docum
 Phase 6 is the first real port-scanning engine (TCP connect only). No UDP scanning, SSH protocol enumeration, HTTP crawling, fuzzing, DNS enumeration, vulnerability checks, exploitation, or broad service fingerprinting exist yet (open means open; versions belong to Phase 7). Deeper network tasks still run as `Skipped` (`module unavailable`).
 
 Phase 7 takes open TCP ports and identifies the speaking service with native protocol probes (SSH/HTTP/TLS/HTTPS/FTP/SMTP/Redis/MySQL/PostgreSQL + passive generic) through the scheduler, with evidence-graded confidence and no authentication. No web crawling, directory discovery, fuzzing, DNS enumeration, UDP scanning, vulnerability checks, brute force, or exploitation exist yet.
+
+Phase 8 adds the HTTP/TLS web foundation: bounded HTTP/1.1 GET/HEAD observations (status/headers/cookies/title/body-sample/redirects), canonical URLs with stable IDs, bounded redirect chains with per-hop scope checks, and TLS/certificate evidence for HTTPS — all through the scheduler and Decision Engine. Still absent by design: crawling, recursive link following, robots/sitemap traversal, directory brute forcing, content discovery, endpoint/API enumeration, JavaScript extraction, parameter discovery, wordlists, fuzzing, cipher enumeration, vulnerability scanning, and exploitation.
 
 ## MVP v0.1 gate
 
@@ -97,3 +100,14 @@ TargetSpec, Scope Guard, ScanPlan, stable IDs/events, scheduler, speed/budgets, 
 - Stable service assets (`parent:service/label` identity, `asset_service_*` IDs) hang under port assets via `Runs` relationships; certificates are child assets with fingerprint identity.
 - JSONL carries service assets/events/evidence/findings with provenance; the human table shows `PORT/SERVICE/PRODUCT` rows with `-` for absent products and no guessed versions.
 - Tests are deterministic/local-only (fake banner servers, local HTTP, in-test rustls+rcgen TLS fixtures, silent/oversized/delayed fixtures); benchmark baseline recorded in `docs/benchmark-results/phase7-service-baseline.md` with no Internet traffic and no competitor claims; all Phase 0–6 suites remain green.
+
+## Phase 8 exit criteria
+
+- Bounded HTTP/1.1 probing is real (native GET/HEAD over plaintext and TLS, correct Host headers incl. IPv6 brackets and non-default ports, explicit ports honored); IPv4/IPv6/hostnames/custom ports work.
+- Canonical URL model fills defaults, brackets IPv6, preserves path case/query, resolves relative redirects, and yields stable collision-free endpoint IDs.
+- Redirects follow a deterministic policy cap (L1–L2 record-only, L3 ≤2, L4–L5 ≤4, hard 5) with per-hop scope checks, loop detection, malformed-Location safety, and full chain evidence; out-of-scope destinations are recorded, never contacted.
+- Responses are strictly bounded (≤64 headers, 16KiB headers/body halves, ≤8 cookies/256B values, read/connect timeouts, task deadlines, cancellation, evidence budget) with truncation flags; malformed input is evidence, never panic or guess.
+- Web assets (endpoint children of service/port assets), per-URL evidence, per-URL findings, certificate assets, and typed events (`WebProbeStarted/Completed`, `RedirectObserved`, `EndpointObserved` plus reused `HttpObserved`/`TlsObserved`) flow into the existing versioned JSONL envelope with provenance and relationships.
+- Decision Engine proposes bounded WebProbe work for confirmed HTTP/HTTPS services only (scope/policy/budget/dedup enforced); `HttpProbe` completions propose nothing — no crawling follow-ups.
+- `--level` sets breadth (HEAD vs GET, redirect depth, body detail), never pressure; `--speed` sets timeouts/concurrency only, never classification (same bytes classify identically at any speed).
+- Tests are deterministic/local-only (scripted HTTP, in-test rustls+rcgen HTTPS, silent/oversized/delayed/malformed/loop/cap/canary fixtures); benchmark baseline recorded in `docs/benchmark-results/phase8-web-baseline.md` with no Internet traffic and no httpx/Nuclei claims; all Phase 0–7 suites remain green.

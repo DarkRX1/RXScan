@@ -1,4 +1,4 @@
-//! Phase 7 scaffold + real modules.
+//! Phase 8 scaffold + real modules.
 //!
 //! * `HostDiscovery` runs the real bounded `HostDiscoveryModule` (native ICMP
 //!   echo + TCP reachability, no shell `ping`). See `host_discovery.rs`.
@@ -9,14 +9,17 @@
 //!   protocol handshakes — SSH/HTTP/TLS/FTP/SMTP/Redis/MySQL/PostgreSQL plus
 //!   a passive generic banner read; no authentication, no destructive
 //!   commands). See `service_probe.rs`.
+//! * `HttpProbe` runs the real bounded `WebProbeModule` (native HTTP/1.1
+//!   single exchanges, canonical URLs, bounded redirects with per-hop scope
+//!   checks, TLS evidence reuse; no crawling). See `web_probe.rs`.
 //! * Control validation remains an honest scaffold.
 //!
 //! * [`ControlValidateModule`] (`rxscan.control.validate`): per-target
 //!   control validation. Always registered.
 //!
-//! All deeper intents (`HttpProbe`, `TlsProbe`, `DnsProbe`, `Fingerprint`,
+//! All deeper intents (`TlsProbe`, `DnsProbe`, `Fingerprint`,
 //! `ContentDiscovery`, `Crawl`, `Fuzz`, `rxscan.udp.intent`) have NO
-//! registered module in Phase 7 and run as `Skipped` (`module unavailable`).
+//! registered module in Phase 8 and run as `Skipped` (`module unavailable`).
 //! That is intentional honesty, visible in `--explain` and runtime output.
 //!
 //! Every scaffold module is cooperative: it checks cancellation every

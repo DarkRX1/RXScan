@@ -13,9 +13,10 @@
 //! * Level 5: + deepest eligible modules allowed by the selected goal
 //!   (fingerprints, content/crawl/fuzz where the goal permits).
 //!
-//! Because HTTP/TLS/DNS network modules do not exist yet, Phase 7 only
-//! determines eligibility for the remaining intents. `ServiceProbe` tasks
-//! execute for real (see `service_probe.rs`); other network-intent tasks are
+//! Because TLS/DNS network modules do not exist yet, Phase 8 only
+//! determines eligibility for the remaining intents. `ServiceProbe` and
+//! `HttpProbe` tasks execute for real (see `service_probe.rs` and
+//! `web_probe.rs`); other network-intent tasks are
 //! part of the task graph (intended work) but execute as `Skipped`
 //! (`module unavailable`) unless a real module is registered for that kind.
 //! No fake discoveries are ever reported.
