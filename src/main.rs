@@ -26,9 +26,9 @@ fn main() {
             } else {
                 println!("{}", run::human_summary(&report));
                 if report.output_path.is_none() {
-                    println!("Run with --explain to inspect the effective Phase 5 plan.");
+                    println!("Run with --explain to inspect the effective Phase 6 plan.");
                     println!(
-                        "Host discovery uses bounded native ICMP/TCP; use --output <path> for typed JSONL."
+                        "TCP port scanning uses bounded native connects; use --output <path> for typed JSONL."
                     );
                 }
             }

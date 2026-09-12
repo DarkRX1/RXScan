@@ -9,13 +9,14 @@ Each phase requires tests, benchmark/regression evidence where applicable, docum
 | 2 | Events, findings, stable asset IDs, relationships | Complete |
 | 3 | Reactive scheduler, queues, cancellation, backpressure | Complete |
 | 4 | Control-plane completion: plan→task lowering, level/speed policy, budgets, scheduler bootstrap, scaffold executors, JSONL output | Complete |
-| 5 | Host Discovery Engine: real bounded ICMP echo + TCP reachability via scheduler, host-state model, discovery policy, CIDR bounding, evidence/events, JSONL | Complete (current) |
-| 6–10 | TCP port scanning, UDP, probes, TLS/fingerprints, HTTP | Not implemented |
+| 5 | Host Discovery Engine: real bounded ICMP echo + TCP reachability via scheduler, host-state model, discovery policy, CIDR bounding, evidence/events, JSONL | Complete |
+| 6 | Native TCP Port Discovery Engine: TCP connect scanning via scheduler, port-state model, bounded tasks, Decision Engine V1, open-port JSONL + summary | Complete (current) |
+| 7–10 | UDP, probes, TLS/fingerprints, HTTP/service fingerprinting | Not implemented |
 | 11–15 | DNS, crawler, baseline, content, fuzzing | Not implemented |
-| 16–19 | Decision engine, API workflows, checks, graph/correlation | Not implemented |
+| 16–19 | Decision engine workflows, API workflows, checks, graph/correlation | Not implemented |
 | 20–24 | Outputs, resume/diff/projects, packs, benchmark lab, releases | Not implemented |
 
-Phase 5 is the first real network capability (host discovery only). No TCP port scanning, UDP port scanning, HTTP, SSH service probing, crawling, fuzzing, DNS enumeration, vulnerability checks, or exploitation exist yet. Deeper network tasks still run as `Skipped` (`module unavailable`); host-discovery tasks run real bounded ICMP/TCP probing without fake discoveries.
+Phase 6 is the first real port-scanning engine (TCP connect only). No UDP scanning, SSH protocol enumeration, HTTP crawling, fuzzing, DNS enumeration, vulnerability checks, exploitation, or broad service fingerprinting exist yet (open means open; versions belong to Phase 7). Deeper network tasks still run as `Skipped` (`module unavailable`).
 
 ## MVP v0.1 gate
 
@@ -61,3 +62,17 @@ TargetSpec, Scope Guard, ScanPlan, stable IDs/events, scheduler, speed/budgets, 
 - Typed events (`DiscoveryStarted`, `ProbeAttempted/Succeeded/TimedOut/Unavailable`, `HostStateConcluded`, `HostDiscovered`) plus evidence explain every Alive/Unreachable/Unknown conclusion with confidence, techniques, latency, provenance, and timestamps in the existing JSONL envelope.
 - CLI preserved (`TARGET --ping`, `TARGET --discover`, `CIDR --discover`); advanced tuning via config (`max_hosts`, `discovery_ports`); no Phase 6 port scanner claimed.
 - Tests are deterministic/local-only (loopback, temporary listeners, fakes); benchmark baseline recorded in `docs/benchmark-results/phase5-host-discovery-baseline.md` with no Internet traffic and no superiority claims.
+
+## Phase 6 exit criteria
+
+- Native TCP connect scanning is real (non-blocking `poll(2)` window, no shell/external scanner, no raw SYN, no thread per port); single/explicit/range/common/`--all-ports` plus IPv4/IPv6 work.
+- Port states are explicit (`Open`/`Closed`/`FilteredOrTimedOut`/`Error`): success vs refused/reset vs timeout vs unreachable/permission vs cancel stay distinct with evidence.
+- ONE `PortDiscovery` scheduler task per target carries the full selection (`ports=common|explicit|all`); the module scans internally with a bounded window (16–128, hard 256), sorted deterministic output, truncated per-port detail for huge scans.
+- Canonical selection (`common`/`explicit`/`ranges`/`all`) normalizes/dedupes/sorts and rejects port 0, >65535, reversed/malformed input; overlaps scan once. Versioned common profile (`COMMON_PORTS_V1`) is centralized for future packs.
+- Host→port flow runs through Decision Engine V1 (Alive → propose, Unknown → explicit-or-level≥3, Unreachable → skip; scope pre-check; dedup-shaped proposals; best-effort admission); modules never self-schedule; ICMP failure never stops scanning by itself.
+- `--speed` controls concurrency/pacing/timeouts/retries only (never the set); `--level` controls automatic breadth only (L1 minimal … L5 broad ≤32); explicit `--ports`/`--all-ports` override level.
+- Concurrency/resource safety holds (bounded window, FD cleanup/backoff, task deadline truncation, prompt cancel); timeouts derive from speed with hard limits; retries only for filtered (≤1), never for refused/cancel.
+- Scope cannot be bypassed (lowering/admission/dispatch/module checks; derived hostname IPs filtered; max-host respected); port assets are stable children (`parent:tcp/port`, no cross-parent/proto collisions).
+- Typed port events (`PortScanStarted/ProbeAttempted/Open/Closed/TimedOut/ProbeError/Completed`), per-open evidence/findings/assets, and a scan summary flow into the existing JSONL envelope; terminal output prioritizes opens (`HOST`/`PORT STATE` table) and stays quiet on closed detail.
+- Service boundary holds: open means open, no version claims (checked by test).
+- Tests are deterministic/local-only (listeners, closed loopback, fakes, synthetic ranges); benchmark baseline recorded in `docs/benchmark-results/phase6-tcp-baseline.md` with no Internet traffic and no Nmap/RustScan claims; all previous suites remain green.

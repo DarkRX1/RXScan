@@ -1,4 +1,4 @@
-//! Phase 5 Plan -> Task lowering: pure deterministic translation.
+//! Phase 6 Plan -> Task lowering: pure deterministic translation.
 //!
 //! `lower_plan_to_tasks` converts a validated [`ScanPlan`] into initial
 //! executable [`Task`]s without any network execution. The task graph
@@ -12,7 +12,9 @@
 //! * level + goal policy enforcement via [`crate::level`];
 //! * module eligibility (only eligible kinds are emitted);
 //! * port-selection propagation via deterministic `params`
-//!   (`ports=common|explicit|all`, never expanding 65k tasks);
+//!   (`ports=common|explicit|all`, never expanding 65k tasks: ONE
+//!   `PortDiscovery` task per target carries the full selection; the TCP
+//!   module scans internally with a bounded window);
 //! * CIDR host expansion is bounded: `HostDiscovery` tasks expand a CIDR to
 //!   at most `max_hosts` scope-permitted addresses in deterministic order
 //!   (lazy `hosts()` iteration, never materializing massive ranges);
@@ -43,7 +45,7 @@ pub enum LowerError {
     NoTargets,
 }
 
-const LOWERING_MODULE_VERSION: &str = "5.0.0";
+const LOWERING_MODULE_VERSION: &str = "6.0.0";
 /// Deterministic timestamp for lowered tasks so the same plan always yields
 /// the same task graph byte-for-byte. Runtime `SchedulerEvent`s still carry
 /// real wall-clock timestamps.
@@ -253,6 +255,9 @@ fn params_for_kind(
                     .map(u16::to_string)
                     .collect::<Vec<_>>()
                     .join(",");
+                // Truncate rendered list deterministically if huge; the full
+                // count plus a hash ride along so distinct giant selections
+                // keep distinct IDs (collision-safe truncation).
                 let rendered = if rendered.len() > 2048 {
                     format!("{}...(+{} more)", &rendered[..2048], ports.len())
                 } else {
@@ -260,6 +265,9 @@ fn params_for_kind(
                 };
                 params.insert("ports".to_owned(), format!("explicit:{rendered}"));
                 params.insert("port_count".to_owned(), ports.len().to_string());
+                if rendered.contains("...(+") {
+                    params.insert("ports_hash".to_owned(), ports_hash(ports));
+                }
             }
             TcpPortSelection::All => {
                 params.insert("ports".to_owned(), "all".to_owned());
@@ -397,6 +405,22 @@ fn module_name_for_kind(kind: &TaskKind) -> String {
         TaskKind::Fuzz => "rxscan.fuzz".to_owned(),
         TaskKind::Custom(name) => format!("rxscan.custom.{name}"),
     }
+}
+
+/// Short collision-safe hash of a full explicit port list (used only when the
+/// rendered `ports` param is truncated, so giant selections keep distinct IDs).
+fn ports_hash(ports: &[u16]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for port in ports {
+        hasher.update(port.to_be_bytes());
+    }
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(16);
+    for byte in digest.iter().take(8) {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
 }
 
 /// Distinct task-graph fingerprint (sorted IDs) for determinism tests.

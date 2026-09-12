@@ -1,19 +1,18 @@
-//! Phase 5 scaffold + real modules.
+//! Phase 6 scaffold + real modules.
 //!
 //! * `HostDiscovery` runs the real bounded `HostDiscoveryModule` (native ICMP
 //!   echo + TCP reachability, no shell `ping`). See `host_discovery.rs`.
-//! * Control validation and port-discovery intents remain honest scaffolds:
-//!   they exercise scheduler/budget/backpressure/cancellation/JSONL without
-//!   pretending Phase 6 port scanning exists.
+//! * `PortDiscovery` runs the real bounded `TcpDiscoveryModule` (native TCP
+//!   connect scanning, one task per target with a bounded internal window,
+//!   no thread per port). See `tcp_discovery.rs`.
+//! * Control validation remains an honest scaffold.
 //!
 //! * [`ControlValidateModule`] (`rxscan.control.validate`): per-target
 //!   control validation. Always registered.
-//! * [`PortIntentModule`] (`PortDiscovery`): port-discovery *intent* holder.
-//!   Returns empty output (no fake ports; Phase 6 owns real scanning).
 //!
 //! All deeper intents (`ServiceProbe`, `HttpProbe`, `TlsProbe`, `DnsProbe`,
-//! `Fingerprint`, `Crawl`, `ContentDiscovery`, `Fuzz`, `rxscan.udp.intent`)
-//! have NO registered module in Phase 5 and run as `Skipped`
+//! `Fingerprint`, `ContentDiscovery`, `Crawl`, `Fuzz`, `rxscan.udp.intent`)
+//! have NO registered module in Phase 6 and run as `Skipped`
 //! (`module unavailable`). That is intentional honesty, visible in
 //! `--explain` and runtime output.
 //!

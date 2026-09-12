@@ -847,12 +847,17 @@ fn large_cidr_stays_bounded_by_max_hosts() {
         .filter(|task| task.kind == TaskKind::HostDiscovery)
         .collect();
     assert_eq!(host_tasks.len(), 4);
-    // First addresses in deterministic order.
-    let first: IpAddr = match &host_tasks[0].scope_target {
-        TaskScopeTarget::Ip(ip) => *ip,
-        _ => panic!("expected IP"),
-    };
-    assert_eq!(first, "10.0.0.1".parse::<IpAddr>().unwrap());
+    // Deterministic bounded set: sorted hosts start at the range base.
+    // (Task order is by canonical ID, so sort addresses before asserting.)
+    let mut hosts: Vec<IpAddr> = host_tasks
+        .iter()
+        .map(|task| match &task.scope_target {
+            TaskScopeTarget::Ip(ip) => *ip,
+            _ => panic!("expected IP"),
+        })
+        .collect();
+    hosts.sort();
+    assert_eq!(hosts[0], "10.0.0.1".parse::<IpAddr>().unwrap());
 }
 
 #[test]

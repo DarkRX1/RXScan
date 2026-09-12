@@ -1,6 +1,6 @@
 # Configuration
 
-Phase 1–5 support explicit TOML layers:
+Phase 1–6 support explicit TOML layers:
 
 ```text
 built-in defaults < --config GLOBAL.toml < --project-config PROJECT.toml < CLI
@@ -47,6 +47,15 @@ Invalid values fail fast (exit 2): zero/negative-equivalent, values exceeding ha
 
 - `--output <path>`: write typed JSONL to a file (created/truncated). Filesystem errors are clean errors (exit 1), never panics. Output is bounded by `max_evidence_bytes`. Host-discovery results (assets, `DiscoveryStarted`/`ProbeAttempted`/`ProbeSucceeded`/`ProbeTimedOut`/`ProbeUnavailable`/`HostStateConcluded`/`HostDiscovered` events, evidence with target/address/state/confidence/techniques/latency/evidence/provenance/timestamp) flow into the same envelope.
 - `--format jsonl`: output format selector. Only `jsonl` is supported; any other value fails fast. Without `--output`, `--format jsonl` writes JSONL to stdout (human summary goes to stderr to keep stdout pure JSONL).
+
+## Phase 6 TCP port policy
+
+- `--ports 22,80,443` / `--ports 1-1024` selects explicit lists/ranges (normalized, deduped, sorted; overlaps scan once). `--all-ports` scans 1–65,535 as ONE task (never 65k tasks). Invalid input (port 0, >65535, reversed/malformed) fails fast (exit 2).
+- No `--ports`/`--all-ports` means automatic `common` selection by level (see `src/ports.rs`, profile `COMMON_PORTS_V1`): L1 `[80,443]`, L2 `[22,80,443,8080,8443]`, L3 standard 10 ports, L4 full 20-port profile, L5 broad 32 ports. Explicit selection always overrides level breadth.
+- `--speed` never changes the port set (only concurrency 16–128/hard 256, pacing, per-port timeout 200–3000ms, filtered-only retry ≤1). Speed 100 stays bounded.
+- Port states: `open` (connect success), `closed` (refused/reset), `filtered_or_timed_out` (timeout; never misclassified as closed), `error` (unreachable/permission/resource). Retries only for filtered (≤1); refused/open never retried; cancel never retried.
+- Decision Engine V1: Alive → propose port scan (when port-eligible); Unknown → propose when explicit ports or level ≥3 (ICMP may be blocked); Unreachable → skip. Modules never self-schedule.
+- Output: terminal prioritizes opens (`HOST`/`PORT STATE` table); JSONL carries per-open assets/evidence/findings plus a scan summary (huge scans emit opens + summary, not per-closed-port floods). Open means open — no service/version claims (Phase 7).
 
 ## Level and speed
 

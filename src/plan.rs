@@ -264,9 +264,13 @@ impl ScanPlan {
             "Host discovery policy: {}.",
             discovery_policy.describe()
         ));
+        let tcp_policy =
+            crate::tcp_discovery::TcpScanPolicy::new(level, goal, tcp_ports.clone(), speed);
+        reasons.push(format!("TCP port policy: {}.", tcp_policy.describe()));
         let mut skipped = level_skipped;
         skipped.push(
-            "Phase 5 host discovery uses real bounded ICMP echo (unprivileged ping sockets; structured unavailable when privileges are missing) and TCP reachability; ARP/neighbor discovery are deferred and never faked.".to_owned(),
+            "Phase 6 runs real bounded host discovery plus native TCP connect port scanning (one task per target, bounded internal window); ARP/ND, UDP, HTTP/TLS/DNS, fuzzing, and service fingerprinting remain deferred."
+                .to_owned(),
         );
         Ok(Self {
             targets,
@@ -329,7 +333,7 @@ impl ScanPlan {
                 .map(|governor| governor.retry_limit())
                 .unwrap_or(0);
         format!(
-            "RXScan Phase 5 plan\ngoal: {:?}\nlevel: {}\nspeed: {}\nprofile: {}\ndiscovery: {}\nspeed policy: {governor}\neffective concurrency: {effective_concurrency}\nretry limit: {retry_limit}\ntask budget: {}\nretry budget: {}\nevidence budget (bytes): {}\nexecution timeout (ms): {}\nhost budget: {}\nqueue capacity: {}\ntargets:\n{targets}\nmodules:\n{modules}\ntcp ports: {:?}\ndiscovery policy: {}\nscope: {} allow rule(s), {} exclusion(s)\nwhy:\n{reasons}\nskipped:\n{skipped}",
+            "RXScan Phase 6 plan\ngoal: {:?}\nlevel: {}\nspeed: {}\nprofile: {}\ndiscovery: {}\nspeed policy: {governor}\neffective concurrency: {effective_concurrency}\nretry limit: {retry_limit}\ntask budget: {}\nretry budget: {}\nevidence budget (bytes): {}\nexecution timeout (ms): {}\nhost budget: {}\nqueue capacity: {}\ntargets:\n{targets}\nmodules:\n{modules}\ntcp ports: {:?}\ndiscovery policy: {}\ntcp policy: {}\nscope: {} allow rule(s), {} exclusion(s)\nwhy:\n{reasons}\nskipped:\n{skipped}",
             self.goal,
             self.level,
             self.speed,
@@ -347,6 +351,13 @@ impl ScanPlan {
                 self.discovery_mode,
                 self.speed,
                 self.discovery_ports.as_deref(),
+            )
+            .describe(),
+            crate::tcp_discovery::TcpScanPolicy::new(
+                self.level,
+                self.goal,
+                self.tcp_ports.clone(),
+                self.speed,
             )
             .describe(),
             self.scope.allowed.len(),

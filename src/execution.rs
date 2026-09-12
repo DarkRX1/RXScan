@@ -1333,8 +1333,24 @@ impl Scheduler {
                 let followups = self
                     .decision_engine
                     .follow_up_tasks(&task_snapshot, &output);
+                // Phase 6: follow-up admission is best-effort and bounded.
+                // Duplicates (same canonical ID as an initial task),
+                // out-of-scope proposals, and budget-exhausted proposals are
+                // skipped without aborting the run; initial tasks still fail
+                // fast via `add_task` in `run.rs`. This gives duplicate
+                // proposal prevention and scope/budget enforcement for free.
                 for task in followups {
-                    self.add_task(task)?;
+                    match self.add_task(task) {
+                        Ok(_) => {}
+                        Err(
+                            SchedulerError::DuplicateTask
+                            | SchedulerError::OutOfScope
+                            | SchedulerError::BudgetExhausted(_)
+                            | SchedulerError::UnknownDependency(_)
+                            | SchedulerError::QueueSaturated,
+                        ) => {}
+                        Err(error) => return Err(error),
+                    }
                 }
             }
             Err(ModuleError::Cancelled) => {

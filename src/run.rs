@@ -1,13 +1,15 @@
-//! Phase 5 runtime bootstrap: Target -> Scope -> ScanPlan -> Tasks ->
+//! Phase 6 runtime bootstrap: Target -> Scope -> ScanPlan -> Tasks ->
 //! Reactive Scheduler <-> Speed Governor <-> Budgets <-> Backpressure ->
-//! HostDiscovery Module -> Typed Events / Evidence -> Decision Engine
-//! boundary -> JSONL Output.
+//! HostDiscovery + TcpDiscovery Modules -> Typed Events / Evidence / Assets /
+//! Findings -> Decision Engine V1 -> JSONL Output + human open-port summary.
 //!
-//! Real bounded host-discovery traffic occurs via `HostDiscoveryModule`
-//! (native ICMP echo + TCP reachability, no shell `ping`). Deeper intents
-//! (port scanning, UDP, HTTP, TLS, DNS, fuzzing) still run as `Skipped`
-//! (`module unavailable`). The Decision Engine boundary is preserved
-//! (`NoFollowUps` in Phase 5; follow-up port expansion belongs to Phase 6).
+//! Real bounded discovery: native ICMP echo + TCP reachability (Phase 5) and
+//! native TCP connect port scanning (Phase 6, one task per target with a
+//! bounded internal window, no thread per port). Deeper intents (UDP, HTTP,
+//! TLS, DNS, fuzzing, service fingerprinting) still run as `Skipped`
+//! (`module unavailable`). The Decision Engine boundary is live: host facts
+//! propose scoped port tasks admitted via Scope Guard, policy, budgets, and
+//! scheduler dedup.
 
 use std::sync::Arc;
 
@@ -15,15 +17,17 @@ use thiserror::Error;
 
 use crate::{
     cli::Cli,
+    decision::TcpDecisionEngine,
     discovery::HostDiscoveryPolicy,
     execution::{
         BudgetLimits, PolicyScopeGuard, Scheduler, SchedulerReport, SpeedGovernor, VecEventSink,
     },
     host_discovery::HostDiscoveryModule,
     lowering::{LowerError, lower_plan_to_tasks},
-    modules::{phase5_control_modules, port_intent_module},
+    modules::phase5_control_modules,
     output::{OutputError, create_file_writer},
     plan::{PlanError, ScanPlan},
+    tcp_discovery::TcpScanPolicy,
 };
 
 #[derive(Debug, Error)]
@@ -58,14 +62,18 @@ pub struct RunReport {
     pub scheduler_report: SchedulerReport,
     pub jsonl_bytes: u64,
     pub output_path: Option<String>,
+    /// Human open-port table (prioritizes opens; empty when none observed).
+    /// Kept in the report so the binary prints opens without re-reading JSONL.
+    pub open_ports_summary: String,
 }
 
-/// Execute the full Phase 5 control + discovery plane from CLI.
+/// Execute the full Phase 6 discovery plane from CLI.
 ///
-/// Steps: compile plan -> scope guard -> lower tasks (bounded CIDR) -> speed
-/// governor -> budgets -> scheduler -> register HostDiscovery + control/port
-/// scaffolds -> run -> JSONL output (scheduler events + discovery assets,
-/// events, evidence).
+/// Steps: compile plan -> scope guard -> lower tasks (bounded CIDR, one port
+/// task per target) -> speed governor -> budgets -> scheduler -> register
+/// HostDiscovery + TcpDiscovery + control scaffolds -> Decision Engine V1 ->
+/// run -> JSONL output (scheduler events + discovery/scan assets, events,
+/// evidence, findings) + human open-port summary.
 pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
     let output_path = cli.output.clone();
     let format = cli.format.clone();
@@ -78,6 +86,7 @@ pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
             scheduler_report: SchedulerReport::default(),
             jsonl_bytes: 0,
             output_path: None,
+            open_ports_summary: String::new(),
         });
     }
     let tasks = lower_plan_to_tasks(&plan)?;
@@ -95,7 +104,7 @@ pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
         guard.clone(),
         sink.clone(),
     )?;
-    // Centralized discovery policy (level breadth + speed pressure).
+    // Centralized policies (level breadth + speed pressure).
     let discovery_policy = HostDiscoveryPolicy::for_level(
         plan.level,
         plan.discovery_mode,
@@ -106,16 +115,28 @@ pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
         discovery_policy,
         guard.clone(),
     )));
+    let tcp_policy = TcpScanPolicy::new(plan.level, plan.goal, plan.tcp_ports.clone(), plan.speed);
+    scheduler.register_module(Arc::new(crate::tcp_discovery::TcpDiscoveryModule::new(
+        tcp_policy,
+        guard.clone(),
+    )));
     for module in phase5_control_modules() {
         scheduler.register_module(Arc::new(module));
     }
-    scheduler.register_module(Arc::new(port_intent_module()));
+    // Decision Engine V1: host facts propose scoped port tasks.
+    scheduler.set_decision_engine(Arc::new(TcpDecisionEngine::new(
+        guard.clone(),
+        plan.stable_id(),
+        plan.level,
+        plan.goal,
+        plan.tcp_ports.clone(),
+        plan.speed,
+    )));
     for task in tasks {
         // Lowering scope-checks; scheduler admission is the second
         // enforcement point; dispatch + module pre-execution re-check
-        // (defense in depth). Duplicates cannot occur (lowering dedupes)
-        // unless the DecisionEngine proposes them later (Phase 5 uses
-        // NoFollowUps, so none).
+        // (defense in depth). Duplicates cannot occur (lowering dedupes);
+        // engine proposals dedup gracefully via best-effort admission.
         scheduler.add_task(task)?;
     }
     let scheduler_report = scheduler.run()?;
@@ -149,6 +170,7 @@ pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
         scheduler_report,
         jsonl_bytes,
         output_path: output_path.map(|path| path.display().to_string()),
+        open_ports_summary: crate::tcp_discovery::human_open_ports_summary(&module_outputs),
     })
 }
 
@@ -180,14 +202,20 @@ fn write_outputs<W: std::io::Write>(
     Ok(())
 }
 
-/// Human summary for non-JSONL runs.
+/// Human summary for non-JSONL runs (prioritizes open ports, stays quiet on
+/// closed/filtered detail which lives in JSONL).
 pub fn human_summary(report: &RunReport) -> String {
+    human_summary_with_opens(report, None)
+}
+
+/// Human summary with open-port detail gathered from module outputs.
+pub fn human_summary_with_opens(
+    report: &RunReport,
+    module_outputs: Option<&[(crate::execution::TaskId, crate::execution::ModuleOutput)]>,
+) -> String {
     let scheduler = &report.scheduler_report;
-    // Count discovery states from the plan-agnostic scheduler report? The
-    // detailed Alive/Unknown/Unreachable breakdown lives in JSONL evidence;
-    // the human line stays quiet by design (no noisy per-probe output).
-    format!(
-        "RXScan Phase 5 run: {} task(s) | completed {} | failed {} | cancelled {} | timed out {} | skipped {} | JSONL bytes {}{}",
+    let header = format!(
+        "RXScan Phase 6 run: {} task(s) | completed {} | failed {} | cancelled {} | timed out {} | skipped {} | JSONL bytes {}{}",
         report.task_count,
         scheduler.completed.len(),
         scheduler.failed.len(),
@@ -199,5 +227,17 @@ pub fn human_summary(report: &RunReport) -> String {
             .output_path
             .as_deref()
             .map_or(String::new(), |path| format!(" | output {path}"))
-    )
+    );
+    // Prefer caller-supplied outputs; fall back to the report's own summary
+    // (populated by `execute` from scheduler outputs).
+    match module_outputs {
+        Some(outputs) if !outputs.is_empty() => {
+            let table = crate::tcp_discovery::human_open_ports_summary(outputs);
+            format!("{header}\n{table}")
+        }
+        _ if !report.open_ports_summary.is_empty() => {
+            format!("{header}\n{}", report.open_ports_summary)
+        }
+        _ => header,
+    }
 }

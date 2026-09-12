@@ -423,6 +423,16 @@ pub enum EventKind {
     ProbeTimedOut,
     ProbeUnavailable,
     HostStateConcluded,
+    // Phase 6 TCP port-discovery lifecycle. Per-port outcome events are
+    // emitted for small scans; huge scans emit opens + a completed summary
+    // so JSONL stays bounded. Terminal output shows opens only.
+    PortScanStarted,
+    PortProbeAttempted,
+    PortOpen,
+    PortClosed,
+    PortTimedOut,
+    PortProbeError,
+    PortScanCompleted,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Event {
