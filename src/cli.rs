@@ -69,8 +69,46 @@ pub struct Cli {
     /// Print the chosen plan, reasons, and M0 limitations.
     #[arg(long)]
     pub explain: bool,
+
+    /// Cap the number of admitted tasks (1..=100000). CLI wins over configs.
+    #[arg(long, value_name = "N", value_parser = parse_positive_u64)]
+    pub max_tasks: Option<u64>,
+
+    /// Cap the number of retries (1..=100000).
+    #[arg(long, value_name = "N", value_parser = parse_positive_u64)]
+    pub max_retries: Option<u64>,
+
+    /// Cap scheduler concurrency (1..=64).
+    #[arg(long, value_name = "N", value_parser = parse_positive_u64)]
+    pub max_concurrency: Option<u64>,
+
+    /// Cap total execution time (e.g. 60s, 5m, 1h, 500ms, or bare seconds).
+    #[arg(long, value_name = "DURATION")]
+    pub max_execution_time: Option<String>,
+
+    /// Cap retained evidence bytes (e.g. 67108864, 64MiB, 10MB).
+    #[arg(long, value_name = "BYTES")]
+    pub max_evidence_bytes: Option<String>,
+
+    /// Write typed JSONL output to a file (created/truncated; errors are reported, never panicked).
+    #[arg(long, value_name = "PATH")]
+    pub output: Option<std::path::PathBuf>,
+
+    /// Output format. Only `jsonl` is supported in Phase 4.
+    #[arg(long, value_name = "FORMAT")]
+    pub format: Option<String>,
 }
 
 fn parse_speed(value: &str) -> Result<SpeedSetting, String> {
     value.parse()
+}
+
+fn parse_positive_u64(value: &str) -> Result<u64, String> {
+    let parsed: u64 = value
+        .parse()
+        .map_err(|_| format!("expected a positive integer, got '{value}'"))?;
+    if parsed == 0 {
+        return Err(format!("value must be positive, got '{value}'"));
+    }
+    Ok(parsed)
 }

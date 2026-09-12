@@ -2,7 +2,12 @@
 pub mod cli;
 pub mod config;
 pub mod execution;
+pub mod level;
+pub mod lowering;
 pub mod model;
+pub mod modules;
+pub mod output;
 pub mod plan;
+pub mod run;
 pub mod scope;
 pub mod target;

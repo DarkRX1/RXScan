@@ -1,8 +1,28 @@
-//! Phase 3 execution control plane.
+//! Phase 3 execution control plane (hardened in Phase 4).
 //!
 //! This module deliberately contains no network or process execution. Modules
 //! supply bounded futures; the scheduler owns admission, ordering, limits,
 //! cancellation, retries, dependencies, and follow-up-task validation.
+//!
+//! # Phase 4 contracts
+//!
+//! * Task identity is canonical and deterministic (SHA-256 over all
+//!   execution-relevant fields). Two tasks that differ in kind, module,
+//!   scope target, params, priority, timeout, retry policy, asset,
+//!   parent, or dependencies MUST have different IDs.
+//! * Modules MUST observe [`ModuleContext::is_cancelled`] frequently
+//!   (at least every few milliseconds), use bounded I/O timeouts, and
+//!   return [`ModuleError::Cancelled`] promptly when cancellation is
+//!   requested. A timed-out task frees its scheduler slot immediately but
+//!   the orphaned worker thread remains bounded by the task budget; late
+//!   results from orphaned workers are discarded without double-counting.
+//! * The hand-rolled `block_on` executor is a cooperative parking executor
+//!   for Phase 4 stub/control modules only. Future real I/O modules must
+//!   not block a worker thread indefinitely; they must use bounded timeouts
+//!   and prompt cancellation checks.
+//! * Retry-delayed tasks never head-of-line block other ready tasks.
+//! * Queue saturation never aborts a run; excess tasks stay `Pending` until
+//!   the queue drains.
 
 use std::{
     cmp::Ordering,
@@ -24,7 +44,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    model::{AssetId, Event, Evidence, Finding, Provenance, ScanPlanId, Timestamp},
+    model::{AssetId, Event, Evidence, Finding, Provenance, SCHEMA_VERSION, ScanPlanId, Timestamp},
     plan::SpeedSetting,
     scope::ScopePolicy,
 };
@@ -170,6 +190,10 @@ pub struct Task {
     pub provenance: Provenance,
     pub budget: BudgetAccount,
     pub scope_target: TaskScopeTarget,
+    /// Deterministic task-specific parameters (e.g. `ports=all`,
+    /// `cidr=192.0.2.0/24`, `target=example.test`). Part of task identity.
+    #[serde(default)]
+    pub params: BTreeMap<String, String>,
 }
 impl Task {
     #[allow(clippy::too_many_arguments)]
@@ -187,6 +211,46 @@ impl Task {
         scope_target: TaskScopeTarget,
         scope_guard: &dyn ScopeGuard,
     ) -> Result<Self, SchedulerError> {
+        Self::new_with_params(
+            kind,
+            parent_task_id,
+            dependencies,
+            associated_asset_id,
+            scan_plan_id,
+            priority,
+            timeout,
+            retry_policy,
+            module_name,
+            provenance,
+            scope_target,
+            BTreeMap::new(),
+            scope_guard,
+        )
+    }
+
+    /// Full constructor including deterministic `params`.
+    ///
+    /// NOTE: mutating `dependencies`, `params`, `priority`, `timeout`,
+    /// `retry_policy`, `scope_target`, `kind`, `module_name`,
+    /// `associated_asset_id`, or `parent_task_id` after construction
+    /// invalidates the canonical ID. Prefer constructing tasks with their
+    /// final values (as `lower_plan_to_tasks` does).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_params(
+        kind: TaskKind,
+        parent_task_id: Option<TaskId>,
+        dependencies: Vec<TaskId>,
+        associated_asset_id: Option<AssetId>,
+        scan_plan_id: ScanPlanId,
+        priority: u8,
+        timeout: Duration,
+        retry_policy: RetryPolicy,
+        module_name: impl Into<String>,
+        provenance: Provenance,
+        scope_target: TaskScopeTarget,
+        params: BTreeMap<String, String>,
+        scope_guard: &dyn ScopeGuard,
+    ) -> Result<Self, SchedulerError> {
         let module_name = module_name.into();
         if module_name.trim().is_empty() || scan_plan_id.0.trim().is_empty() {
             return Err(SchedulerError::InvalidTask(
@@ -198,27 +262,32 @@ impl Task {
                 "timeout and maximum attempts must be positive",
             ));
         }
+        for (key, value) in &params {
+            if key.trim().is_empty() || key.contains('\0') || value.contains('\0') {
+                return Err(SchedulerError::InvalidTask("invalid task params"));
+            }
+        }
         if !scope_guard.permits(&scope_target) {
             return Err(SchedulerError::OutOfScope);
         }
         let created_at = provenance.timestamp;
-        let deadline = Some(Timestamp(
-            created_at.0.saturating_add(timeout.as_millis() as u64),
-        ));
-        let identity = format!(
-            "{}|{}|{}|{}|{}",
-            scan_plan_id.0,
-            module_name,
-            kind_key(&kind),
-            associated_asset_id.as_ref().map_or("", |id| id.0.as_str()),
-            dependencies
-                .iter()
-                .map(|id| id.0.as_str())
-                .collect::<Vec<_>>()
-                .join(",")
+        let timeout_ms = timeout.as_millis().min(u64::MAX as u128) as u64;
+        let deadline = Some(Timestamp(created_at.0.saturating_add(timeout_ms)));
+        let id = canonical_task_id(
+            &scan_plan_id,
+            &module_name,
+            &kind,
+            &associated_asset_id,
+            &parent_task_id,
+            &dependencies,
+            priority,
+            timeout_ms,
+            &retry_policy,
+            &scope_target,
+            &params,
         );
         Ok(Self {
-            id: TaskId(format!("task_{}", stable_hash(identity.as_bytes()))),
+            id,
             kind,
             parent_task_id,
             dependencies,
@@ -227,7 +296,7 @@ impl Task {
             priority,
             state: TaskState::Pending,
             created_at,
-            timeout_ms: timeout.as_millis().min(u64::MAX as u128) as u64,
+            timeout_ms,
             deadline,
             retry_policy,
             attempt: 0,
@@ -237,8 +306,55 @@ impl Task {
             provenance,
             budget: BudgetAccount::default(),
             scope_target,
+            params,
         })
     }
+}
+
+/// Canonical deterministic task identity.
+///
+/// All execution-relevant fields participate: plan, module, kind,
+/// asset, parent, dependencies (sorted), priority, timeout, retry
+/// policy, scope target, and params (BTreeMap order). Runtime-mutable
+/// fields (state, attempt counts, timestamps, budgets) do NOT
+/// participate so the same logical task keeps one ID across retries.
+///
+/// Serialization uses `serde_json` over a fixed-field struct with
+/// `BTreeMap` params, so it is independent of `HashMap` iteration
+/// order. The digest is SHA-256 (hex, `task_` prefixed), which is
+/// collision-resistant for untrusted inputs.
+#[allow(clippy::too_many_arguments)]
+fn canonical_task_id(
+    scan_plan_id: &ScanPlanId,
+    module_name: &str,
+    kind: &TaskKind,
+    associated_asset_id: &Option<AssetId>,
+    parent_task_id: &Option<TaskId>,
+    dependencies: &[TaskId],
+    priority: u8,
+    timeout_ms: u64,
+    retry_policy: &RetryPolicy,
+    scope_target: &TaskScopeTarget,
+    params: &BTreeMap<String, String>,
+) -> TaskId {
+    let mut sorted_deps: Vec<&str> = dependencies.iter().map(|id| id.0.as_str()).collect();
+    sorted_deps.sort_unstable();
+    let identity = serde_json::json!({
+        "plan": scan_plan_id.0,
+        "module": module_name,
+        "kind": kind_key(kind),
+        "asset": associated_asset_id.as_ref().map_or("", |id| id.0.as_str()),
+        "parent": parent_task_id.as_ref().map_or("", |id| id.0.as_str()),
+        "deps": sorted_deps,
+        "priority": priority,
+        "timeout_ms": timeout_ms,
+        "retry_max": retry_policy.max_attempts,
+        "retry_delay_ms": retry_policy.base_delay_ms,
+        "scope": serde_json::to_string(scope_target).unwrap_or_default(),
+        "params": params,
+    });
+    let bytes = serde_json::to_vec(&identity).expect("task identity serializes");
+    TaskId(format!("task_{}", sha256_hex(&bytes)))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -285,6 +401,9 @@ impl TaskQueue {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
     pub fn push(&mut self, task_id: TaskId, priority: u8) -> Result<(), SchedulerError> {
         if self.len() >= self.capacity {
             return Err(SchedulerError::QueueSaturated);
@@ -309,6 +428,14 @@ pub struct ModuleBudget {
     pub max_retries: u64,
 }
 
+/// Hard safety ceilings for Phase 4 configurable budgets.
+/// Values above these limits are rejected fail-fast.
+pub const MAX_TASKS_HARD_LIMIT: u64 = 100_000;
+pub const MAX_RETRIES_HARD_LIMIT: u64 = 100_000;
+pub const MAX_CONCURRENCY_HARD_LIMIT: usize = 64;
+pub const MAX_EXECUTION_TIME_MS_HARD_LIMIT: u64 = 3_600_000;
+pub const MAX_EVIDENCE_BYTES_HARD_LIMIT: u64 = 1024 * 1024 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BudgetLimits {
     pub max_tasks: u64,
@@ -329,6 +456,43 @@ impl Default for BudgetLimits {
             max_evidence_bytes: 64 * 1024 * 1024,
             per_module: BTreeMap::new(),
         }
+    }
+}
+impl BudgetLimits {
+    /// Fail-fast validation for user-supplied budgets.
+    pub fn validate(&self) -> Result<(), SchedulerError> {
+        if self.max_tasks == 0
+            || self.max_retries == 0
+            || self.max_concurrency == 0
+            || self.max_execution_time_ms == 0
+            || self.max_evidence_bytes == 0
+        {
+            return Err(SchedulerError::InvalidConfiguration(
+                "budgets must be positive (max tasks, retries, concurrency, execution time, evidence bytes)",
+            ));
+        }
+        if self.max_tasks > MAX_TASKS_HARD_LIMIT
+            || self.max_retries > MAX_RETRIES_HARD_LIMIT
+            || self.max_concurrency > MAX_CONCURRENCY_HARD_LIMIT
+            || self.max_execution_time_ms > MAX_EXECUTION_TIME_MS_HARD_LIMIT
+            || self.max_evidence_bytes > MAX_EVIDENCE_BYTES_HARD_LIMIT
+        {
+            return Err(SchedulerError::InvalidConfiguration(
+                "budget exceeds hard safety limit",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Deterministic bounded queue capacity derived from budgets.
+    /// Keeps the queue bounded without requiring another CLI flag.
+    pub fn queue_capacity(&self) -> usize {
+        // At least enough to keep workers fed, at most max_tasks, and
+        // always bounded by the hard task limit.
+        (self.max_concurrency.saturating_mul(16))
+            .max(self.max_concurrency.saturating_add(4))
+            .min(self.max_tasks.min(MAX_TASKS_HARD_LIMIT) as usize)
+            .max(1)
     }
 }
 
@@ -398,6 +562,15 @@ impl BudgetLedger {
     }
 }
 
+/// Phase 4 speed policy: `--speed` is execution pressure, independent of `--level`.
+///
+/// * `slow`/`balanced`/`fast` map to deterministic pressure values.
+/// * Numeric `0-100` interpolates pressure directly; 100 is still capped by
+///   `max_concurrency` and never means unlimited.
+/// * `auto` v1 is a conservative deterministic baseline identical to
+///   `balanced`. It is NOT adaptive in Phase 4; adaptive feedback based on
+///   runtime scheduler metrics is deferred to Phase 4.1+. `--explain`
+///   reports this honestly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpeedGovernor {
     setting: SpeedSetting,
@@ -434,8 +607,57 @@ impl SpeedGovernor {
             SpeedSetting::Named(crate::plan::NamedSpeed::Auto) => 2,
         }
     }
+    /// Default per-task timeout derived from speed. Faster pressure fails
+    /// faster; slower pressure waits longer. All values are bounded.
+    pub fn default_timeout(&self) -> Duration {
+        let millis = match self.setting {
+            SpeedSetting::Named(crate::plan::NamedSpeed::Slow) => 30_000,
+            SpeedSetting::Named(crate::plan::NamedSpeed::Balanced) => 15_000,
+            SpeedSetting::Named(crate::plan::NamedSpeed::Fast) => 10_000,
+            SpeedSetting::Named(crate::plan::NamedSpeed::Auto) => 15_000,
+            SpeedSetting::Numeric(value) => {
+                // 0 -> 30s, 100 -> 5s, linear interpolation, always bounded.
+                30_000u64.saturating_sub((25_000u64 * u64::from(value)) / 100)
+            }
+        };
+        Duration::from_millis(millis.max(1_000))
+    }
+    /// Default retry policy derived from speed.
+    pub fn default_retry_policy(&self) -> RetryPolicy {
+        RetryPolicy {
+            max_attempts: self.retry_limit().max(1),
+            base_delay_ms: match self.setting {
+                SpeedSetting::Named(crate::plan::NamedSpeed::Slow) => 200,
+                SpeedSetting::Named(crate::plan::NamedSpeed::Balanced) => 100,
+                SpeedSetting::Named(crate::plan::NamedSpeed::Fast) => 50,
+                SpeedSetting::Named(crate::plan::NamedSpeed::Auto) => 100,
+                SpeedSetting::Numeric(value) if value < 25 => 200,
+                SpeedSetting::Numeric(value) if value < 75 => 100,
+                SpeedSetting::Numeric(_) => 50,
+            },
+        }
+    }
     pub fn setting(&self) -> SpeedSetting {
         self.setting
+    }
+    /// Phase 4 auto is intentionally non-adaptive.
+    pub fn is_adaptive(&self) -> bool {
+        false
+    }
+    pub fn describe(&self) -> String {
+        let adaptive = if self.is_adaptive() {
+            "adaptive"
+        } else {
+            "deterministic baseline (non-adaptive in Phase 4; auto == balanced)"
+        };
+        format!(
+            "speed {} -> concurrency {}, retry_limit {}, default_timeout_ms {}, {}",
+            self.setting,
+            self.concurrency(),
+            self.retry_limit(),
+            self.default_timeout().as_millis(),
+            adaptive
+        )
     }
 }
 
@@ -457,12 +679,18 @@ pub enum SchedulerEventKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SchedulerEvent {
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u16,
     pub kind: SchedulerEventKind,
     pub task_id: TaskId,
     pub state: TaskState,
     pub timestamp: Timestamp,
     pub provenance: Provenance,
     pub reason: Option<String>,
+}
+
+fn default_schema_version() -> u16 {
+    SCHEMA_VERSION
 }
 
 pub trait EventSink: Send + Sync {
@@ -516,6 +744,9 @@ pub struct ModuleContext {
     cancellation: CancellationToken,
 }
 impl ModuleContext {
+    pub fn new(task: Task, cancellation: CancellationToken) -> Self {
+        Self { task, cancellation }
+    }
     pub fn is_cancelled(&self) -> bool {
         self.cancellation.is_cancelled()
     }
@@ -524,6 +755,17 @@ impl ModuleContext {
     }
 }
 
+/// A unit of executable work.
+///
+/// # Cancellation contract (mandatory for all future network modules)
+///
+/// * Check [`ModuleContext::is_cancelled`] at least every few milliseconds
+///   and after every bounded I/O wait.
+/// * Use bounded I/O timeouts (never block indefinitely on a socket/read).
+/// * On observed cancellation, return [`ModuleError::Cancelled`] promptly
+///   and drop/close sockets and other resources immediately.
+/// * Never spawn unbounded threads, processes, or follow-up tasks;
+///   follow-ups belong to the [`DecisionEngine`] and scheduler admission.
 pub trait Module: Send + Sync {
     fn kind(&self) -> TaskKind;
     fn execute(&self, context: ModuleContext) -> ModuleFuture;
@@ -742,14 +984,37 @@ impl Scheduler {
     }
     pub fn run(&mut self) -> Result<SchedulerReport, SchedulerError> {
         let (sender, receiver) = mpsc::channel();
+        // `active` counts scheduler slots in use (Running tasks not yet
+        // reaped as terminal). A timed-out task frees its slot immediately;
+        // its orphaned worker thread (if any) is bounded by the task budget
+        // and its late result is discarded without touching `active`.
         let mut active = 0usize;
         let mut report = SchedulerReport::default();
         loop {
             self.promote_ready_tasks()?;
+            // Dispatch loop: never let a retry-delayed task head-of-line
+            // block other ready tasks. Not-ready pops are stashed aside and
+            // requeued after the dispatch window.
+            let mut deferred: Vec<(TaskId, u8)> = Vec::new();
             while active < self.governor.concurrency() {
                 let Some(task_id) = self.queue.pop() else {
                     break;
                 };
+                let now = Instant::now();
+                let should_defer = self.tasks.get(&task_id).is_some_and(|record| {
+                    !record.task.state.terminal()
+                        && !record.task.cancel_requested
+                        && record.ready_at > now
+                });
+                if should_defer {
+                    let priority = self.tasks.get(&task_id).map_or(0, |r| r.task.priority);
+                    // Mark as not-queued while stashed; requeue below.
+                    if let Some(record) = self.tasks.get_mut(&task_id) {
+                        record.queued = false;
+                    }
+                    deferred.push((task_id, priority));
+                    continue;
+                }
                 let Some(record) = self.tasks.get_mut(&task_id) else {
                     continue;
                 };
@@ -766,11 +1031,6 @@ impl Scheduler {
                         Some("scope changed"),
                     );
                     continue;
-                }
-                if record.ready_at > Instant::now() {
-                    record.queued = true;
-                    self.queue.push(task_id, record.task.priority)?;
-                    break;
                 }
                 let Some(module) = self.modules.get(&record.task.kind).cloned() else {
                     record.task.state = TaskState::Skipped;
@@ -795,6 +1055,45 @@ impl Scheduler {
                 spawn_worker(module, context, sender.clone(), task_id_for_worker, attempt);
                 active += 1;
             }
+            // Requeue deferred (not-yet-ready) tasks without blocking others.
+            // Queue has free slots (we just popped), so push should succeed;
+            // if saturated anyway, leave them Pending for the next loop.
+            for (task_id, priority) in deferred {
+                let is_ready = self
+                    .tasks
+                    .get(&task_id)
+                    .is_some_and(|record| record.task.state == TaskState::Ready);
+                if !is_ready {
+                    continue;
+                }
+                match self.queue.push(task_id.clone(), priority) {
+                    Ok(()) => {
+                        if let Some(record) = self.tasks.get_mut(&task_id) {
+                            record.queued = true;
+                        }
+                    }
+                    Err(SchedulerError::QueueSaturated) => {
+                        let provenance = self
+                            .tasks
+                            .get(&task_id)
+                            .map(|record| record.task.provenance.clone());
+                        if let Some(record) = self.tasks.get_mut(&task_id) {
+                            record.task.state = TaskState::Pending;
+                            record.queued = false;
+                        }
+                        if let Some(provenance) = provenance {
+                            self.emit(
+                                &task_id,
+                                TaskState::Pending,
+                                SchedulerEventKind::QueueSaturated,
+                                Some("queue saturated; retrying when drained"),
+                                provenance,
+                            );
+                        }
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
 
             if active == 0 {
                 if self.all_terminal() {
@@ -813,32 +1112,49 @@ impl Scheduler {
             let timeout = self.next_wait_timeout();
             match receiver.recv_timeout(timeout) {
                 Ok(result) => {
-                    active = active.saturating_sub(1);
-                    self.handle_worker_result(result, &mut report)?;
+                    // Only consume a slot for a genuinely Running attempt.
+                    // Stale/orphaned results (already TimedOut/Cancelled or
+                    // attempt mismatch) were already freed; discard silently.
+                    let is_live = self.tasks.get(&result.task_id).is_some_and(|record| {
+                        record.task.state == TaskState::Running
+                            && record.task.attempt == result.attempt
+                    });
+                    if is_live {
+                        active = active.saturating_sub(1);
+                        self.handle_worker_result(result, &mut report)?;
+                    } else {
+                        // Orphaned worker reaped; slot was already freed at
+                        // timeout/cancel time. Discard without double-count.
+                    }
                 }
                 Err(RecvTimeoutError::Timeout) => {
+                    // Reap ALL expired Running tasks per timeout tick, not
+                    // just one, so concurrent timeouts all become terminal.
                     let now = Instant::now();
                     let timed_out: Vec<TaskId> = self
                         .tasks
                         .iter()
                         .filter(|(_, record)| {
                             record.task.state == TaskState::Running
-                                && record.task.timeout_ms.checked_add(0).is_some_and(|_| {
-                                    record.execution_started.is_some_and(|started| {
-                                        now.duration_since(started).as_millis() as u64
-                                            >= record.task.timeout_ms
-                                    })
+                                && record.execution_started.is_some_and(|started| {
+                                    now.duration_since(started).as_millis() as u64
+                                        >= record.task.timeout_ms
                                 })
                         })
                         .map(|(id, _)| id.clone())
-                        .take(1)
                         .collect();
-                    if let Some(task_id) = timed_out.first() {
-                        if let Some(record) = self.tasks.get_mut(task_id) {
+                    for task_id in timed_out {
+                        if let Some(record) = self.tasks.get_mut(&task_id) {
+                            if record.task.state != TaskState::Running {
+                                continue;
+                            }
                             record.task.state = TaskState::TimedOut;
+                            record.execution_started = None;
                             record.cancellation.cancel();
                             report.timed_out.push(task_id.clone());
-                            self.emit_task(task_id, SchedulerEventKind::TaskTimedOut, None);
+                            self.emit_task(&task_id, SchedulerEventKind::TaskTimedOut, None);
+                            // Free the slot immediately; the orphaned worker
+                            // (if non-cooperative) stays bounded by max_tasks.
                             active = active.saturating_sub(1);
                         }
                     }
@@ -871,10 +1187,13 @@ impl Scheduler {
         Ok(report)
     }
     fn promote_ready_tasks(&mut self) -> Result<(), SchedulerError> {
+        let now = Instant::now();
         let candidates: Vec<TaskId> = self
             .tasks
             .iter()
-            .filter(|(_, record)| record.task.state == TaskState::Pending && !record.queued)
+            .filter(|(_, record)| {
+                record.task.state == TaskState::Pending && !record.queued && record.ready_at <= now
+            })
             .map(|(id, _)| id.clone())
             .collect();
         for task_id in candidates {
@@ -933,27 +1252,35 @@ impl Scheduler {
                 );
                 continue;
             }
-            let record = self.tasks.get_mut(&task_id).expect("candidate exists");
-            record.task.state = TaskState::Ready;
-            record.queued = true;
-            self.queue
-                .push(task_id.clone(), priority)
-                .inspect_err(|_| {
+            // Queue saturation is backpressure, not a fatal error: leave
+            // the task Pending so it is retried once the queue drains.
+            match self.queue.push(task_id.clone(), priority) {
+                Ok(()) => {
+                    let record = self.tasks.get_mut(&task_id).expect("candidate exists");
+                    record.task.state = TaskState::Ready;
+                    record.queued = true;
                     self.emit(
                         &task_id,
                         TaskState::Ready,
-                        SchedulerEventKind::QueueSaturated,
+                        SchedulerEventKind::TaskQueued,
                         None,
-                        provenance.clone(),
+                        provenance,
                     );
-                })?;
-            self.emit(
-                &task_id,
-                TaskState::Ready,
-                SchedulerEventKind::TaskQueued,
-                None,
-                provenance,
-            );
+                }
+                Err(SchedulerError::QueueSaturated) => {
+                    self.emit(
+                        &task_id,
+                        TaskState::Pending,
+                        SchedulerEventKind::QueueSaturated,
+                        Some("queue saturated; retrying when drained"),
+                        provenance,
+                    );
+                    // Stop promoting this tick; remaining candidates stay
+                    // Pending and will be retried next loop iteration.
+                    break;
+                }
+                Err(error) => return Err(error),
+            }
         }
         Ok(())
     }
@@ -1055,6 +1382,25 @@ impl Scheduler {
             );
         }
     }
+    /// Effective concurrency after capping the governor by budgets.
+    pub fn effective_concurrency(&self) -> usize {
+        self.governor.concurrency()
+    }
+    pub fn governor(&self) -> &SpeedGovernor {
+        &self.governor
+    }
+    pub fn budgets(&self) -> &BudgetLimits {
+        &self.budgets
+    }
+    pub fn queue_depth(&self) -> usize {
+        self.queue.len()
+    }
+    pub fn queue_capacity(&self) -> usize {
+        self.queue.capacity()
+    }
+    pub fn task_count(&self) -> usize {
+        self.tasks.len()
+    }
     fn emit(
         &self,
         task_id: &TaskId,
@@ -1064,6 +1410,7 @@ impl Scheduler {
         provenance: Provenance,
     ) {
         self.event_sink.emit(SchedulerEvent {
+            schema_version: SCHEMA_VERSION,
             kind,
             task_id: task_id.clone(),
             state,
@@ -1130,6 +1477,19 @@ static RAW_WAKER_VTABLE: RawWakerVTable =
 fn kind_key(kind: &TaskKind) -> String {
     serde_json::to_string(kind).expect("TaskKind serializes")
 }
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+/// Legacy FNV-1a helper retained for stable asset/model IDs in `model.rs`.
+/// Task IDs use [`sha256_hex`] (collision-resistant for untrusted inputs).
+#[allow(dead_code)]
 fn stable_hash(bytes: &[u8]) -> String {
     let mut hash: u64 = 0xcbf29ce484222325;
     for byte in bytes {
