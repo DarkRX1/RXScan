@@ -21,6 +21,8 @@ RXScan is for authorized, scoped, non-destructive reconnaissance. Its central ri
 | Credential exposure / destructive protocol actions | no-authentication design: only passive reads plus one safe exchange per protocol (GET / EHLO / PING / SSLRequest / ClientHello); exact-bytes allowlist test forbids AUTH/USER/PASS/LOGIN and destructive verbs | 7 |
 | Service misidentification (port-guessing) | port hints order probes only; classifications require handshake/banner evidence with graded confidence; unknown stays unknown; silent stays silent | 7 |
 | Unbounded handshake/memory blowup | per-probe wall budgets plus task-deadline truncation, 2–32KiB read caps with truncation flags, fixed small writes, no cipher enumeration | 7 |
+| Crawler scope drift / recursive explosion | confirmed-endpoint eligibility, Decision Engine-only recursion, same-origin follow-ups, hard depth/page/request/candidate caps, per-request scope checks, out-of-scope observations without contact | 9 |
+| Unsafe web interaction | forms observed but never submitted; no parameter mutation, credentials, JavaScript execution, headless browser, wordlists, fuzzing, or vulnerability payloads | 9 |
 
 Modules never receive authority to bypass policy. Discovery may be recorded without authorizing active work against a new asset.
 
@@ -57,3 +59,13 @@ Modules never receive authority to bypass policy. Discovery may be recorded with
 - Response handling is capped at every layer (header count/bytes, body bytes with surplus handoff so single-segment head+body reads cannot defeat the cap, cookie count/size, endpoint identity length, findings/tasks); truncation is flagged in evidence; malformed input is a miss with notes, never a panic or a guess.
 - TLS reuses the Phase 7 observe-only session primitive (trust never evaluated); certificates are parsed bounded and fingerprinted; no cipher enumeration, no security grading, no version claims beyond observed strings.
 - Cookies are observations only (no jar, no replay); server/product strings are raw observations, never precise version claims; unknown stays unknown.
+
+## Phase 9 crawler safety notes
+
+- Crawl root eligibility is evidence-gated: only confirmed HTTP/HTTPS endpoint observations from Phase 8 can become root crawl tasks, and only the Decision Engine may propose them.
+- Recursive crawl is bounded by level-derived depth/page budgets carried in task params (`depth`, `pages_left`) and centrally planned by `plan_followups`; scheduler `max_tasks` remains the global cap.
+- Every candidate is resolved through Phase 8 `WebTarget` canonicalization before deduplication. Fragments are discarded for network identity; query strings are preserved; same-origin follow-ups require identical scheme, host, and port.
+- Scope checks happen before task admission, immediately before execution, before each request, before redirect following, before JavaScript/robots/sitemap retrieval, and before Decision Engine follow-up admission. Out-of-scope candidates are typed observations and never contacted.
+- HTML/robots/sitemap/JavaScript parsing is bounded and fail-safe. Malformed content yields fewer observations, never panics or speculative endpoints.
+- Forms are observation only: method/action/input metadata is recorded, but RXScan never submits, mutates, authenticates, or infers vulnerabilities from forms.
+- Static JavaScript extraction is conservative literal scanning from explicitly referenced in-scope scripts at L4+. No JavaScript execution, DOM emulation, dynamic instrumentation, or headless browser exists.

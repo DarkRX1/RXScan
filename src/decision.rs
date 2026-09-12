@@ -422,16 +422,16 @@ impl crate::execution::DecisionEngine for ServiceDecisionEngine {
     }
 }
 
-/// Combined Phase 7+ engine: host→port (V1), open-port→service (V2), and
-/// confirmed-service→web (Phase 8) rules. Dispatches purely on the completed
-/// task kind; each sub-engine owns its rule. Modules still never
-/// self-schedule. `HttpProbe` completions propose nothing: Phase 8 is a
-/// foundation phase, not a crawler.
+/// Combined Phase 7+ engine: host→port (V1), open-port→service (V2),
+/// confirmed-service→web (Phase 8), and confirmed endpoint/discovery→crawl
+/// (Phase 9) rules. Dispatches purely on the completed task kind; each
+/// sub-engine owns its rule. Modules still never self-schedule.
 #[derive(Clone)]
 pub struct Phase7Engine {
     tcp: TcpDecisionEngine,
     service: ServiceDecisionEngine,
     web: WebDecisionEngine,
+    crawl: CrawlDecisionEngine,
 }
 
 impl Phase7Engine {
@@ -459,7 +459,8 @@ impl Phase7Engine {
                 goal,
                 speed,
             ),
-            web: WebDecisionEngine::new(scope_guard, plan_id, speed),
+            web: WebDecisionEngine::new(scope_guard.clone(), plan_id.clone(), speed),
+            crawl: CrawlDecisionEngine::new(scope_guard, plan_id, level, goal, speed),
         }
     }
 }
@@ -470,6 +471,7 @@ impl crate::execution::DecisionEngine for Phase7Engine {
             TaskKind::HostDiscovery => self.tcp.follow_up_tasks(completed, output),
             TaskKind::PortDiscovery => self.service.follow_up_tasks(completed, output),
             TaskKind::ServiceProbe => self.web.follow_up_tasks(completed, output),
+            TaskKind::HttpProbe | TaskKind::Crawl => self.crawl.follow_up_tasks(completed, output),
             _ => Vec::new(),
         }
     }
@@ -621,6 +623,259 @@ impl crate::execution::DecisionEngine for WebDecisionEngine {
             }
         }
         proposals
+    }
+}
+
+/// Phase 9 rule: only confirmed HTTP/HTTPS endpoint observations and
+/// evidence-backed crawl discoveries may create `Crawl` tasks. The crawler
+/// itself emits events only; recursive work returns through this engine.
+#[derive(Clone)]
+pub struct CrawlDecisionEngine {
+    scope_guard: Arc<dyn ScopeGuard>,
+    plan_id: ScanPlanId,
+    level: u8,
+    goal: ScanGoal,
+    speed: crate::plan::SpeedSetting,
+}
+
+impl CrawlDecisionEngine {
+    pub fn new(
+        scope_guard: Arc<dyn ScopeGuard>,
+        plan_id: ScanPlanId,
+        level: u8,
+        goal: ScanGoal,
+        speed: crate::plan::SpeedSetting,
+    ) -> Self {
+        Self {
+            scope_guard,
+            plan_id,
+            level: level.clamp(1, 5),
+            goal,
+            speed,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn crawl_task(
+        &self,
+        url: &crate::web::WebTarget,
+        root: &crate::web::WebTarget,
+        parent_endpoint: &str,
+        target_label: &str,
+        depth: u8,
+        pages_left: u32,
+        is_root: bool,
+        visited: &str,
+    ) -> Option<Task> {
+        let scope_target = crate::web_probe::scope_target_for_web_target(url);
+        if !self.scope_guard.permits(&scope_target) {
+            return None;
+        }
+        let mut params = crate::crawl::crawl_task_params(
+            url,
+            root,
+            depth,
+            pages_left,
+            parent_endpoint,
+            target_label,
+            is_root,
+        );
+        if !visited.is_empty() {
+            params.insert("visited".to_owned(), visited.to_owned());
+        }
+        let governor = crate::execution::SpeedGovernor::new(self.speed, 1).ok()?;
+        let provenance = crate::model::Provenance::new(
+            "rxscan.decision",
+            "9.0.0",
+            self.plan_id.clone(),
+            Timestamp::now(),
+        )
+        .ok()?;
+        Task::new_with_params(
+            TaskKind::Crawl,
+            None,
+            Vec::new(),
+            Some(crate::model::AssetId(parent_endpoint.to_owned())),
+            self.plan_id.clone(),
+            priority_for_kind(&TaskKind::Crawl),
+            governor.default_timeout(),
+            governor.default_retry_policy(),
+            crate::crawl::CRAWL_MODULE_NAME,
+            provenance,
+            scope_target,
+            params,
+            self.scope_guard.as_ref(),
+        )
+        .ok()
+    }
+}
+
+impl crate::execution::DecisionEngine for CrawlDecisionEngine {
+    fn follow_up_tasks(&self, completed: &Task, output: &ModuleOutput) -> Vec<Task> {
+        let policy = crate::crawl::CrawlPolicy::new(self.level, self.goal, self.speed);
+        if completed.kind == TaskKind::HttpProbe {
+            let mut proposals = Vec::new();
+            let mut seen = BTreeSet::new();
+            for event in &output.events {
+                if !matches!(event.kind, crate::model::EventKind::EndpointObserved) {
+                    continue;
+                }
+                let Some(url_text) = event
+                    .details
+                    .data
+                    .get("url")
+                    .and_then(serde_json::Value::as_str)
+                else {
+                    continue;
+                };
+                let Ok(url) = crate::web::WebTarget::parse(url_text) else {
+                    continue;
+                };
+                if !seen.insert(url.canonical()) {
+                    continue;
+                }
+                let parent = event
+                    .asset_id
+                    .as_ref()
+                    .map(|id| id.0.as_str())
+                    .unwrap_or("");
+                if parent.is_empty() {
+                    continue;
+                }
+                let target_label = event
+                    .details
+                    .data
+                    .get("target")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(url.host.as_str());
+                if let Some(task) = self.crawl_task(
+                    &url,
+                    &url,
+                    parent,
+                    target_label,
+                    policy.max_depth(),
+                    policy.max_pages_per_root(),
+                    true,
+                    "",
+                ) {
+                    proposals.push(task);
+                }
+                if proposals.len() >= crate::crawl::MAX_CRAWL_PROPOSALS_PER_COMPLETION {
+                    break;
+                }
+            }
+            return proposals;
+        }
+
+        if completed.kind != TaskKind::Crawl {
+            return Vec::new();
+        }
+        let depth = completed
+            .params
+            .get("depth")
+            .and_then(|value| value.parse::<u8>().ok())
+            .unwrap_or(0);
+        let pages_left = completed
+            .params
+            .get("pages_left")
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(0);
+        let root = completed
+            .params
+            .get("root")
+            .and_then(|value| crate::web::WebTarget::parse(value).ok())
+            .or_else(|| {
+                completed
+                    .params
+                    .get("url")
+                    .and_then(|value| crate::web::WebTarget::parse(value).ok())
+            });
+        let Some(root) = root else {
+            return Vec::new();
+        };
+        let target_label = completed
+            .params
+            .get("target")
+            .map(String::as_str)
+            .unwrap_or(root.host.as_str());
+        let mut visited: BTreeSet<String> = completed
+            .params
+            .get("visited")
+            .map(|value| value.split('\n').map(str::to_owned).collect())
+            .unwrap_or_default();
+        if let Some(current) = completed.params.get("url") {
+            visited.insert(current.clone());
+        }
+        let visited_param = visited.iter().cloned().collect::<Vec<_>>().join("\n");
+        let mut candidates = Vec::new();
+        for event in &output.events {
+            if !matches!(event.kind, crate::model::EventKind::EndpointDiscovered) {
+                continue;
+            }
+            let data = &event.details.data;
+            if !data
+                .get("scope_permitted")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+                || !data
+                    .get("crawl_eligible")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+            {
+                continue;
+            }
+            let Some(url_text) = data.get("url").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let Ok(url) = crate::web::WebTarget::parse(url_text) else {
+                continue;
+            };
+            if url.scheme != root.scheme || url.host != root.host || url.port != root.port {
+                continue;
+            }
+            if visited.contains(&url.canonical()) {
+                continue;
+            }
+            let parent = data
+                .get("parent_asset_id")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| event.asset_id.as_ref().map(|id| id.0.as_str()))
+                .unwrap_or("");
+            if parent.is_empty() {
+                continue;
+            }
+            let source = match data.get("source").and_then(serde_json::Value::as_str) {
+                Some("link") => crate::crawl::CandidateSource::Link,
+                Some("canonical") => crate::crawl::CandidateSource::Canonical,
+                Some("stylesheet") => crate::crawl::CandidateSource::Stylesheet,
+                Some("robots-path") => crate::crawl::CandidateSource::RobotsPath,
+                Some("sitemap-url") => crate::crawl::CandidateSource::SitemapUrl,
+                Some("sitemap-index") => crate::crawl::CandidateSource::SitemapIndex,
+                _ => continue,
+            };
+            candidates.push((url, parent.to_owned(), source));
+        }
+        let plan = crate::crawl::plan_followups(
+            candidates,
+            depth,
+            pages_left,
+            crate::crawl::MAX_CRAWL_PROPOSALS_PER_COMPLETION,
+        );
+        plan.proposals
+            .into_iter()
+            .filter_map(|proposal| {
+                self.crawl_task(
+                    &proposal.url,
+                    &root,
+                    &proposal.parent_asset_id,
+                    target_label,
+                    proposal.child_depth,
+                    proposal.child_pages_left,
+                    false,
+                    &visited_param,
+                )
+            })
+            .collect()
     }
 }
 

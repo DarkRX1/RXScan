@@ -1,6 +1,6 @@
 # Configuration
 
-Phase 1–8 support explicit TOML layers:
+Phase 1–9 support explicit TOML layers:
 
 ```text
 built-in defaults < --config GLOBAL.toml < --project-config PROJECT.toml < CLI
@@ -92,3 +92,13 @@ Invalid values fail fast (exit 2): zero/negative-equivalent, values exceeding ha
 - Bounds: ≤64 headers, 16KiB header/body halves, 1KiB body samples, 4 start URLs and 8 findings per task, connect/response timeouts from speed, task-deadline truncation, cancellation, evidence budget. Truncation is flagged, never silent.
 - Speed sets timeouts/concurrency only: identical response bytes classify identically at any speed (regression-tested). Level sets breadth only.
 - Service boundary: only findings with `service: http|https` propose web work; `HttpProbe` completions propose nothing — Phase 8 has no crawling follow-ups by construction.
+
+## Phase 9 crawl policy
+
+- No new CLI flags or TOML keys: crawling follows existing `--level`, `--goal`, `--speed`, scope, and scheduler budgets. Explicit future crawler tuning may override level defaults but will remain capped by hard ceilings.
+- Crawl eligibility: only confirmed `EndpointObserved` HTTP/HTTPS output from `HttpProbe` can seed a root crawl. Port hints, protocol guesses, and arbitrary URLs do not bypass the Decision Engine.
+- Level matrix: L1 root-only extraction (depth 0, 1 page/root, no robots/sitemap/JS fetch); L2 shallow same-origin crawl (depth 1, 5 pages/root); L3 normal crawl (depth 2, 15 pages/root, robots enabled); L4 deeper crawl (depth 3, 40 pages/root, robots+sitemap+static-JS extraction); L5 deepest Phase 9 crawl (depth 4, 100 pages/root). Hard ceilings: depth 6, 200 pages/root.
+- Extraction/request caps: links 20 at L1, 50 at L2, 100 at L3+ (hard 100); forms 20/page; inputs 50/form; scripts 20/page; images 50/page; HTML 128KiB; JavaScript 64KiB; robots 32KiB; sitemap entries 500/document; sitemap files 3/root; crawl proposals 64/completion. Phase 8 redirect caps still apply per fetch.
+- `--speed` affects pressure only: connection/response timeout, scheduler concurrency, retry/backoff. It does not change link/form/script/robots/sitemap interpretation, canonicalization, or endpoint classifications.
+- Forms are observation-only. RXScan records action/method/input names/types and scope status, but never submits forms, creates values, logs in, mutates parameters, or infers vulnerabilities from a form.
+- Static resources are not recursively fetched by default. Scripts may be fetched at L4+ only when explicitly referenced and in scope; images/styles/frames are recorded as relationships. JavaScript is scanned only for conservative string literals; it is never executed.

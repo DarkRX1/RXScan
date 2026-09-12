@@ -77,12 +77,12 @@ impl Module for WebProbeModule {
 
 /// Planned start URL with its scope story (for evidence).
 #[derive(Debug, Clone)]
-struct PlannedStart {
-    target: WebTarget,
-    origin: String,
+pub(crate) struct PlannedStart {
+    pub(crate) target: WebTarget,
+    pub(crate) origin: String,
 }
 
-fn plan_start_urls(
+pub(crate) fn plan_start_urls(
     task: &crate::execution::Task,
     guard: &dyn ScopeGuard,
 ) -> Result<Vec<PlannedStart>, ModuleError> {
@@ -179,7 +179,7 @@ fn plan_start_urls(
     Ok(starts)
 }
 
-fn scope_target_for_web_target(target: &WebTarget) -> TaskScopeTarget {
+pub(crate) fn scope_target_for_web_target(target: &WebTarget) -> TaskScopeTarget {
     match target.ip_literal() {
         Some(ip) => TaskScopeTarget::Ip(ip),
         None => TaskScopeTarget::Host(target.host.clone()),
@@ -805,6 +805,7 @@ fn fetch_single(
                     target,
                     method,
                     read_body,
+                    crate::web::MAX_WEB_BODY_BYTES,
                     connect_timeout,
                     response_timeout,
                     cancel,
@@ -827,6 +828,7 @@ fn fetch_single(
                     server_name,
                     method,
                     read_body,
+                    crate::web::MAX_WEB_BODY_BYTES,
                     connect_timeout,
                     response_timeout,
                     cancel,

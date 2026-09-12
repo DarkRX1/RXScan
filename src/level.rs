@@ -11,7 +11,8 @@
 //! * Level 3: + standard port-discovery intent (+ HTTP intent for web goals).
 //! * Level 4: + expanded service/DNS intent (+ TLS for web goals).
 //! * Level 5: + deepest eligible modules allowed by the selected goal
-//!   (fingerprints, content/crawl/fuzz where the goal permits).
+//!   (fingerprints, content/fuzz where the goal permits). Crawl is Phase 9
+//!   follow-up work only and is never lowered directly from a seed.
 //!
 //! Because TLS/DNS network modules do not exist yet, Phase 8 only
 //! determines eligibility for the remaining intents. `ServiceProbe` and
@@ -55,7 +56,6 @@ fn base_kinds_for_level(level: u8) -> Vec<TaskKind> {
     let tls = TaskKind::TlsProbe;
     let fingerprint = TaskKind::Fingerprint;
     let content = TaskKind::ContentDiscovery;
-    let crawl = TaskKind::Crawl;
     let fuzz = TaskKind::Fuzz;
     match level {
         0 | 1 => vec![validate],
@@ -72,7 +72,6 @@ fn base_kinds_for_level(level: u8) -> Vec<TaskKind> {
             tls,
             fingerprint,
             content,
-            crawl,
             fuzz,
         ],
     }

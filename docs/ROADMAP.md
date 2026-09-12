@@ -12,9 +12,10 @@ Each phase requires tests, benchmark/regression evidence where applicable, docum
 | 5 | Host Discovery Engine: real bounded ICMP echo + TCP reachability via scheduler, host-state model, discovery policy, CIDR bounding, evidence/events, JSONL | Complete |
 | 6 | Native TCP Port Discovery Engine: TCP connect scanning via scheduler, port-state model, bounded tasks, Decision Engine V1, open-port JSONL + summary | Complete |
 | 7 | Service Intelligence + Native Protocol Probing: SSH/HTTP/TLS/HTTPS/FTP/SMTP/Redis/MySQL/PostgreSQL/generic probes via scheduler, service assets, Decision Engine open-port→service, evidence-graded confidence | Complete |
-| 8 | HTTP/TLS Web Foundation: bounded HTTP/1.1 observations, canonical URLs, bounded redirects, TLS/certificate evidence, Decision Engine service→web, no crawling | Complete (current) |
-| 9–10 | UDP, TLS cipher enumeration, technology fingerprint engine | Not implemented |
-| 11–15 | DNS, crawler, baseline, content, fuzzing | Not implemented |
+| 8 | HTTP/TLS Web Foundation: bounded HTTP/1.1 observations, canonical URLs, bounded redirects, TLS/certificate evidence, Decision Engine service→web, no crawling | Complete |
+| 9 | Bounded Web Crawler + Endpoint Graph: confirmed endpoint→crawl proposals, bounded same-origin extraction, forms/robots/sitemaps/static-JS observations, endpoint relationships | Complete (current) |
+| 10 | UDP, TLS cipher enumeration, technology fingerprint engine | Not implemented |
+| 11–15 | DNS, deeper crawler/content/API workflows, fuzzing | Not implemented |
 | 16–19 | Decision engine workflows, API workflows, checks, graph/correlation | Not implemented |
 | 20–24 | Outputs, resume/diff/projects, packs, benchmark lab, releases | Not implemented |
 
@@ -23,6 +24,19 @@ Phase 6 is the first real port-scanning engine (TCP connect only). No UDP scanni
 Phase 7 takes open TCP ports and identifies the speaking service with native protocol probes (SSH/HTTP/TLS/HTTPS/FTP/SMTP/Redis/MySQL/PostgreSQL + passive generic) through the scheduler, with evidence-graded confidence and no authentication. No web crawling, directory discovery, fuzzing, DNS enumeration, UDP scanning, vulnerability checks, brute force, or exploitation exist yet.
 
 Phase 8 adds the HTTP/TLS web foundation: bounded HTTP/1.1 GET/HEAD observations (status/headers/cookies/title/body-sample/redirects), canonical URLs with stable IDs, bounded redirect chains with per-hop scope checks, and TLS/certificate evidence for HTTPS — all through the scheduler and Decision Engine. Still absent by design: crawling, recursive link following, robots/sitemap traversal, directory brute forcing, content discovery, endpoint/API enumeration, JavaScript extraction, parameter discovery, wordlists, fuzzing, cipher enumeration, vulnerability scanning, and exploitation.
+
+Phase 9 adds deterministic bounded crawling from confirmed HTTP/HTTPS endpoint evidence only. `HttpProbe` completions propose root `Crawl` tasks through the Decision Engine; crawler discoveries return to the Decision Engine for same-origin follow-up proposals with inherited depth/page budgets. Extraction covers links, forms as observation-only metadata, script/style/image/frame/canonical references, robots.txt, sitemap XML, and conservative static JavaScript string literals. Out-of-scope candidates are recorded and never contacted. Still absent by design: directory brute forcing, path guessing, wordlists, parameter mutation/fuzzing, form submission, authentication automation, JavaScript execution, headless browsers, vulnerability checks, exploitation, and arbitrary scope expansion.
+
+## Phase 9 exit criteria
+
+- Crawl eligibility starts only from confirmed `EndpointObserved` HTTP/HTTPS evidence; port numbers and guesses are insufficient.
+- `Crawl` modules never enqueue work directly. Root and recursive crawl tasks are proposed by the Decision Engine and admitted by scheduler scope/budget/dedup.
+- URLs use the Phase 8 `WebTarget` canonical form: scheme/host/port/path/query are stable; fragments do not create network identities.
+- Level matrix: L1 root-only extraction, no recursion; L2 shallow same-origin crawl (depth 1, 5 pages/root); L3 normal bounded crawl (depth 2, 15 pages/root) with robots/forms/scripts observations; L4 deeper crawl (depth 3, 40 pages/root) with sitemap and static-JS extraction; L5 deepest Phase 9 bounded crawl (depth 4, 100 pages/root). Hard ceilings remain depth 6 and 200 pages/root.
+- Per-page and resource caps are enforced: 100 links/page hard cap, 20 forms/page, 20 scripts/page, 50 images/page, 128KiB HTML, 64KiB JS, 32KiB robots, 500 sitemap entries, 3 sitemap files/root, bounded redirects via Phase 8 policy.
+- Scope is checked before admission, execution, request, redirect, discovered fetch, JS fetch, robots fetch, sitemap fetch, and Decision Engine follow-up.
+- Typed events/evidence/assets include crawl lifecycle, endpoint discoveries, link/form/script/robots/sitemap observations, budget exhaustion, and relationships (`LinksTo`, `SubmitsTo`, `LoadsScript`, `ReferencesEndpoint`, `ReferencesSitemap`, `ListsEndpoint`).
+- Tests are deterministic/local-only and include canary proof that forms are not submitted and out-of-scope links receive zero contacts. Baseline recorded in `docs/benchmark-results/phase9-crawler-baseline.md`.
 
 ## MVP v0.1 gate
 

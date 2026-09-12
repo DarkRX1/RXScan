@@ -474,6 +474,7 @@ pub(crate) fn head_end(bytes: &[u8]) -> Option<usize> {
 fn read_head_and_body<R: Read>(
     reader: &mut R,
     read_body: bool,
+    body_cap: usize,
     timeout: Duration,
     cancel: &CancellationToken,
     deadline: Instant,
@@ -526,19 +527,13 @@ fn read_head_and_body<R: Read>(
     if !read_body {
         return (head, Vec::new(), head_truncated, false);
     }
-    let (mut body, mut body_truncated) = read_bounded_body(
-        reader,
-        MAX_WEB_BODY_BYTES,
-        timeout,
-        cancel,
-        deadline,
-        started,
-    );
+    let (mut body, mut body_truncated) =
+        read_bounded_body(reader, body_cap, timeout, cancel, deadline, started);
     if !surplus.is_empty() {
         // Surplus arrived inside the head window: it counts against the body
         // budget first, preserving arrival order.
         let mut combined = std::mem::take(&mut surplus);
-        let room = MAX_WEB_BODY_BYTES.saturating_sub(combined.len());
+        let room = body_cap.saturating_sub(combined.len());
         if room < body.len() {
             body.truncate(room);
             body_truncated = true;
@@ -551,11 +546,15 @@ fn read_head_and_body<R: Read>(
 
 /// Fetch one URL over plaintext HTTP. Exactly one request is written.
 #[allow(clippy::too_many_arguments)]
+/// `body_cap` bounds retained body bytes (Phase 8 passes
+/// [`MAX_WEB_BODY_BYTES`]; Phase 9 crawling passes a larger extraction cap).
+/// Header caps are unchanged.
 pub fn fetch_plain(
     ip: IpAddr,
     target: &WebTarget,
     method: &str,
     read_body: bool,
+    body_cap: usize,
     connect_timeout: Duration,
     response_timeout: Duration,
     cancel: &CancellationToken,
@@ -591,8 +590,15 @@ pub fn fetch_plain(
     let remaining = deadline
         .saturating_duration_since(Instant::now())
         .min(response_timeout);
-    let (head, body, head_truncated, body_truncated) =
-        read_head_and_body(&mut stream, read_body, remaining, cancel, deadline, started);
+    let (head, body, head_truncated, body_truncated) = read_head_and_body(
+        &mut stream,
+        read_body,
+        body_cap,
+        remaining,
+        cancel,
+        deadline,
+        started,
+    );
     if cancel.is_cancelled() {
         return Err(FetchFailure::Cancelled);
     }
@@ -611,12 +617,15 @@ pub fn fetch_plain(
 /// session primitive; the handshake observation and leaf DER travel with the
 /// raw bytes for certificate evidence.
 #[allow(clippy::too_many_arguments)]
+/// See [`fetch_plain`]: `body_cap` bounds retained body bytes for
+/// extraction-heavy callers.
 pub fn fetch_tls(
     ip: IpAddr,
     target: &WebTarget,
     server_name: Option<&str>,
     method: &str,
     read_body: bool,
+    body_cap: usize,
     connect_timeout: Duration,
     response_timeout: Duration,
     cancel: &CancellationToken,
@@ -646,7 +655,7 @@ pub fn fetch_tls(
     let remaining = deadline
         .saturating_duration_since(Instant::now())
         .min(response_timeout);
-    let max_bytes = MAX_HEADER_BYTES + MAX_WEB_BODY_BYTES;
+    let max_bytes = MAX_HEADER_BYTES + body_cap;
     let raw = session
         .exchange_http(&request, max_bytes, remaining, cancel)
         .map_err(|reason| {
@@ -664,9 +673,9 @@ pub fn fetch_tls(
         Vec::new()
     };
     let head_truncated = split >= MAX_HEADER_BYTES && head_end(&raw).is_none();
-    let mut body_truncated = raw.len() > split + MAX_WEB_BODY_BYTES;
-    if body.len() > MAX_WEB_BODY_BYTES {
-        body.truncate(MAX_WEB_BODY_BYTES);
+    let mut body_truncated = raw.len() > split + body_cap;
+    if body.len() > body_cap {
+        body.truncate(body_cap);
         body_truncated = true;
     }
     Ok(RawFetch {

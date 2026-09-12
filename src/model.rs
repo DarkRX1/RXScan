@@ -363,6 +363,15 @@ pub enum RelationshipKind {
     Affects,
     Supports,
     Other,
+    // Phase 9 endpoint-graph relationships. Each names the concrete
+    // discovery mechanism (link, form, script, sitemap) so consumers never
+    // have to infer how an endpoint was found.
+    LinksTo,
+    SubmitsTo,
+    LoadsScript,
+    ReferencesEndpoint,
+    ReferencesSitemap,
+    ListsEndpoint,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "subject_type", content = "id", rename_all = "snake_case")]
@@ -454,6 +463,17 @@ pub enum EventKind {
     WebProbeCompleted,
     RedirectObserved,
     EndpointObserved,
+    // Phase 9 bounded-crawler lifecycle. Every discovery mechanism has its
+    // own typed event so evidence always names HOW an endpoint was found;
+    // budget stops are explicit observations, never silent drops.
+    CrawlStarted,
+    CrawlCompleted,
+    LinkObserved,
+    FormObserved,
+    ScriptObserved,
+    RobotsObserved,
+    SitemapObserved,
+    CrawlBudgetExhausted,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Event {

@@ -1,16 +1,16 @@
 //! Phase 8 runtime bootstrap: Target -> Scope -> ScanPlan -> Tasks ->
 //! Reactive Scheduler <-> Speed Governor <-> Budgets <-> Backpressure ->
-//! HostDiscovery + TcpDiscovery + ServiceProbe + WebProbe Modules -> Typed
+//! HostDiscovery + TcpDiscovery + ServiceProbe + WebProbe + Crawl Modules -> Typed
 //! Events / Evidence / Assets / Findings -> Decision Engine (host→port,
-//! open-port→service, confirmed-service→web) -> JSONL Output + human service
+//! open-port→service, confirmed-service→web→crawl) -> JSONL Output + human service
 //! summary.
 //!
 //! Real bounded discovery: native ICMP echo + TCP reachability (Phase 5),
 //! native TCP connect port scanning (Phase 6, one task per target with a
 //! bounded internal window, no thread per port), native protocol probing
 //! (Phase 7, one task per open port, no authentication), and bounded HTTP/1.1
-//! web observations (Phase 8: single exchanges, bounded redirects, no
-//! crawling). Deeper intents (UDP, HTTP crawling, TLS cipher enumeration,
+//! web observations (Phase 8) and deterministic bounded endpoint crawling
+//! from confirmed web evidence (Phase 9). Deeper intents (UDP, TLS cipher enumeration,
 //! DNS, fuzzing, fingerprint engine) still run as `Skipped`
 //! (`module unavailable`). The Decision Engine boundary is live: facts
 //! propose scoped follow-ups admitted via Scope Guard, policy, budgets, and
@@ -74,12 +74,12 @@ pub struct RunReport {
     pub open_ports_summary: String,
 }
 
-/// Execute the full Phase 8 discovery plane from CLI.
+/// Execute the full Phase 9 discovery plane from CLI.
 ///
 /// Steps: compile plan -> scope guard -> lower tasks (bounded CIDR, one port
 /// task per target) -> speed governor -> budgets -> scheduler -> register
-/// HostDiscovery + TcpDiscovery + ServiceProbe + WebProbe + control scaffolds
-/// -> Decision Engine (host→port, open-port→service, service→web) -> run ->
+/// HostDiscovery + TcpDiscovery + ServiceProbe + WebProbe + Crawl + control scaffolds
+/// -> Decision Engine (host→port, open-port→service, service→web→crawl) -> run ->
 /// JSONL output (scheduler events + discovery/scan/service/web assets,
 /// events, evidence, findings) + human service summary.
 pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
@@ -136,6 +136,11 @@ pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
     let web_policy = crate::web::WebPolicy::new(plan.level, plan.goal, plan.speed);
     scheduler.register_module(Arc::new(crate::web_probe::WebProbeModule::new(
         web_policy,
+        guard.clone(),
+    )));
+    let crawl_policy = crate::crawl::CrawlPolicy::new(plan.level, plan.goal, plan.speed);
+    scheduler.register_module(Arc::new(crate::crawl::CrawlModule::new(
+        crawl_policy,
         guard.clone(),
     )));
     for module in phase5_control_modules() {
@@ -234,7 +239,7 @@ pub fn human_summary_with_opens(
 ) -> String {
     let scheduler = &report.scheduler_report;
     let header = format!(
-        "RXScan Phase 8 run: {} task(s) | completed {} | failed {} | cancelled {} | timed out {} | skipped {} | JSONL bytes {}{}",
+        "RXScan Phase 9 run: {} task(s) | completed {} | failed {} | cancelled {} | timed out {} | skipped {} | JSONL bytes {}{}",
         report.task_count,
         scheduler.completed.len(),
         scheduler.failed.len(),

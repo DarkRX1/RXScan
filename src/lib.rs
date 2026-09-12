@@ -1,9 +1,11 @@
 //! RXScan's stable M0 boundary: input normalization, scope, and plans.
 pub mod cli;
 pub mod config;
+pub mod crawl;
 pub mod decision;
 pub mod discovery;
 pub mod execution;
+pub mod extract;
 pub mod host_discovery;
 pub mod icmp;
 pub mod level;
