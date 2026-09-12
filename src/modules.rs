@@ -1,19 +1,19 @@
-//! Phase 4 scaffold modules: honest non-network executors.
+//! Phase 5 scaffold + real modules.
 //!
-//! TCP/UDP/ICMP/DNS/HTTP/TLS/SSH/crawling/fuzzing are NOT implemented.
-//! These modules exercise the reactive scheduler, budgets, backpressure,
-//! cancellation, and JSONL pipeline without pretending scanning exists.
+//! * `HostDiscovery` runs the real bounded `HostDiscoveryModule` (native ICMP
+//!   echo + TCP reachability, no shell `ping`). See `host_discovery.rs`.
+//! * Control validation and port-discovery intents remain honest scaffolds:
+//!   they exercise scheduler/budget/backpressure/cancellation/JSONL without
+//!   pretending Phase 6 port scanning exists.
 //!
 //! * [`ControlValidateModule`] (`rxscan.control.validate`): per-target
 //!   control validation. Always registered.
-//! * [`HostIntentModule`] (`HostDiscovery`): host-discovery *intent* holder.
-//!   Returns empty output (no fake hosts).
 //! * [`PortIntentModule`] (`PortDiscovery`): port-discovery *intent* holder.
-//!   Returns empty output (no fake ports).
+//!   Returns empty output (no fake ports; Phase 6 owns real scanning).
 //!
 //! All deeper intents (`ServiceProbe`, `HttpProbe`, `TlsProbe`, `DnsProbe`,
 //! `Fingerprint`, `Crawl`, `ContentDiscovery`, `Fuzz`, `rxscan.udp.intent`)
-//! have NO registered module in Phase 4 and run as `Skipped`
+//! have NO registered module in Phase 5 and run as `Skipped`
 //! (`module unavailable`). That is intentional honesty, visible in
 //! `--explain` and runtime output.
 //!
@@ -94,13 +94,24 @@ pub type ControlValidateModule = ScaffoldModule;
 pub type HostIntentModule = ScaffoldModule;
 pub type PortIntentModule = ScaffoldModule;
 
-/// All Phase-4-safe modules to register on a scheduler.
+/// All Phase-4-safe modules to register on a scheduler (retained for
+/// backwards-compatible tests; Phase 5 runtime uses `phase5_*` below).
 pub fn phase4_modules() -> Vec<ScaffoldModule> {
     vec![
         ScaffoldModule::control_validate(),
         ScaffoldModule::host_intent(),
         ScaffoldModule::port_intent(),
     ]
+}
+
+/// Phase 5 control scaffolds (validation only; host discovery is real).
+pub fn phase5_control_modules() -> Vec<ScaffoldModule> {
+    vec![ScaffoldModule::control_validate()]
+}
+
+/// Phase 5 port-discovery intent scaffold (Phase 6 owns real scanning).
+pub fn port_intent_module() -> ScaffoldModule {
+    ScaffoldModule::port_intent()
 }
 
 #[cfg(test)]

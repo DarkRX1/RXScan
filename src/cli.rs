@@ -82,6 +82,11 @@ pub struct Cli {
     #[arg(long, value_name = "N", value_parser = parse_positive_u64)]
     pub max_concurrency: Option<u64>,
 
+    /// Cap hosts generated from CIDR targets (1..=100000, default 256).
+    /// Large scopes stay bounded; Level 5 never means unbounded.
+    #[arg(long, value_name = "N", value_parser = parse_positive_u64)]
+    pub max_hosts: Option<u64>,
+
     /// Cap total execution time (e.g. 60s, 5m, 1h, 500ms, or bare seconds).
     #[arg(long, value_name = "DURATION")]
     pub max_execution_time: Option<String>,

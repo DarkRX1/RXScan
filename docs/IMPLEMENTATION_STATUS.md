@@ -6,20 +6,20 @@ The repository had no commits and contained an uncommitted Rust Phase-0-style sk
 
 ## Current state
 
-Phases 0, 1, 2, 3, and 4 are complete. RXScan performs no network I/O by design. It can compile a policy-bearing plan, lower it deterministically to executable tasks, run those tasks through the reactive scheduler with speed/budget control, and emit typed JSONL — all without fake discoveries.
+Phases 0, 1, 2, 3, 4, and 5 are complete. RXScan's first real network capability is host discovery: bounded native ICMP echo + TCP reachability through the existing scheduler, with explicit Alive/Unreachable/Unknown states and evidence. No TCP/UDP port scanning, HTTP, SSH probing, crawling, fuzzing, DNS enumeration, vulnerability checks, or exploitation exist yet.
 
 | Area | Current state | Next |
 | --- | --- | --- |
-| Native Rust core | Foundation + data model + control plane established | Phase 5 network modules |
-| Target, scope, CLI, config, plan | Implemented/tested; level/goal/budget-aware | Phase 5 executors |
-| Events/assets/findings | Implemented/tested; scaffold producers return empty output (no fakes) | Phase 5 real producers |
-| Scheduler/speed/budgets | Implemented, wired to binary, tested; auto is non-adaptive baseline | Phase 4.1 adaptive governor (optional) |
-| Plan→task lowering | Deterministic, scope-checked, deduped, all-ports safe | Phase 5 dependency expansion |
-| JSONL output | Typed, versioned, provenanced, bounded, tested | Phase 20+ reporting |
-| Network and web modules | Not implemented | Phase 5 onward |
-| CI/fixtures/benchmark discipline | Established; Phase 4 control-plane baseline recorded | Add executable fixtures per module |
+| Native Rust core | Foundation + data model + control plane + host discovery established | Phase 6 TCP port scanning |
+| Target, scope, CLI, config, plan | Implemented/tested; level/goal/budget-aware plus discovery mode/ports/hosts | Phase 6 executors |
+| Events/assets/findings | Implemented/tested; host-discovery producers emit real typed events/evidence/assets | Phase 6 real producers |
+| Scheduler/speed/budgets | Implemented, wired to binary, tested; auto is non-adaptive baseline; `max_hosts` bounds CIDR | Phase 4.1 adaptive governor (optional) |
+| Plan→task lowering | Deterministic, scope-checked, deduped, all-ports safe, CIDR host expansion bounded | Phase 6 dependency expansion |
+| JSONL output | Typed, versioned, provenanced, bounded, tested; includes discovery assets/events/evidence | Phase 20+ reporting |
+| Network and web modules | Host discovery only (ICMP echo + TCP reachability; ARP/ND deferred) | Phase 6 onward |
+| CI/fixtures/benchmark discipline | Established; Phase 5 host-discovery baseline recorded | Add executable fixtures per module |
 
-No performance or capability superiority is claimed. No scanning functionality is claimed beyond control-plane execution of scaffold tasks.
+No performance or capability superiority is claimed. No scanning functionality is claimed beyond bounded host discovery plus control-plane execution of scaffold tasks.
 
 ## Phase 0–1 verification
 
@@ -57,3 +57,10 @@ Verified locally on 2026-09-12 (see validation results in the Phase 4 completion
 - `cargo run -- example.test` — runs scaffold tasks to completion with no network I/O
 - `cargo run -- example.test --output <path>` — writes valid typed JSONL with schema version and provenance
 - `cargo run --example phase4_bench` — control-plane baseline recorded in `docs/benchmark-results/phase4-control-plane-baseline.md`
+
+## Phase 5 verification
+
+- `cargo fmt --check`, `cargo check`, `cargo test` (unit + phase1–5 suites), `cargo clippy --all-targets --all-features -- -D warnings`, `git diff --check` — all pass; Phase 4 suites remain green.
+- `cargo run -- 127.0.0.1 --discover --level 3 --output <path>` — Alive via ICMP echo (95) or TCP RST (85) with typed events/evidence/assets in JSONL; `::1` similarly Alive via ICMPv6.
+- `cargo run -- 127.0.0.0/29 --discover` — 6 bounded host tasks in deterministic order; `--max-hosts 2` truncates to 2; `--exclude 127.0.0.2` omits it.
+- `cargo run --example phase5_bench` — controlled local baseline recorded in `docs/benchmark-results/phase5-host-discovery-baseline.md` (no Internet, no superiority claims).

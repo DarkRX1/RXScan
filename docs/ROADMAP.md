@@ -8,13 +8,14 @@ Each phase requires tests, benchmark/regression evidence where applicable, docum
 | 1 | Target model, CLI, Scope Guard, config, ScanPlan | Complete |
 | 2 | Events, findings, stable asset IDs, relationships | Complete |
 | 3 | Reactive scheduler, queues, cancellation, backpressure | Complete |
-| 4 | Control-plane completion: plan→task lowering, level/speed policy, budgets, scheduler bootstrap, scaffold executors, JSONL output | Complete (current) |
-| 5–10 | Discovery, TCP, UDP, probes, TLS/fingerprints, HTTP | Not implemented |
+| 4 | Control-plane completion: plan→task lowering, level/speed policy, budgets, scheduler bootstrap, scaffold executors, JSONL output | Complete |
+| 5 | Host Discovery Engine: real bounded ICMP echo + TCP reachability via scheduler, host-state model, discovery policy, CIDR bounding, evidence/events, JSONL | Complete (current) |
+| 6–10 | TCP port scanning, UDP, probes, TLS/fingerprints, HTTP | Not implemented |
 | 11–15 | DNS, crawler, baseline, content, fuzzing | Not implemented |
 | 16–19 | Decision engine, API workflows, checks, graph/correlation | Not implemented |
 | 20–24 | Outputs, resume/diff/projects, packs, benchmark lab, releases | Not implemented |
 
-Phase 4 is control-plane only. No TCP, UDP, ICMP, DNS, HTTP, TLS, SSH, crawling, fuzzing, wordlists, service probing, fingerprinting, or vulnerability checks exist yet. Network tasks are represented as intended work and run as `Skipped` (`module unavailable`); scaffold tasks exercise the pipeline without fake discoveries.
+Phase 5 is the first real network capability (host discovery only). No TCP port scanning, UDP port scanning, HTTP, SSH service probing, crawling, fuzzing, DNS enumeration, vulnerability checks, or exploitation exist yet. Deeper network tasks still run as `Skipped` (`module unavailable`); host-discovery tasks run real bounded ICMP/TCP probing without fake discoveries.
 
 ## MVP v0.1 gate
 
@@ -50,3 +51,13 @@ TargetSpec, Scope Guard, ScanPlan, stable IDs/events, scheduler, speed/budgets, 
 - Runtime emits valid typed JSONL (`--output <path>`, `--format jsonl`) with schema version and provenance; filesystem errors are clean errors.
 - Task IDs are canonical SHA-256 over all execution-relevant fields; collision-regression tests exist.
 - Timeout/cancellation, backpressure, and retry fairness are hardened and tested; module cancellation contract is documented.
+
+## Phase 5 exit criteria
+
+- `HostDiscovery` is a real scheduler module (native ICMP echo via unprivileged ping sockets + bounded TCP reachability; no shell `ping`); ICMP failure never means dead (Unknown, not Unreachable) and TCP RST/connect is Alive evidence.
+- Discovery policy is centralized (`src/discovery.rs`): `--ping` prioritizes ICMP, `--discover` uses multi-probe, lightweight follows level; `--level` controls breadth (L1 minimal … L5 deepest bounded to 5 ports / 3 ICMP attempts), `--speed` controls pressure only (timeouts, concurrency, retry timing) and never state meaning.
+- CIDR targets expand to bounded per-host tasks (lazy `hosts()` order, `max_hosts` default 256, exclusions win, deterministic, never materializing massive ranges); every target passes Scope Guard at lowering, admission/dispatch, and immediately before network execution; derived addresses never expand scope.
+- Every probe honors timeout, cancellation, bounded retries (ICMP 1–3, TCP 1/port ≤8), concurrency via scheduler, budget accounting, and cleanup (no hanging sockets/leaked workers).
+- Typed events (`DiscoveryStarted`, `ProbeAttempted/Succeeded/TimedOut/Unavailable`, `HostStateConcluded`, `HostDiscovered`) plus evidence explain every Alive/Unreachable/Unknown conclusion with confidence, techniques, latency, provenance, and timestamps in the existing JSONL envelope.
+- CLI preserved (`TARGET --ping`, `TARGET --discover`, `CIDR --discover`); advanced tuning via config (`max_hosts`, `discovery_ports`); no Phase 6 port scanner claimed.
+- Tests are deterministic/local-only (loopback, temporary listeners, fakes); benchmark baseline recorded in `docs/benchmark-results/phase5-host-discovery-baseline.md` with no Internet traffic and no superiority claims.

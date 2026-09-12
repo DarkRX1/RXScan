@@ -117,6 +117,13 @@ pub struct ScanPlan {
     /// Effective budgets (defaults < global < project < CLI). Phase 4.
     #[serde(default)]
     pub budgets: crate::execution::BudgetLimits,
+    /// Phase 5: how host discovery was requested (centralized policy input).
+    #[serde(default)]
+    pub discovery_mode: crate::discovery::DiscoveryMode,
+    /// Phase 5: explicit TCP reachability set for host discovery
+    /// (configuration/profile only). `None` means level-derived defaults.
+    #[serde(default)]
+    pub discovery_ports: Option<Vec<u16>>,
 }
 
 #[derive(Debug, Error)]
@@ -205,6 +212,24 @@ impl ScanPlan {
                 field: "budgets".to_owned(),
                 reason: error.to_string(),
             })?;
+        // Phase 5 discovery inputs (centralized; CLI handlers stay thin).
+        let discovery_mode = crate::discovery::DiscoveryMode::from_flags(cli.ping, cli.discover);
+        let discovery_ports =
+            match config.discovery_ports.as_deref() {
+                Some(raw) => Some(crate::discovery::parse_discovery_ports(raw).map_err(
+                    |reason| PlanError::InvalidBudget {
+                        field: "discovery_ports".to_owned(),
+                        reason,
+                    },
+                )?),
+                None => None,
+            };
+        let discovery_policy = crate::discovery::HostDiscoveryPolicy::for_level(
+            level,
+            discovery_mode,
+            speed,
+            discovery_ports.as_deref(),
+        );
         let mut reasons = vec!["Every input is normalized into TargetSpec before planning.".to_owned(), "Scope is deny-by-default: seed targets and explicit --scope rules are the only permitted expansion.".to_owned(), format!("Goal {goal:?}, level {level}, and speed {speed} remain independent policy controls.", )];
         reasons.append(&mut level_reasons);
         if !effective.sources.is_empty() {
@@ -226,16 +251,23 @@ impl ScanPlan {
             })?;
         reasons.push(format!("Speed policy: {}.", governor.describe()));
         reasons.push(format!(
-            "Budgets: max_tasks {}, max_retries {}, max_concurrency {} (effective {}), max_execution_time_ms {}, max_evidence_bytes {}.",
+            "Budgets: max_tasks {}, max_retries {}, max_concurrency {} (effective {}), max_execution_time_ms {}, max_evidence_bytes {}, max_hosts {}.",
             budgets.max_tasks,
             budgets.max_retries,
             budgets.max_concurrency,
             governor.concurrency(),
             budgets.max_execution_time_ms,
-            budgets.max_evidence_bytes
+            budgets.max_evidence_bytes,
+            budgets.max_hosts,
+        ));
+        reasons.push(format!(
+            "Host discovery policy: {}.",
+            discovery_policy.describe()
         ));
         let mut skipped = level_skipped;
-        skipped.push("Phase 4 performs no network I/O; scaffold tasks exercise the control plane without fake discoveries.".to_owned());
+        skipped.push(
+            "Phase 5 host discovery uses real bounded ICMP echo (unprivileged ping sockets; structured unavailable when privileges are missing) and TCP reachability; ARP/neighbor discovery are deferred and never faked.".to_owned(),
+        );
         Ok(Self {
             targets,
             scope,
@@ -255,6 +287,8 @@ impl ScanPlan {
             reasons,
             skipped,
             budgets,
+            discovery_mode,
+            discovery_ports,
         })
     }
     pub fn explain(&self) -> String {
@@ -295,17 +329,26 @@ impl ScanPlan {
                 .map(|governor| governor.retry_limit())
                 .unwrap_or(0);
         format!(
-            "RXScan Phase 4 plan\ngoal: {:?}\nlevel: {}\nspeed: {}\nprofile: {}\nspeed policy: {governor}\neffective concurrency: {effective_concurrency}\nretry limit: {retry_limit}\ntask budget: {}\nretry budget: {}\nevidence budget (bytes): {}\nexecution timeout (ms): {}\nqueue capacity: {}\ntargets:\n{targets}\nmodules:\n{modules}\ntcp ports: {:?}\nscope: {} allow rule(s), {} exclusion(s)\nwhy:\n{reasons}\nskipped:\n{skipped}",
+            "RXScan Phase 5 plan\ngoal: {:?}\nlevel: {}\nspeed: {}\nprofile: {}\ndiscovery: {}\nspeed policy: {governor}\neffective concurrency: {effective_concurrency}\nretry limit: {retry_limit}\ntask budget: {}\nretry budget: {}\nevidence budget (bytes): {}\nexecution timeout (ms): {}\nhost budget: {}\nqueue capacity: {}\ntargets:\n{targets}\nmodules:\n{modules}\ntcp ports: {:?}\ndiscovery policy: {}\nscope: {} allow rule(s), {} exclusion(s)\nwhy:\n{reasons}\nskipped:\n{skipped}",
             self.goal,
             self.level,
             self.speed,
             self.profile.as_deref().unwrap_or("default"),
+            self.discovery_mode.as_str(),
             self.budgets.max_tasks,
             self.budgets.max_retries,
             self.budgets.max_evidence_bytes,
             self.budgets.max_execution_time_ms,
+            self.budgets.max_hosts,
             self.budgets.queue_capacity(),
             self.tcp_ports,
+            crate::discovery::HostDiscoveryPolicy::for_level(
+                self.level,
+                self.discovery_mode,
+                self.speed,
+                self.discovery_ports.as_deref(),
+            )
+            .describe(),
             self.scope.allowed.len(),
             self.scope.exclusions.len()
         )
@@ -369,6 +412,13 @@ fn build_budgets(
     if let Some(raw) = evidence_raw {
         let bytes = parse_bytes(raw).map_err(|reason| invalid("max_evidence_bytes", reason))?;
         budgets.max_evidence_bytes = bytes;
+    }
+    if let Some(value) = config.max_hosts.or(cli.max_hosts) {
+        let effective = cli.max_hosts.or(config.max_hosts).unwrap_or(value);
+        if effective == 0 {
+            return Err(invalid("max_hosts", "must be positive".to_owned()));
+        }
+        budgets.max_hosts = effective;
     }
     Ok(budgets)
 }

@@ -11,5 +11,6 @@ Fixture coverage expands from Phase 0 target/scope samples to IPv4/IPv6, TCP/UDP
 - Phase 0: `docs/benchmark-results/phase0-baseline.md` (target/scope/plan correctness).
 - Phase 2: `docs/benchmark-results/phase2-model-baseline.md` (model identity and bounded records; no throughput claim).
 - Phase 4: `docs/benchmark-results/phase4-control-plane-baseline.md` (scheduler throughput with stub modules, queue saturation, cancellation latency, dedup, bounded concurrency, peak RSS). Reproduce with `cargo run --example phase4_bench`. No network I/O; no performance superiority claims.
+- Phase 5: `docs/benchmark-results/phase5-host-discovery-baseline.md` (controlled local host discovery: CIDR lowering, simulated-host throughput, cancellation latency, timeout behavior, peak queued hosts, effective concurrency, CPU/RSS observations). Reproduce with `cargo run --example phase5_bench`. Local loopback/fake fixtures only; no public Internet; no performance superiority claims.
 
-The first executable network benchmark is introduced with the first network module (Phase 5+). It must use only controlled fixtures and record time-to-first-result, throughput, CPU, RSS, queue depth, cancellation latency, and correctness.
+The first executable network benchmark is Phase 5. It uses only controlled fixtures (loopback, temporary local listeners, deterministic fakes) and records time-to-first-result, throughput, CPU, RSS, queue depth, cancellation latency, timeout behavior, and correctness.

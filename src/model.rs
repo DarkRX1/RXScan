@@ -413,6 +413,16 @@ pub enum EventKind {
     FuzzResult,
     FindingCreated,
     EvidenceCollected,
+    // Phase 5 host-discovery lifecycle (typed, quiet by default; verbose in
+    // JSONL). `HostDiscovered` is retained for Alive hosts;
+    // `HostStateConcluded` carries the final Alive/Unreachable/Unknown state
+    // with confidence, techniques, latency, and evidence for every host.
+    DiscoveryStarted,
+    ProbeAttempted,
+    ProbeSucceeded,
+    ProbeTimedOut,
+    ProbeUnavailable,
+    HostStateConcluded,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Event {

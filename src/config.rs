@@ -31,6 +31,13 @@ pub struct ConfigLayer {
     /// Evidence cap. TOML/CLI accept `"67108864"`, `"64MiB"`, `"10MB"`, etc.
     #[serde(deserialize_with = "deserialize_optional_stringy", default)]
     pub max_evidence_bytes: Option<String>,
+    /// Phase 5: cap on hosts generated from CIDR targets (1..=100000).
+    /// Defaults to 256. CLI `--max-hosts` wins when present.
+    pub max_hosts: Option<u64>,
+    /// Phase 5: small configurable TCP reachability set for host discovery
+    /// (e.g. `"80,443"`). Bounded to 8 ports. Level-derived defaults apply
+    /// when unset. Configuration/profile only; no CLI flag by design.
+    pub discovery_ports: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -132,6 +139,20 @@ impl ConfigLayer {
                 reason,
             })?;
         }
+        if let Some(value) = self.max_hosts.filter(|value| *value == 0) {
+            return Err(ConfigError::InvalidBudget {
+                field: "max_hosts".to_owned(),
+                reason: format!("must be positive, got {value}"),
+            });
+        }
+        if let Some(value) = self.discovery_ports.as_deref() {
+            crate::discovery::parse_discovery_ports(value).map_err(|reason| {
+                ConfigError::InvalidBudget {
+                    field: "discovery_ports".to_owned(),
+                    reason,
+                }
+            })?;
+        }
         Ok(())
     }
 
@@ -153,6 +174,8 @@ impl ConfigLayer {
         self.max_concurrency = higher.max_concurrency.or(self.max_concurrency);
         self.max_execution_time = higher.max_execution_time.or(self.max_execution_time.take());
         self.max_evidence_bytes = higher.max_evidence_bytes.or(self.max_evidence_bytes.take());
+        self.max_hosts = higher.max_hosts.or(self.max_hosts);
+        self.discovery_ports = higher.discovery_ports.or(self.discovery_ports.take());
     }
 }
 

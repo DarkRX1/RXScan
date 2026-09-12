@@ -1,9 +1,13 @@
-//! Phase 4 runtime bootstrap: Target -> Scope -> ScanPlan -> Tasks ->
+//! Phase 5 runtime bootstrap: Target -> Scope -> ScanPlan -> Tasks ->
 //! Reactive Scheduler <-> Speed Governor <-> Budgets <-> Backpressure ->
-//! Module Executor -> Typed Events -> JSONL Output.
+//! HostDiscovery Module -> Typed Events / Evidence -> Decision Engine
+//! boundary -> JSONL Output.
 //!
-//! No network activity. Only Phase-4-safe scaffold modules are registered;
-//! deeper network intents run as `Skipped` (`module unavailable`).
+//! Real bounded host-discovery traffic occurs via `HostDiscoveryModule`
+//! (native ICMP echo + TCP reachability, no shell `ping`). Deeper intents
+//! (port scanning, UDP, HTTP, TLS, DNS, fuzzing) still run as `Skipped`
+//! (`module unavailable`). The Decision Engine boundary is preserved
+//! (`NoFollowUps` in Phase 5; follow-up port expansion belongs to Phase 6).
 
 use std::sync::Arc;
 
@@ -11,11 +15,13 @@ use thiserror::Error;
 
 use crate::{
     cli::Cli,
+    discovery::HostDiscoveryPolicy,
     execution::{
         BudgetLimits, PolicyScopeGuard, Scheduler, SchedulerReport, SpeedGovernor, VecEventSink,
     },
+    host_discovery::HostDiscoveryModule,
     lowering::{LowerError, lower_plan_to_tasks},
-    modules::phase4_modules,
+    modules::{phase5_control_modules, port_intent_module},
     output::{OutputError, create_file_writer},
     plan::{PlanError, ScanPlan},
 };
@@ -54,10 +60,12 @@ pub struct RunReport {
     pub output_path: Option<String>,
 }
 
-/// Execute the full Phase 4 control plane from CLI.
+/// Execute the full Phase 5 control + discovery plane from CLI.
 ///
-/// Steps: compile plan -> scope guard -> lower tasks -> speed governor ->
-/// budgets -> scheduler -> register Phase-4 modules -> run -> JSONL output.
+/// Steps: compile plan -> scope guard -> lower tasks (bounded CIDR) -> speed
+/// governor -> budgets -> scheduler -> register HostDiscovery + control/port
+/// scaffolds -> run -> JSONL output (scheduler events + discovery assets,
+/// events, evidence).
 pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
     let output_path = cli.output.clone();
     let format = cli.format.clone();
@@ -84,30 +92,43 @@ pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
         queue_capacity,
         budgets.clone(),
         governor,
-        guard,
+        guard.clone(),
         sink.clone(),
     )?;
-    for module in phase4_modules() {
+    // Centralized discovery policy (level breadth + speed pressure).
+    let discovery_policy = HostDiscoveryPolicy::for_level(
+        plan.level,
+        plan.discovery_mode,
+        plan.speed,
+        plan.discovery_ports.as_deref(),
+    );
+    scheduler.register_module(Arc::new(HostDiscoveryModule::new(
+        discovery_policy,
+        guard.clone(),
+    )));
+    for module in phase5_control_modules() {
         scheduler.register_module(Arc::new(module));
     }
+    scheduler.register_module(Arc::new(port_intent_module()));
     for task in tasks {
-        // Lowering already scope-checks; scheduler admission is the second
-        // enforcement point (defense in depth). Duplicates cannot occur
-        // (lowering dedupes) unless the DecisionEngine proposes them later
-        // (Phase 4 uses NoFollowUps, so none).
+        // Lowering scope-checks; scheduler admission is the second
+        // enforcement point; dispatch + module pre-execution re-check
+        // (defense in depth). Duplicates cannot occur (lowering dedupes)
+        // unless the DecisionEngine proposes them later (Phase 5 uses
+        // NoFollowUps, so none).
         scheduler.add_task(task)?;
     }
     let scheduler_report = scheduler.run()?;
     let events = sink.events();
+    let module_outputs = scheduler.module_outputs();
 
     // JSONL output: file if --output, stdout if --format jsonl without file,
-    // otherwise no JSONL (human summary printed by main).
+    // otherwise no JSONL (human summary printed by main). Discovery results
+    // (assets, events, evidence) flow into the same typed JSONL envelope.
     let mut jsonl_bytes = 0u64;
     if let Some(path) = output_path.as_deref() {
         let mut writer = create_file_writer(path, budgets.max_evidence_bytes)?;
-        for event in &events {
-            writer.write_scheduler_event(event)?;
-        }
+        write_outputs(&mut writer, &events, &module_outputs)?;
         writer.flush()?;
         jsonl_bytes = writer.bytes_written();
     } else if format
@@ -117,9 +138,7 @@ pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
         let stdout = std::io::stdout();
         let handle = stdout.lock();
         let mut writer = crate::output::JsonlWriter::new(handle, budgets.max_evidence_bytes);
-        for event in &events {
-            writer.write_scheduler_event(event)?;
-        }
+        write_outputs(&mut writer, &events, &module_outputs)?;
         writer.flush()?;
         jsonl_bytes = writer.bytes_written();
     }
@@ -133,11 +152,42 @@ pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
     })
 }
 
+fn write_outputs<W: std::io::Write>(
+    writer: &mut crate::output::JsonlWriter<W>,
+    scheduler_events: &[crate::execution::SchedulerEvent],
+    module_outputs: &[(crate::execution::TaskId, crate::execution::ModuleOutput)],
+) -> Result<(), OutputError> {
+    for event in scheduler_events {
+        writer.write_scheduler_event(event)?;
+    }
+    // Deterministic order: sort module outputs by task ID.
+    let mut ordered = module_outputs.to_vec();
+    ordered.sort_by(|left, right| left.0.0.cmp(&right.0.0));
+    for (_, output) in &ordered {
+        for asset in &output.assets {
+            writer.write_asset(asset)?;
+        }
+        for event in &output.events {
+            writer.write_event(event)?;
+        }
+        for evidence in &output.evidence {
+            writer.write_evidence(evidence)?;
+        }
+        for finding in &output.findings {
+            writer.write_finding(finding)?;
+        }
+    }
+    Ok(())
+}
+
 /// Human summary for non-JSONL runs.
 pub fn human_summary(report: &RunReport) -> String {
     let scheduler = &report.scheduler_report;
+    // Count discovery states from the plan-agnostic scheduler report? The
+    // detailed Alive/Unknown/Unreachable breakdown lives in JSONL evidence;
+    // the human line stays quiet by design (no noisy per-probe output).
     format!(
-        "RXScan Phase 4 run: {} task(s) | completed {} | failed {} | cancelled {} | timed out {} | skipped {} | JSONL bytes {}{}",
+        "RXScan Phase 5 run: {} task(s) | completed {} | failed {} | cancelled {} | timed out {} | skipped {} | JSONL bytes {}{}",
         report.task_count,
         scheduler.completed.len(),
         scheduler.failed.len(),

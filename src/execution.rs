@@ -435,6 +435,13 @@ pub const MAX_RETRIES_HARD_LIMIT: u64 = 100_000;
 pub const MAX_CONCURRENCY_HARD_LIMIT: usize = 64;
 pub const MAX_EXECUTION_TIME_MS_HARD_LIMIT: u64 = 3_600_000;
 pub const MAX_EVIDENCE_BYTES_HARD_LIMIT: u64 = 1024 * 1024 * 1024;
+/// Phase 5 host-discovery bound: at most this many hosts may be generated
+/// from explicit CIDR targets. Large scopes stay bounded; Level 5 never
+/// means unbounded.
+pub const MAX_HOSTS_HARD_LIMIT: u64 = 100_000;
+/// Default host bound: one /24 worth of hosts. Larger ranges are truncated
+/// deterministically (first `max_hosts` permitted addresses in order).
+pub const DEFAULT_MAX_HOSTS: u64 = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BudgetLimits {
@@ -443,8 +450,15 @@ pub struct BudgetLimits {
     pub max_concurrency: usize,
     pub max_execution_time_ms: u64,
     pub max_evidence_bytes: u64,
+    /// Phase 5: cap on hosts generated from CIDR targets (1..=100000).
+    /// Defaults to 256 (one /24). Enforced during plan lowering.
+    #[serde(default = "default_max_hosts")]
+    pub max_hosts: u64,
     #[serde(default)]
     pub per_module: BTreeMap<String, ModuleBudget>,
+}
+fn default_max_hosts() -> u64 {
+    DEFAULT_MAX_HOSTS
 }
 impl Default for BudgetLimits {
     fn default() -> Self {
@@ -454,6 +468,7 @@ impl Default for BudgetLimits {
             max_concurrency: 4,
             max_execution_time_ms: 60_000,
             max_evidence_bytes: 64 * 1024 * 1024,
+            max_hosts: DEFAULT_MAX_HOSTS,
             per_module: BTreeMap::new(),
         }
     }
@@ -466,9 +481,10 @@ impl BudgetLimits {
             || self.max_concurrency == 0
             || self.max_execution_time_ms == 0
             || self.max_evidence_bytes == 0
+            || self.max_hosts == 0
         {
             return Err(SchedulerError::InvalidConfiguration(
-                "budgets must be positive (max tasks, retries, concurrency, execution time, evidence bytes)",
+                "budgets must be positive (max tasks, retries, concurrency, execution time, evidence bytes, hosts)",
             ));
         }
         if self.max_tasks > MAX_TASKS_HARD_LIMIT
@@ -476,6 +492,7 @@ impl BudgetLimits {
             || self.max_concurrency > MAX_CONCURRENCY_HARD_LIMIT
             || self.max_execution_time_ms > MAX_EXECUTION_TIME_MS_HARD_LIMIT
             || self.max_evidence_bytes > MAX_EVIDENCE_BYTES_HARD_LIMIT
+            || self.max_hosts > MAX_HOSTS_HARD_LIMIT
         {
             return Err(SchedulerError::InvalidConfiguration(
                 "budget exceeds hard safety limit",
@@ -723,6 +740,9 @@ pub struct ModuleOutput {
     pub events: Vec<Event>,
     pub evidence: Vec<Evidence>,
     pub findings: Vec<Finding>,
+    /// Phase 5: assets observed by the module (e.g. discovered hosts).
+    /// Recording an observation never grants scheduling authority.
+    pub assets: Vec<crate::model::Asset>,
 }
 impl ModuleOutput {
     fn evidence_bytes(&self) -> u64 {
@@ -874,6 +894,9 @@ pub struct Scheduler {
     ledger: BudgetLedger,
     governor: SpeedGovernor,
     started_at: Instant,
+    /// Phase 5: completed module outputs retained for JSONL output.
+    /// Keyed by task ID; only `Succeeded` tasks populate this map.
+    completed_outputs: BTreeMap<TaskId, ModuleOutput>,
 }
 impl Scheduler {
     pub fn new(
@@ -901,6 +924,7 @@ impl Scheduler {
             ledger: BudgetLedger::default(),
             governor,
             started_at: Instant::now(),
+            completed_outputs: BTreeMap::new(),
         })
     }
     pub fn register_module(&mut self, module: Arc<dyn Module>) {
@@ -1303,6 +1327,8 @@ impl Scheduler {
                 record.task.state = TaskState::Succeeded;
                 record.execution_started = None;
                 report.completed.push(result.task_id.clone());
+                self.completed_outputs
+                    .insert(result.task_id.clone(), output.clone());
                 self.emit_task(&result.task_id, SchedulerEventKind::TaskCompleted, None);
                 let followups = self
                     .decision_engine
@@ -1391,6 +1417,13 @@ impl Scheduler {
     }
     pub fn budgets(&self) -> &BudgetLimits {
         &self.budgets
+    }
+    /// Completed module outputs for JSONL output (Phase 5 discovery results).
+    pub fn module_outputs(&self) -> Vec<(TaskId, ModuleOutput)> {
+        self.completed_outputs
+            .iter()
+            .map(|(id, output)| (id.clone(), output.clone()))
+            .collect()
     }
     pub fn queue_depth(&self) -> usize {
         self.queue.len()
