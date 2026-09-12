@@ -267,9 +267,14 @@ impl ScanPlan {
         let tcp_policy =
             crate::tcp_discovery::TcpScanPolicy::new(level, goal, tcp_ports.clone(), speed);
         reasons.push(format!("TCP port policy: {}.", tcp_policy.describe()));
+        let service_policy = crate::service_probe::ServicePolicy::new(level, goal, speed);
+        reasons.push(format!(
+            "Service probe policy: {}.",
+            service_policy.describe()
+        ));
         let mut skipped = level_skipped;
         skipped.push(
-            "Phase 6 runs real bounded host discovery plus native TCP connect port scanning (one task per target, bounded internal window); ARP/ND, UDP, HTTP/TLS/DNS, fuzzing, and service fingerprinting remain deferred."
+            "Phase 7 runs real bounded host discovery, native TCP connect port scanning (one task per target, bounded internal window), and native service probing (one task per open port, no authentication); ARP/ND, UDP, HTTP crawling, TLS cipher enumeration, DNS, fuzzing, and the fingerprint engine remain deferred."
                 .to_owned(),
         );
         Ok(Self {
@@ -333,7 +338,7 @@ impl ScanPlan {
                 .map(|governor| governor.retry_limit())
                 .unwrap_or(0);
         format!(
-            "RXScan Phase 6 plan\ngoal: {:?}\nlevel: {}\nspeed: {}\nprofile: {}\ndiscovery: {}\nspeed policy: {governor}\neffective concurrency: {effective_concurrency}\nretry limit: {retry_limit}\ntask budget: {}\nretry budget: {}\nevidence budget (bytes): {}\nexecution timeout (ms): {}\nhost budget: {}\nqueue capacity: {}\ntargets:\n{targets}\nmodules:\n{modules}\ntcp ports: {:?}\ndiscovery policy: {}\ntcp policy: {}\nscope: {} allow rule(s), {} exclusion(s)\nwhy:\n{reasons}\nskipped:\n{skipped}",
+            "RXScan Phase 7 plan\ngoal: {:?}\nlevel: {}\nspeed: {}\nprofile: {}\ndiscovery: {}\nspeed policy: {governor}\neffective concurrency: {effective_concurrency}\nretry limit: {retry_limit}\ntask budget: {}\nretry budget: {}\nevidence budget (bytes): {}\nexecution timeout (ms): {}\nhost budget: {}\nqueue capacity: {}\ntargets:\n{targets}\nmodules:\n{modules}\ntcp ports: {:?}\ndiscovery policy: {}\ntcp policy: {}\nservice policy: {}\nscope: {} allow rule(s), {} exclusion(s)\nwhy:\n{reasons}\nskipped:\n{skipped}",
             self.goal,
             self.level,
             self.speed,
@@ -360,6 +365,7 @@ impl ScanPlan {
                 self.speed,
             )
             .describe(),
+            crate::service_probe::ServicePolicy::new(self.level, self.goal, self.speed).describe(),
             self.scope.allowed.len(),
             self.scope.exclusions.len()
         )

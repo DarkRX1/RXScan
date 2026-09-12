@@ -433,6 +433,20 @@ pub enum EventKind {
     PortTimedOut,
     PortProbeError,
     PortScanCompleted,
+    // Phase 7 service-intelligence lifecycle. Per-probe outcome events stay
+    // in JSONL (quiet on the terminal); the human table shows one row per
+    // classified service with product hints, never guessed versions.
+    // (`ServiceIdentified` from the Phase 2 model is reused for
+    // classifications, with a Port→Service `Runs` relationship attached.)
+    ServiceProbeStarted,
+    ProtocolDetected,
+    BannerObserved,
+    ServiceProbeTimedOut,
+    ServiceProbeUnavailable,
+    ServiceProbeError,
+    TlsObserved,
+    HttpObserved,
+    ServiceProbeCompleted,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Event {

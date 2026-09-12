@@ -6,20 +6,20 @@ The repository had no commits and contained an uncommitted Rust Phase-0-style sk
 
 ## Current state
 
-Phases 0, 1, 2, 3, 4, 5, and 6 are complete. RXScan now performs real bounded host discovery plus native TCP connect port scanning through the existing scheduler, with explicit host states, port states, Decision Engine V1 proposals, and evidence. No UDP scanning, SSH/HTTP enumeration, crawling, fuzzing, DNS enumeration, vulnerability checks, exploitation, or service fingerprinting exist yet.
+Phases 0 through 7 are complete. RXScan now performs real bounded host discovery, native TCP connect port scanning, and native service/protocol identification through the existing scheduler, with explicit host states, port states, service observations, Decision Engine host→port and open-port→service proposals, and evidence. No UDP scanning, web crawling, directory discovery, fuzzing, DNS enumeration, vulnerability checks, brute force, exploitation, cipher enumeration, or technology fingerprinting exist yet.
 
 | Area | Current state | Next |
 | --- | --- | --- |
-| Native Rust core | Foundation + data model + control plane + host + TCP discovery established | Phase 7 service fingerprinting |
-| Target, scope, CLI, config, plan | Implemented/tested; level/goal/budget-aware plus discovery/TCP port policy | Phase 7 executors |
-| Events/assets/findings | Implemented/tested; host + port producers emit real typed events/evidence/assets/findings (per-open) | Phase 7 real producers |
+| Native Rust core | Foundation + data model + control plane + host + TCP + service discovery established (rustls/x509-parser for TLS observation) | Phase 8 web engine |
+| Target, scope, CLI, config, plan | Implemented/tested; level/goal/budget-aware plus discovery/TCP/service policy | Phase 8 executors |
+| Events/assets/findings | Implemented/tested; host + port + service producers emit real typed events/evidence/assets/findings (per-open, per-classified-service) | Phase 8 real producers |
 | Scheduler/speed/budgets | Implemented, wired to binary, tested; auto is non-adaptive baseline; `max_hosts` bounds CIDR; follow-ups best-effort (dup/scope/budget skip) | Phase 4.1 adaptive governor (optional) |
-| Plan→task lowering | Deterministic, scope-checked, deduped, ONE port task per target (never 65k), CIDR host expansion bounded | Phase 7 dependency expansion |
-| JSONL output | Typed, versioned, provenanced, bounded, tested; includes discovery + scan assets/events/evidence/findings; terminal prioritizes opens | Phase 20+ reporting |
-| Network and web modules | Host discovery (ICMP/TCP reachability) + TCP connect port scanning; ARP/ND deferred; no UDP/HTTP/SSH/DNS/fuzzing/fingerprinting | Phase 7 onward |
-| CI/fixtures/benchmark discipline | Established; Phase 5 + Phase 6 baselines recorded | Add executable fixtures per module |
+| Plan→task lowering | Deterministic, scope-checked, deduped, ONE port task per target (never 65k), CIDR host expansion bounded; service tasks proposed per open port by the engine | Phase 8 dependency expansion |
+| JSONL output | Typed, versioned, provenanced, bounded, tested; includes discovery + scan + service assets/events/evidence/findings; terminal shows service table | Phase 20+ reporting |
+| Network and web modules | Host discovery + TCP port scanning + service probing (SSH/HTTP/TLS/HTTPS/FTP/SMTP/Redis/MySQL/PostgreSQL/generic; ARP/ND deferred); no UDP/crawling/fuzzing/DNS/checks/fingerprint engine | Phase 8 onward |
+| CI/fixtures/benchmark discipline | Established; Phase 5 + 6 + 7 baselines recorded | Add executable fixtures per module |
 
-No performance or capability superiority is claimed. No scanning functionality is claimed beyond bounded host discovery and TCP connect port scanning plus control-plane execution of scaffold tasks.
+No performance or capability superiority is claimed. No scanning functionality is claimed beyond bounded host discovery, TCP connect port scanning, and safe service identification plus control-plane execution of scaffold tasks.
 
 ## Phase 0–1 verification
 
@@ -71,3 +71,9 @@ Verified locally on 2026-09-12 (see validation results in the Phase 4 completion
 - `cargo run -- 127.0.0.1 --ports 22,80,443 --level 3` — bounded port task scans 3 ports; open listeners surface in the human `HOST`/`PORT STATE` table and JSONL findings.
 - `cargo run -- 127.0.0.1 --all-ports --level 1 --output <path>` — ONE task scans 65,535 ports internally (~47 JSONL lines: opens + summary, never 65k tasks/events).
 - `cargo run --example phase6_bench` — controlled local baseline recorded in `docs/benchmark-results/phase6-tcp-baseline.md` (~50k ports/sec loopback, 0ms cancel, deterministic; no Internet, no Nmap/RustScan claims).
+
+## Phase 7 verification
+
+- `cargo fmt --check`, `cargo check`, `cargo test` (unit + phase1–7 suites, 161 tests), `cargo clippy --all-targets --all-features -- -D warnings`, `git diff --check` — all pass; Phase 0–6 suites remain green.
+- `cargo run -- 127.0.0.1 --ports 22,80 --level 4` against local SSH/HTTP fixtures — human `PORT/SERVICE/PRODUCT` table shows classified services with observed product hints; JSONL carries service assets, `ServiceIdentified` events with `Runs` relationships, certificate evidence, and per-service findings.
+- `cargo run --example phase7_bench` — controlled local baseline recorded in `docs/benchmark-results/phase7-service-baseline.md` (~480 identifications/sec, first ~2ms, bounded cancel/timeout; no Internet, no competitor claims).

@@ -18,6 +18,9 @@ RXScan is for authorized, scoped, non-destructive reconnaissance. Its central ri
 | Privilege confusion (raw sockets) | unprivileged ping sockets tried first; permission failures degrade to structured `Unavailable` and TCP fallback; never report Unreachable from missing privileges; TCP scanning is unprivileged connect-only (no raw SYN) | 5–6 |
 | Closed/timeout conflation | explicit `Open`/`Closed`/`FilteredOrTimedOut`/`Error` port states; timeouts never reported as closed; retries only for filtered (≤1) | 6 |
 | FD/thread exhaustion on huge scans | one task per target with a bounded non-blocking window (16–128, hard 256); no thread per port; FD cleanup + backoff; per-port detail truncated for huge scans | 6 |
+| Credential exposure / destructive protocol actions | no-authentication design: only passive reads plus one safe exchange per protocol (GET / EHLO / PING / SSLRequest / ClientHello); exact-bytes allowlist test forbids AUTH/USER/PASS/LOGIN and destructive verbs | 7 |
+| Service misidentification (port-guessing) | port hints order probes only; classifications require handshake/banner evidence with graded confidence; unknown stays unknown; silent stays silent | 7 |
+| Unbounded handshake/memory blowup | per-probe wall budgets plus task-deadline truncation, 2–32KiB read caps with truncation flags, fixed small writes, no cipher enumeration | 7 |
 
 Modules never receive authority to bypass policy. Discovery may be recorded without authorizing active work against a new asset.
 
@@ -38,3 +41,11 @@ Modules never receive authority to bypass policy. Discovery may be recorded with
 - Modules never self-schedule (Decision Engine V1 proposes host→port; port tasks never chain further; service/HTTP/SSH handoff deferred to Phase 7).
 - Output stays bounded (per-open assets/evidence/findings; per-port detail only for ≤256-port scans; huge scans emit opens + summary; JSONL byte cap; terminal shows opens only).
 - Service boundary: open means open; no banner reads, no version claims (enforced by test).
+
+## Phase 7 executor safety notes
+
+- No authentication, no mail relay, no queries, no destructive commands: the exact bytes each probe may send are documented in `src/probes.rs` and enforced by an allowlist test (passive reads for SSH/FTP/MySQL/generic; single GET / EHLO / PING / SSLRequest / ClientHello otherwise).
+- One task per open port with a sequential bounded probe plan (first classification wins; TLS compositions reuse the session); per-probe wall budgets plus task-deadline truncation with partial results; prompt cancellation; no inner retries (timeouts become evidence).
+- Scope Guard cannot be bypassed (lowering/admission/promotion/dispatch/module checks; service tasks carry Ip scope with derived-address re-checks; hostname-derived IPs filtered; proposals pre-checked and best-effort admitted).
+- TLS via rustls observe-only verifier (trust never evaluated; chain recorded as evidence); no cipher-suite enumeration; certificates parsed with bounded x509-parser and fingerprinted with SHA-256.
+- Output stays bounded (per-classified-service assets/evidence/findings; unknown-with-banner evidence only; silent runs emit events alone; JSONL byte cap; terminal shows the service table only).

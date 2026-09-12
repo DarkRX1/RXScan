@@ -1,14 +1,17 @@
-//! Phase 6 runtime bootstrap: Target -> Scope -> ScanPlan -> Tasks ->
+//! Phase 7 runtime bootstrap: Target -> Scope -> ScanPlan -> Tasks ->
 //! Reactive Scheduler <-> Speed Governor <-> Budgets <-> Backpressure ->
-//! HostDiscovery + TcpDiscovery Modules -> Typed Events / Evidence / Assets /
-//! Findings -> Decision Engine V1 -> JSONL Output + human open-port summary.
+//! HostDiscovery + TcpDiscovery + ServiceProbe Modules -> Typed Events /
+//! Evidence / Assets / Findings -> Decision Engine (host→port, open-port→
+//! service) -> JSONL Output + human service summary.
 //!
-//! Real bounded discovery: native ICMP echo + TCP reachability (Phase 5) and
+//! Real bounded discovery: native ICMP echo + TCP reachability (Phase 5),
 //! native TCP connect port scanning (Phase 6, one task per target with a
-//! bounded internal window, no thread per port). Deeper intents (UDP, HTTP,
-//! TLS, DNS, fuzzing, service fingerprinting) still run as `Skipped`
-//! (`module unavailable`). The Decision Engine boundary is live: host facts
-//! propose scoped port tasks admitted via Scope Guard, policy, budgets, and
+//! bounded internal window, no thread per port), and native protocol probing
+//! (Phase 7, one task per open port with a small ordered probe plan, no
+//! authentication). Deeper intents (UDP, HTTP crawling, TLS cipher
+//! enumeration, DNS, fuzzing, fingerprint engine) still run as `Skipped`
+//! (`module unavailable`). The Decision Engine boundary is live: facts
+//! propose scoped follow-ups admitted via Scope Guard, policy, budgets, and
 //! scheduler dedup.
 
 use std::sync::Arc;
@@ -17,7 +20,7 @@ use thiserror::Error;
 
 use crate::{
     cli::Cli,
-    decision::TcpDecisionEngine,
+    decision::Phase7Engine,
     discovery::HostDiscoveryPolicy,
     execution::{
         BudgetLimits, PolicyScopeGuard, Scheduler, SchedulerReport, SpeedGovernor, VecEventSink,
@@ -27,6 +30,7 @@ use crate::{
     modules::phase5_control_modules,
     output::{OutputError, create_file_writer},
     plan::{PlanError, ScanPlan},
+    service_probe::ServicePolicy,
     tcp_discovery::TcpScanPolicy,
 };
 
@@ -62,18 +66,20 @@ pub struct RunReport {
     pub scheduler_report: SchedulerReport,
     pub jsonl_bytes: u64,
     pub output_path: Option<String>,
-    /// Human open-port table (prioritizes opens; empty when none observed).
-    /// Kept in the report so the binary prints opens without re-reading JSONL.
+    /// Human service table (open ports with service/product columns; falls
+    /// back to port-only rows when no service findings exist yet).
+    /// Kept in the report so the binary prints services without re-reading JSONL.
     pub open_ports_summary: String,
 }
 
-/// Execute the full Phase 6 discovery plane from CLI.
+/// Execute the full Phase 7 discovery plane from CLI.
 ///
 /// Steps: compile plan -> scope guard -> lower tasks (bounded CIDR, one port
 /// task per target) -> speed governor -> budgets -> scheduler -> register
-/// HostDiscovery + TcpDiscovery + control scaffolds -> Decision Engine V1 ->
-/// run -> JSONL output (scheduler events + discovery/scan assets, events,
-/// evidence, findings) + human open-port summary.
+/// HostDiscovery + TcpDiscovery + ServiceProbe + control scaffolds ->
+/// Decision Engine (host→port, open-port→service) -> run -> JSONL output
+/// (scheduler events + discovery/scan/service assets, events, evidence,
+/// findings) + human service summary.
 pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
     let output_path = cli.output.clone();
     let format = cli.format.clone();
@@ -120,11 +126,17 @@ pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
         tcp_policy,
         guard.clone(),
     )));
+    let service_policy = ServicePolicy::new(plan.level, plan.goal, plan.speed);
+    scheduler.register_module(Arc::new(crate::service_probe::ServiceProbeModule::new(
+        service_policy,
+        guard.clone(),
+    )));
     for module in phase5_control_modules() {
         scheduler.register_module(Arc::new(module));
     }
-    // Decision Engine V1: host facts propose scoped port tasks.
-    scheduler.set_decision_engine(Arc::new(TcpDecisionEngine::new(
+    // Decision Engine: host facts propose scoped port tasks, open ports
+    // propose scoped service tasks.
+    scheduler.set_decision_engine(Arc::new(Phase7Engine::new(
         guard.clone(),
         plan.stable_id(),
         plan.level,
@@ -170,7 +182,7 @@ pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
         scheduler_report,
         jsonl_bytes,
         output_path: output_path.map(|path| path.display().to_string()),
-        open_ports_summary: crate::tcp_discovery::human_open_ports_summary(&module_outputs),
+        open_ports_summary: crate::service_probe::human_service_table(&module_outputs),
     })
 }
 
@@ -202,20 +214,20 @@ fn write_outputs<W: std::io::Write>(
     Ok(())
 }
 
-/// Human summary for non-JSONL runs (prioritizes open ports, stays quiet on
-/// closed/filtered detail which lives in JSONL).
+/// Human summary for non-JSONL runs (service table prioritizes classified
+/// services with product hints; closed/filtered detail lives in JSONL).
 pub fn human_summary(report: &RunReport) -> String {
     human_summary_with_opens(report, None)
 }
 
-/// Human summary with open-port detail gathered from module outputs.
+/// Human summary with service detail gathered from module outputs.
 pub fn human_summary_with_opens(
     report: &RunReport,
     module_outputs: Option<&[(crate::execution::TaskId, crate::execution::ModuleOutput)]>,
 ) -> String {
     let scheduler = &report.scheduler_report;
     let header = format!(
-        "RXScan Phase 6 run: {} task(s) | completed {} | failed {} | cancelled {} | timed out {} | skipped {} | JSONL bytes {}{}",
+        "RXScan Phase 7 run: {} task(s) | completed {} | failed {} | cancelled {} | timed out {} | skipped {} | JSONL bytes {}{}",
         report.task_count,
         scheduler.completed.len(),
         scheduler.failed.len(),
@@ -232,7 +244,7 @@ pub fn human_summary_with_opens(
     // (populated by `execute` from scheduler outputs).
     match module_outputs {
         Some(outputs) if !outputs.is_empty() => {
-            let table = crate::tcp_discovery::human_open_ports_summary(outputs);
+            let table = crate::service_probe::human_service_table(outputs);
             format!("{header}\n{table}")
         }
         _ if !report.open_ports_summary.is_empty() => {

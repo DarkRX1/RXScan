@@ -1,6 +1,6 @@
 # Configuration
 
-Phase 1–6 support explicit TOML layers:
+Phase 1–7 support explicit TOML layers:
 
 ```text
 built-in defaults < --config GLOBAL.toml < --project-config PROJECT.toml < CLI
@@ -71,3 +71,14 @@ Invalid values fail fast (exit 2): zero/negative-equivalent, values exceeding ha
 - `max_hosts` caps CIDR host generation (default 256, one /24). Large scopes truncate deterministically to the first permitted addresses in order.
 - ICMP requires no privileges to run overall: unprivileged ping sockets are tried natively (no shell `ping`); permission failures return structured `ICMP probe unavailable: insufficient privileges …` and TCP fallback proceeds. ICMP timeout alone yields Unknown, never false Dead.
 - ARP (local IPv4) and IPv6 Neighbor Discovery are deferred sub-capabilities: technique variants exist, execution returns `Unavailable`, support is never faked.
+
+## Phase 7 service policy
+
+- No new CLI flags or TOML keys: service probing follows the existing `--level`, `--goal`, `--speed`, `--ports`/`--all-ports`, scope, and budget policy. `--explain` reports the service probe policy alongside discovery and TCP policy.
+- Probe selection (see `src/service.rs` planner): known ports try their likely probe first (22→SSH, 80-family→HTTP, 443/8443→TLS, 21→FTP, 25/587→SMTP, 6379→Redis, 3306→MySQL, 5432→PostgreSQL); unknown ports get the passive generic probe first, plus HTTP at L3+ (L2+ for web/API goals). Level caps breadth (L1 single probe … L5 ≤6); speed sets the per-probe wall budget only (500–5000ms) and never the truth criteria.
+- HTTPS requires HTTP-inside-TLS evidence on the same session (never TLS-alone); SMTPS composes analogously on SMTP-likely ports. Port hints order probes; identity always comes from handshake bytes.
+- Byte budgets: banners ≤2KiB, HTTP headers/body ≤16KiB each, certificate chains ≤32KiB, SMTP replies ≤4KiB; requests are fixed payloads under 160B (one GET, one EHLO, one PING, one 8-byte SSLRequest, TLS ClientHello). Truncation is flagged in evidence.
+- Authentication boundary: no USER/PASS/AUTH/LOGIN bytes are ever sent and no destructive commands exist (asserted by an exact-bytes allowlist test). Product/version hints are raw observed strings; the technology fingerprint engine remains a later phase.
+- Depth over count: SSH, HTTP, TLS/HTTPS, FTP, and SMTP were completed first (each with recognition, negative, and bounds tests). Redis, MySQL, and PostgreSQL are included only because each is a minimal safe exchange (one PING / passive handshake / one 8-byte SSLRequest) with dedicated handshake tests and the same allowlist coverage — no scope or quality compromise.
+- Strict unknown handling: port numbers order probes but never prove identity (hint≠proof is regression-tested both directions). Generic banners stay Unknown unless the bytes satisfy a concrete grammar (SSH identification string with valid version and line terminator); bare prefixes, malformed versions, and unterminated fragments stay Unknown with banners preserved. Failed TLS compositions are recorded as notes, never upgraded.
+- Deferred seams (registered as documentation, not probes): IMAP, POP3, LDAP, MQTT, RDP, SMB, DNS-over-TCP, RPC, NTP, Kerberos.

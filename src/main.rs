@@ -26,9 +26,9 @@ fn main() {
             } else {
                 println!("{}", run::human_summary(&report));
                 if report.output_path.is_none() {
-                    println!("Run with --explain to inspect the effective Phase 6 plan.");
+                    println!("Run with --explain to inspect the effective Phase 7 plan.");
                     println!(
-                        "TCP port scanning uses bounded native connects; use --output <path> for typed JSONL."
+                        "Service probing uses bounded native handshakes (no auth); use --output <path> for typed JSONL."
                     );
                 }
             }
