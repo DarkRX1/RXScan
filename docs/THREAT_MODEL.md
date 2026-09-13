@@ -26,6 +26,7 @@ RXScan is for authorized, scoped, non-destructive reconnaissance. Its central ri
 | Baseline probe drift / accidental discovery | inert same-origin synthetic paths only, two-sample hard cap, Decision Engine-only admission, no wordlists or sensitive path names | 10 |
 | False duplicate/soft-404 claims | conservative signatures, bounded similarity thresholds, two-sample missing-path baseline, inconclusive state for weak signals | 10 |
 | Managed content discovery becoming fuzzing | small reviewed built-in set, explicit streamed user file, no placeholders/mutation/method enumeration/forms/payloads, hard candidate/request caps | 11 |
+| Contextual fuzzing becoming exploit fuzzing | observed GET query context required, inert one-parameter mutations, sensitive-name skip list, no POST/forms/cookies/headers/path traversal/payload banks, neutral behavior-delta output only | 12 |
 | Candidate path escape | same-origin URL construction, traversal/authority/control/backslash rejection, canonical dedup, scope check before every contact | 11 |
 
 Modules never receive authority to bypass policy. Discovery may be recorded without authorizing active work against a new asset.
@@ -90,3 +91,11 @@ Modules never receive authority to bypass policy. Discovery may be recorded with
 - Baseline-aware filtering uses Phase 10 normalized missing-resource signatures. A success status alone is insufficient to classify content as discovered.
 - Content discovery shares the scan-lifetime contacted-request registry with crawl/baseline modules so canonical duplicate GET URLs are not contacted repeatedly. This registry is not an authorization mechanism; scope checks still run at every contact boundary.
 - Content modules never self-schedule; discovered endpoints are typed events that return to the Decision Engine for existing crawl/baseline follow-ups.
+
+## Phase 12 contextual fuzzing safety notes
+
+- Contextual fuzzing is native Rust and reuses Phase 8 `WebTarget` and HTTP/TLS primitives plus Phase 10 signatures. There is no second HTTP client, external scanner, browser, database, Python/Java/Node runtime, LLM, or subprocess fuzzing tool.
+- A fuzz task requires existing evidence: a baseline response signature for an endpoint with an observed non-sensitive GET query parameter. Unobserved parameter names are not invented.
+- Mutations are inert and bounded: omission, empty value, tiny numeric/boolean alternatives, and short `rxscan_<token>` text values. One parameter changes per request; pairwise/cartesian mutation is not implemented.
+- Sensitive names containing password/passwd/token/csrf/secret/otp/auth/session are skipped. POST forms, GET-form active submission, cookies, headers, path-variable fuzzing, traversal strings, injection payloads, credential attacks, and vulnerability checks are deferred or explicitly out of scope.
+- Results are behavior observations only: status/content-type/redirect/body/template changes and exact inert-token reflection. RXScan does not infer XSS, SQL injection, auth bypass, SSRF, command injection, or any confirmed vulnerability from Phase 12 deltas.

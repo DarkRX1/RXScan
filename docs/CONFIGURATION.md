@@ -123,3 +123,14 @@ Invalid values fail fast (exit 2): zero/negative-equivalent, values exceeding ha
 - Level matrix: L1 disabled; L2 first 4 built-in candidates, request cap 8; L3 first 8 built-ins, request cap 32; L4 all built-ins plus user file, request cap 64; L5 all built-ins plus user file, request cap 128. Hard caps are candidates read 2000, admitted 512, response bytes 64KiB, discovered endpoints 64, events 256, evidence 128, findings 16, dedup entries 1024.
 - Phase 11 classification reuses Phase 10 origin-baseline normalized hashes when available. A 200 response matching missing-resource baseline is `soft_not_found`/`wildcard_like`, not a discovered endpoint. A bounded scan-lifetime contacted-request registry (4096 entries) prevents redundant canonical GET contacts where semantics permit reuse, including crawler/content duplicates; at capacity it stops tracking new entries and scanning remains scope-checked and bounded by normal budgets.
 - `--speed` affects only connection/response timeouts, retry/backoff, and scheduler pressure. It never changes candidate contents, normalization, baseline classification, dedup identity, or evidence meaning.
+
+## Phase 12 contextual fuzzing policy
+
+- No new CLI flags or TOML keys: contextual fuzzing follows existing `--goal fuzz|custom`, `--level`, `--speed`, scope, and scheduler budgets.
+- Eligibility: `Baseline` outputs with `ResponseSignatureObserved` for an endpoint containing a concrete non-sensitive GET query parameter may propose `Fuzz` tasks through the Decision Engine. Fuzz modules never enqueue follow-up work.
+- Active contexts: GET query parameters only. GET-form active fuzzing, POST forms, cookies, headers, and path-variable fuzzing are RESERVED.
+- Level matrix: L1-L2 disabled; L3 one observed parameter with up to two mutations; L4 up to three parameters with up to three mutations each; L5 up to four parameters with up to four mutations each. Existing goal/level eligibility and scheduler budgets still apply; L5 is bounded.
+- Mutation classes: `OmittedValue`, `EmptyValue`, `AlternateNumericBoundary`, `AlternateBoolean`, `ShortRandomToken`, and `AlternateBenignScalar`. Mutations are inert, one parameter at a time, and keep unrelated query parameters unchanged.
+- Sensitive names containing password/passwd/token/csrf/secret/otp/auth/session are skipped. Skips are typed observations when a fuzz task is explicitly created for such an input.
+- Hard caps: 4 parameters/endpoint, 4 mutations/parameter, 8 mutations/task, 8 requests/task, 64KiB response bytes, 64 events/task, 16 evidence records/task, 4 neutral findings/task, 64 task-local dedup keys, plus the 4096-entry scan-lifetime contacted-request registry.
+- `--speed` affects only pressure: connection/response timeouts, retry/backoff, and scheduler pressure. It never changes mutation values, safety filtering, delta thresholds, signature normalization, or evidence meaning.

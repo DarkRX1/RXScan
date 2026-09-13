@@ -24,6 +24,7 @@ pub enum RequestPurpose {
     BaselineSynthetic,
     ContentCandidate,
     RedirectFollow,
+    FuzzMutation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]

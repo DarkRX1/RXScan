@@ -378,6 +378,8 @@ pub enum RelationshipKind {
     ParameterOf,
     DiscoveredByContentProbe,
     DerivedFromCandidateSource,
+    BehaviorDiffersFrom,
+    ReflectsInput,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "subject_type", content = "id", rename_all = "snake_case")]
@@ -498,6 +500,14 @@ pub enum EventKind {
     ContentRedirectObserved,
     ContentDiscoveryBudgetExhausted,
     ContentDiscoveryCompleted,
+    ContextualFuzzStarted,
+    FuzzInputSelected,
+    FuzzMutationAttempted,
+    FuzzBehaviorDeltaObserved,
+    FuzzInputReflected,
+    FuzzSkippedSensitiveInput,
+    FuzzBudgetExhausted,
+    ContextualFuzzCompleted,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Event {

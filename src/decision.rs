@@ -435,6 +435,7 @@ pub struct Phase7Engine {
     crawl: CrawlDecisionEngine,
     baseline: BaselineDecisionEngine,
     content: ContentDecisionEngine,
+    fuzz: FuzzDecisionEngine,
 }
 
 impl Phase7Engine {
@@ -500,14 +501,15 @@ impl Phase7Engine {
                 origin_baselines.clone(),
             ),
             content: ContentDecisionEngine::new(
-                scope_guard,
-                plan_id,
+                scope_guard.clone(),
+                plan_id.clone(),
                 level,
                 goal,
                 speed,
                 content_wordlist,
                 origin_baselines,
             ),
+            fuzz: FuzzDecisionEngine::new(scope_guard, plan_id, level, goal, speed),
         }
     }
 }
@@ -525,6 +527,7 @@ impl crate::execution::DecisionEngine for Phase7Engine {
         .into_iter()
         .chain(self.baseline.follow_up_tasks(completed, output))
         .chain(self.content.follow_up_tasks(completed, output))
+        .chain(self.fuzz.follow_up_tasks(completed, output))
         .collect()
     }
 }
@@ -1298,6 +1301,143 @@ impl crate::execution::DecisionEngine for ContentDecisionEngine {
                 }
                 if let Some(task) = self.content_task(&url, source_endpoint, None) {
                     proposals.push(task);
+                }
+            }
+        }
+        proposals
+    }
+}
+
+#[derive(Clone)]
+pub struct FuzzDecisionEngine {
+    scope_guard: Arc<dyn ScopeGuard>,
+    plan_id: ScanPlanId,
+    level: u8,
+    goal: ScanGoal,
+    speed: crate::plan::SpeedSetting,
+}
+
+impl FuzzDecisionEngine {
+    pub fn new(
+        scope_guard: Arc<dyn ScopeGuard>,
+        plan_id: ScanPlanId,
+        level: u8,
+        goal: ScanGoal,
+        speed: crate::plan::SpeedSetting,
+    ) -> Self {
+        Self {
+            scope_guard,
+            plan_id,
+            level: level.clamp(1, 5),
+            goal,
+            speed,
+        }
+    }
+
+    fn fuzz_task(
+        &self,
+        url: &crate::web::WebTarget,
+        source_endpoint: &str,
+        param: &str,
+        signature: &crate::baseline::ResponseSignature,
+    ) -> Option<Task> {
+        let policy = crate::fuzz::FuzzPolicy::new(self.level, self.goal, self.speed);
+        if !policy.enabled() || crate::fuzz::is_sensitive_name(param) {
+            return None;
+        }
+        let scope_target = crate::web_probe::scope_target_for_web_target(url);
+        if !self.scope_guard.permits(&scope_target) {
+            return None;
+        }
+        let governor = crate::execution::SpeedGovernor::new(self.speed, 1).ok()?;
+        let provenance = crate::model::Provenance::new(
+            "rxscan.decision",
+            "12.0.0",
+            self.plan_id.clone(),
+            Timestamp::now(),
+        )
+        .ok()?;
+        Task::new_with_params(
+            TaskKind::Fuzz,
+            None,
+            Vec::new(),
+            Some(crate::model::AssetId(source_endpoint.to_owned())),
+            self.plan_id.clone(),
+            priority_for_kind(&TaskKind::Fuzz),
+            governor.default_timeout(),
+            governor.default_retry_policy(),
+            crate::fuzz::FUZZ_MODULE_NAME,
+            provenance,
+            scope_target,
+            crate::fuzz::fuzz_task_params(url, source_endpoint, param, Some(signature)),
+            self.scope_guard.as_ref(),
+        )
+        .ok()
+    }
+}
+
+impl crate::execution::DecisionEngine for FuzzDecisionEngine {
+    fn follow_up_tasks(&self, completed: &Task, output: &ModuleOutput) -> Vec<Task> {
+        if completed.kind != TaskKind::Baseline
+            || self.level < 3
+            || !matches!(self.goal, ScanGoal::Fuzz | ScanGoal::Custom)
+        {
+            return Vec::new();
+        }
+        let mut proposals = Vec::new();
+        let mut seen = BTreeSet::new();
+        for event in &output.events {
+            if !matches!(
+                event.kind,
+                crate::model::EventKind::ResponseSignatureObserved
+            ) {
+                continue;
+            }
+            let Some(url_text) = event
+                .details
+                .data
+                .get("url")
+                .and_then(serde_json::Value::as_str)
+            else {
+                continue;
+            };
+            let Ok(url) = crate::web::WebTarget::parse(url_text) else {
+                continue;
+            };
+            let Some(query) = url.query.as_deref() else {
+                continue;
+            };
+            let Some(signature_value) = event.details.data.get("signature") else {
+                continue;
+            };
+            let Ok(signature) = serde_json::from_value::<crate::baseline::ResponseSignature>(
+                signature_value.clone(),
+            ) else {
+                continue;
+            };
+            let source_endpoint = event
+                .asset_id
+                .as_ref()
+                .map(|id| id.0.as_str())
+                .unwrap_or("");
+            if source_endpoint.is_empty() {
+                continue;
+            }
+            for (name, _) in url::form_urlencoded::parse(query.as_bytes())
+                .take(crate::fuzz::MAX_FUZZ_PARAMS_PER_ENDPOINT)
+            {
+                if name.is_empty() || crate::fuzz::is_sensitive_name(&name) {
+                    continue;
+                }
+                let key = format!("{}#{name}", url.canonical());
+                if !seen.insert(key) {
+                    continue;
+                }
+                if let Some(task) = self.fuzz_task(&url, source_endpoint, &name, &signature) {
+                    proposals.push(task);
+                }
+                if proposals.len() >= crate::fuzz::MAX_FUZZ_PARAMS_PER_ENDPOINT {
+                    return proposals;
                 }
             }
         }

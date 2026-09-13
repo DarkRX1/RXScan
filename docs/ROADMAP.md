@@ -15,8 +15,9 @@ Each phase requires tests, benchmark/regression evidence where applicable, docum
 | 8 | HTTP/TLS Web Foundation: bounded HTTP/1.1 observations, canonical URLs, bounded redirects, TLS/certificate evidence, Decision Engine service→web, no crawling | Complete |
 | 9 | Bounded Web Crawler + Endpoint Graph: confirmed endpoint→crawl proposals, bounded same-origin extraction, forms/robots/sitemaps/static-JS observations, endpoint relationships | Complete |
 | 10 | Baseline Web Intelligence: bounded response signatures, conservative normalization/similarity, soft-404/wildcard origin baselines, endpoint classes, parameter inventory, interestingness metadata | Complete |
-| 11 | Managed Content Discovery: bounded built-in/user-file path candidates, Phase 10 baseline filtering, typed content evidence, no fuzzing | Complete (current) |
-| 12–15 | Contextual fuzzing, DNS, deeper API workflows, UDP, technology fingerprinting | Not implemented |
+| 11 | Managed Content Discovery: bounded built-in/user-file path candidates, Phase 10 baseline filtering, typed content evidence, no fuzzing | Complete |
+| 12 | Contextual Fuzzing: bounded safe GET query-parameter mutations from observed inputs, response delta intelligence, no exploit payloads | Complete (current) |
+| 13–15 | DNS, deeper API workflows, UDP, technology fingerprinting | Not implemented |
 | 16–19 | Decision engine workflows, API workflows, checks, graph/correlation | Not implemented |
 | 20–24 | Outputs, resume/diff/projects, packs, benchmark lab, releases | Not implemented |
 
@@ -28,9 +29,11 @@ Phase 8 adds the HTTP/TLS web foundation: bounded HTTP/1.1 GET/HEAD observations
 
 Phase 9 adds deterministic bounded crawling from confirmed HTTP/HTTPS endpoint evidence only. `HttpProbe` completions propose root `Crawl` tasks through the Decision Engine; crawler discoveries return to the Decision Engine for same-origin follow-up proposals with inherited depth/page budgets. Extraction covers links, forms as observation-only metadata, script/style/image/frame/canonical references, robots.txt, sitemap XML, and conservative static JavaScript string literals. Out-of-scope candidates are recorded and never contacted. Still absent by design: directory brute forcing, path guessing, wordlists, parameter mutation/fuzzing, form submission, authentication automation, JavaScript execution, headless browsers, vulnerability checks, exploitation, and arbitrary scope expansion.
 
-Phase 10 adds baseline web intelligence for confirmed and crawled endpoints. `HttpProbe`/`Crawl` outputs propose `Baseline` tasks through the Decision Engine; endpoint-specific tasks record signatures/classes/parameters while origin-level synthetic missing-path probes are deduped per decision output. Signatures include raw and normalized SHA-256 body fingerprints, selected header/title/HTML-structure hashes, status, MIME, length bucket, and truncation. Soft-404 and wildcard-like behavior require two same-origin inert missing-path samples. Still absent by design: wordlists, guessed paths beyond inert baseline tokens, parameter mutation/fuzzing, form submission, vulnerability scanning, JavaScript execution, headless browsers, UDP, cipher enumeration, and technology fingerprinting.
+Phase 10 adds baseline web intelligence for confirmed and crawled endpoints. `HttpProbe`/`Crawl` outputs propose `Baseline` tasks through the Decision Engine; endpoint-specific tasks record signatures/classes/parameters while origin-level synthetic missing-path probes are deduped in scan-lifetime origin state. Signatures include raw and normalized SHA-256 body fingerprints, selected header/title/HTML-structure hashes, status, MIME, length bucket, and truncation. Soft-404 and wildcard-like behavior require two same-origin inert missing-path samples. Still absent by design: wordlists, guessed paths beyond inert baseline tokens, form submission, vulnerability scanning, JavaScript execution, headless browsers, UDP, cipher enumeration, DNS execution, and technology fingerprinting.
 
 Phase 11 adds managed content discovery. Content tasks are proposed by the Decision Engine from confirmed web origins and Phase 10 origin baselines; the module consumes a small built-in candidate set and optional streamed `-w/--wordlist` file. Candidates are path/resource names only, normalized into the same origin, scope-checked before contact, deduped by canonical URL, fetched with Phase 8 HTTP/TLS primitives, and filtered with Phase 10 baseline signatures. It does not perform placeholder fuzzing, parameter mutation, form submission, method enumeration, recursive directory explosion, vulnerability scanning, JavaScript execution, or headless browsing.
+
+Phase 12 adds contextual behavioral fuzzing for already-observed safe GET query parameters. `Baseline` response-signature events with concrete query parameters may propose `Fuzz` tasks through the Decision Engine for `fuzz`/`custom` goals at L3+. Mutations are inert and one-parameter-at-a-time: omit, empty, tiny numeric/boolean neighbor, or short `rxscan_<token>` text variants depending on observed value type. Responses are fetched with Phase 8 primitives, compared against Phase 10 signatures, and emitted as behavior deltas/reflection observations only. It does not perform exploit payloads, injection banks, POST/form submission, credential attacks, cookie fuzzing, path traversal, path-variable fuzzing, vulnerability findings, DNS execution, JavaScript execution, or headless browsing.
 
 ## Phase 9 exit criteria
 
@@ -62,9 +65,18 @@ Phase 11 adds managed content discovery. Content tasks are proposed by the Decis
 - Typed output includes content lifecycle, candidate attempts, discovered/rejected/redirect observations, budget exhaustion, endpoint assets, evidence, and relationships (`DiscoveredByContentProbe`, `DerivedFromCandidateSource`).
 - Tests are deterministic/local-only and cover built-in/user candidate sources, streaming, dedup, baseline rejection, canary redirects, budgets, cancellation, timeout, scheduler integration, level/speed behavior, JSONL, provenance, and IPv6 where loopback bind is available. Benchmark recorded in `docs/benchmark-results/phase11-content-discovery.md`.
 
+## Phase 12 exit criteria
+
+- Contextual fuzzing starts only from observed endpoint signatures that include concrete non-sensitive GET query parameters; modules never self-schedule.
+- Supported active contexts are GET query parameters only. GET forms may become eligible later when their fields are normalized into the same parameter inventory; POST forms, cookies, headers, and path-variable mutation are RESERVED.
+- Mutation classes are inert and bounded: `EmptyValue`, `OmittedValue`, `AlternateNumericBoundary`, `AlternateBoolean`, `ShortRandomToken`, and `AlternateBenignScalar`. One parameter changes per request; no pairwise/cartesian combinations are generated.
+- Hard caps include 4 parameters/endpoint, 4 mutations/parameter, 8 mutations and requests/task, 64KiB response bytes, 64 events, 16 evidence records, 4 neutral findings, 64 task-local dedup keys, and the 4096-entry scan-lifetime contacted-request registry.
+- Typed output includes contextual fuzz lifecycle, selected inputs, mutation attempts, behavior deltas, exact inert-token reflection, sensitive-input skips, budget exhaustion, evidence, and neutral behavioral-difference findings. No vulnerability class is inferred.
+- Tests are deterministic/local-only and cover disabled levels, observed-parameter requirement, sensitive skips, numeric/text/omission mutations, one-parameter-at-a-time behavior, redirect/scope canaries, cancellation, timeout, JSONL, IPv6 where loopback bind is available, and production Scheduler/Decision Engine wiring. Benchmark recorded in `docs/benchmark-results/phase12-contextual-fuzzing.md`.
+
 ## MVP v0.1 gate
 
-TargetSpec, Scope Guard, ScanPlan, stable IDs/events, scheduler, speed/budgets, host discovery, TCP, basic SSH/HTTP/HTTPS/TLS fingerprinting, managed content discovery, basic path fuzzing, JSON output, tests, and benchmark baseline.
+TargetSpec, Scope Guard, ScanPlan, stable IDs/events, scheduler, speed/budgets, host discovery, TCP, basic SSH/HTTP/HTTPS/TLS fingerprinting, managed content discovery, contextual GET query fuzzing, JSON output, tests, and benchmark baseline.
 
 ## Phase 1 exit criteria
 

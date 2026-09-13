@@ -9,6 +9,7 @@ pub mod decision;
 pub mod discovery;
 pub mod execution;
 pub mod extract;
+pub mod fuzz;
 pub mod host_discovery;
 pub mod icmp;
 pub mod level;

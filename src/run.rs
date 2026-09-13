@@ -161,9 +161,15 @@ pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
         crate::content::ContentDiscoveryModule::with_contact_registry(
             content_policy,
             guard.clone(),
-            contact_registry,
+            contact_registry.clone(),
         ),
     ));
+    let fuzz_policy = crate::fuzz::FuzzPolicy::new(plan.level, plan.goal, plan.speed);
+    scheduler.register_module(Arc::new(crate::fuzz::FuzzModule::with_contact_registry(
+        fuzz_policy,
+        guard.clone(),
+        contact_registry,
+    )));
     for module in phase5_control_modules() {
         scheduler.register_module(Arc::new(module));
     }

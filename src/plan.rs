@@ -286,7 +286,7 @@ impl ScanPlan {
         ));
         let mut skipped = level_skipped;
         skipped.push(
-            "Phase 11 runs real bounded host discovery, native TCP connect port scanning, native service probing, bounded HTTP/1.1 web observations, bounded crawling, baseline intelligence, and managed content discovery; ARP/ND, UDP, contextual fuzzing, form submission, JavaScript execution, cipher enumeration, DNS execution, vulnerability checks, and the fingerprint engine remain deferred."
+            "Phase 12 runs real bounded host discovery, native TCP connect port scanning, native service probing, bounded HTTP/1.1 web observations, bounded crawling, baseline intelligence, managed content discovery, and safe contextual GET query fuzzing where observed evidence permits; ARP/ND, UDP, POST/form fuzzing, path-variable fuzzing, JavaScript execution, cipher enumeration, DNS execution, vulnerability checks, and the fingerprint engine remain deferred."
                 .to_owned(),
         );
         Ok(Self {
@@ -351,7 +351,7 @@ impl ScanPlan {
                 .map(|governor| governor.retry_limit())
                 .unwrap_or(0);
         format!(
-            "RXScan Phase 11 plan\ngoal: {:?}\nlevel: {}\nspeed: {}\nprofile: {}\ndiscovery: {}\nspeed policy: {governor}\neffective concurrency: {effective_concurrency}\nretry limit: {retry_limit}\ntask budget: {}\nretry budget: {}\nevidence budget (bytes): {}\nexecution timeout (ms): {}\nhost budget: {}\nqueue capacity: {}\ntargets:\n{targets}\nmodules:\n{modules}\ntcp ports: {:?}\ndiscovery policy: {}\ntcp policy: {}\nservice policy: {}\nweb policy: {}\ncontent policy: {}\nscope: {} allow rule(s), {} exclusion(s)\nwhy:\n{reasons}\nskipped:\n{skipped}",
+            "RXScan Phase 12 plan\ngoal: {:?}\nlevel: {}\nspeed: {}\nprofile: {}\ndiscovery: {}\nspeed policy: {governor}\neffective concurrency: {effective_concurrency}\nretry limit: {retry_limit}\ntask budget: {}\nretry budget: {}\nevidence budget (bytes): {}\nexecution timeout (ms): {}\nhost budget: {}\nqueue capacity: {}\ntargets:\n{targets}\nmodules:\n{modules}\ntcp ports: {:?}\ndiscovery policy: {}\ntcp policy: {}\nservice policy: {}\nweb policy: {}\ncontent policy: {}\nscope: {} allow rule(s), {} exclusion(s)\nwhy:\n{reasons}\nskipped:\n{skipped}",
             self.goal,
             self.level,
             self.speed,
