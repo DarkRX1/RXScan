@@ -66,6 +66,10 @@ pub struct Cli {
     #[arg(long)]
     pub udp: bool,
 
+    /// Stream a managed content-discovery candidate file (Phase 11, level 4+).
+    #[arg(short = 'w', long = "wordlist", value_name = "FILE")]
+    pub wordlist: Option<std::path::PathBuf>,
+
     /// Print the chosen plan, reasons, and M0 limitations.
     #[arg(long)]
     pub explain: bool,

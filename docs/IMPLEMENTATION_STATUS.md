@@ -6,18 +6,18 @@ The repository had no commits and contained an uncommitted Rust Phase-0-style sk
 
 ## Current state
 
-Phases 0 through 9 are complete. RXScan now performs real bounded host discovery, native TCP connect port scanning, native service/protocol identification, bounded HTTP/1.1 web observations, and deterministic bounded crawling from confirmed web endpoint evidence through the existing scheduler. Decision Engine flow is host→port, open-port→service, service→web, and confirmed endpoint/discovery→crawl. No UDP scanning, directory brute forcing, path guessing, parameter mutation/fuzzing, form submission, authentication automation, JavaScript execution, headless browsing, DNS enumeration, vulnerability checks, brute force, exploitation, cipher enumeration, or technology fingerprinting exist yet.
+Phases 0 through 11 are complete. RXScan now performs real bounded host discovery, native TCP connect port scanning, native service/protocol identification, bounded HTTP/1.1 web observations, deterministic bounded crawling from confirmed web endpoint evidence, baseline web intelligence for confirmed/crawled endpoints, and managed content discovery through the existing scheduler. Decision Engine flow is host→port, open-port→service, service→web, confirmed endpoint/discovery→crawl/baseline, and origin baseline→content. No UDP scanning, contextual fuzzing, parameter mutation/fuzzing, form submission, authentication automation, JavaScript execution, headless browsing, DNS execution, vulnerability checks, brute force, exploitation, cipher enumeration, or technology fingerprinting exist yet.
 
 | Area | Current state | Next |
 | --- | --- | --- |
-| Native Rust core | Foundation + data model + control plane + host + TCP + service + web + bounded crawler established (rustls/x509-parser for TLS observation) | Phase 10 UDP/TLS/fingerprint decisions |
+| Native Rust core | Foundation + data model + control plane + host + TCP + service + web + bounded crawler + baseline intelligence + managed content discovery established (rustls/x509-parser for TLS observation) | Phase 12 contextual workflow decisions |
 | Target, scope, CLI, config, plan | Implemented/tested; level/goal/budget-aware plus discovery/TCP/service/web/crawl policy | Future explicit crawler tuning flags if needed |
 | Events/assets/findings | Implemented/tested; host + port + service + web + crawl producers emit real typed events/evidence/assets/findings and endpoint relationships | Phase 20+ reporting |
 | Scheduler/speed/budgets | Implemented, wired to binary, tested; auto is non-adaptive baseline; `max_hosts` bounds CIDR; follow-ups best-effort (dup/scope/budget skip) | Phase 4.1 adaptive governor (optional) |
 | Plan→task lowering | Deterministic, scope-checked, deduped, ONE port task per target (never 65k), CIDR host expansion bounded; service/web tasks proposed per open port/service by the engine | Phase 9 dependency expansion |
 | JSONL output | Typed, versioned, provenanced, bounded, tested; includes discovery + scan + service + web assets/events/evidence/findings; terminal shows service table | Phase 20+ reporting |
-| Network and web modules | Host discovery + TCP port scanning + service probing + bounded HTTP/1.1 web observations + bounded same-origin crawler; ARP/ND deferred; no UDP/content-bruteforce/fuzzing/DNS/checks/fingerprint engine | Phase 10 onward |
-| CI/fixtures/benchmark discipline | Established; Phase 5 + 6 + 7 + 8 + 9 baselines recorded | Add executable fixtures per module |
+| Network and web modules | Host discovery + TCP port scanning + service probing + bounded HTTP/1.1 web observations + bounded same-origin crawler + baseline web intelligence + managed content discovery; ARP/ND deferred; no UDP/contextual-fuzzing/DNS/checks/fingerprint engine | Phase 12 onward |
+| CI/fixtures/benchmark discipline | Established; Phase 5 + 6 + 7 + 8 + 9 + 10 + 11 baselines recorded | Add executable fixtures per module |
 
 No performance or capability superiority is claimed. No scanning functionality is claimed beyond bounded host discovery, TCP connect port scanning, safe service identification, bounded web observations, and bounded evidence-backed crawling plus control-plane execution of scaffold tasks.
 
@@ -89,3 +89,21 @@ Verified locally on 2026-09-12 (see validation results in the Phase 4 completion
 - `cargo fmt --check`, `cargo check`, `cargo test`, `cargo clippy --all-targets --all-features -- -D warnings`, `git diff --check`, and `cargo run --example phase9_bench` are the required completion checks.
 - Phase 9 adds `CrawlModule`, `CrawlDecisionEngine`, `extract` helpers, and endpoint graph relationships. Confirmed `HttpProbe` endpoint observations propose root crawl tasks; crawl discovery events propose same-origin follow-ups only through the Decision Engine with depth/page budgets.
 - Local tests cover root extraction, relative/absolute/query/fragment behavior, forms observation without submission, static JavaScript extraction without execution, robots/sitemap handling, out-of-scope observations without contact, relationship emission, and Decision Engine eligibility/dedup boundaries.
+
+## Phase 10 verification
+
+- `cargo fmt --check`, `cargo check`, `cargo test`, `cargo clippy --all-targets --all-features -- -D warnings`, `git diff --check`, and `cargo run --example phase10_bench` are the required completion checks.
+- Phase 10 adds `BaselineModule`, `BaselineDecisionEngine`, typed baseline events, and baseline relationships. Confirmed/crawled endpoint events propose endpoint baseline tasks; only the first baseline task per scan-lifetime origin performs synthetic missing-path probes. Origin identity is scheme + canonical host + effective port.
+- Phase 10 duplicate/similarity intelligence is implemented with compact scan-lifetime signature representatives keyed by raw hash, normalized hash, and bounded template buckets. It emits `DuplicateObserved` / `SimilarResponseObserved` with `DuplicateOf` / `SimilarTo` relationships without retaining response bodies.
+- Baseline evidence records bounded response signatures, conservative normalized fingerprints, endpoint class, parameter inventory, redirect out-of-scope state, soft-404/wildcard observations, and optional interestingness factors. It does not submit forms, mutate parameters, execute JavaScript, brute force content, guess sensitive paths, or infer vulnerabilities.
+- Local tests cover deterministic signatures, normalization, similarity thresholds, scan-lifetime origin-baseline reuse, cross-task duplicate/similarity relationships, soft-404/wildcard behavior, redirect canaries, query parameter value classes, cancellation, timeout, stale scope, JSONL round trip, and Scheduler/Decision Engine production admission.
+- `cargo run --example phase10_bench` — controlled local baseline recorded in `docs/benchmark-results/phase10-baseline-intelligence.md` (8 endpoint signatures, one shared origin baseline, local-only, no competitor claims).
+
+## Phase 11 verification
+
+- `cargo fmt --check`, `cargo check`, `cargo test`, `cargo clippy --all-targets --all-features -- -D warnings`, `git diff --check`, `cargo run --example phase11_bench`, and `cargo build --release` are the required completion checks.
+- Phase 11 adds `ContentDiscoveryModule`, `ContentDecisionEngine`, `-w/--wordlist`, TOML `wordlist`, typed content events, and content relationships. Content tasks are origin-stable for scheduler deduplication and are proposed by the Decision Engine only.
+- Candidate sources are a 12-entry built-in set and optional streamed user file at L4+. Candidate memory is released line-by-line; large files remain bounded by line, candidate, request, event, evidence, and dedup caps.
+- Baseline-aware classification rejects soft-404/wildcard-like matches using Phase 10 origin-baseline normalized signatures. A 200 response alone is not considered discovered. Content candidate contacts also consult the compact scan-lifetime contacted-request registry shared with crawling and baseline work.
+- Local tests cover built-in/user-file candidates, comments/blanks/oversized lines, normalization, canonical dedup, out-of-scope redirect canary, hard/soft not-found, forbidden/unauthorized/redirect/static/JSON discovery, budgets, cancellation, timeout, unreadable files, scheduler integration, level/speed behavior, JSONL/provenance, large streamed wordlists, and IPv6 when loopback bind is available.
+- `cargo run --example phase11_bench` — controlled local benchmark recorded in `docs/benchmark-results/phase11-content-discovery.md` (24 candidate lines, explicit request-category accounting, local-only, no competitor claims).

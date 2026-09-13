@@ -38,6 +38,9 @@ pub struct ConfigLayer {
     /// (e.g. `"80,443"`). Bounded to 8 ports. Level-derived defaults apply
     /// when unset. Configuration/profile only; no CLI flag by design.
     pub discovery_ports: Option<String>,
+    /// Phase 11: optional managed content candidate file. Read incrementally;
+    /// not embedded into the plan output beyond this operator-supplied path.
+    pub wordlist: Option<PathBuf>,
 }
 
 #[derive(Debug, Error)]
@@ -176,6 +179,7 @@ impl ConfigLayer {
         self.max_evidence_bytes = higher.max_evidence_bytes.or(self.max_evidence_bytes.take());
         self.max_hosts = higher.max_hosts.or(self.max_hosts);
         self.discovery_ports = higher.discovery_ports.or(self.discovery_ports.take());
+        self.wordlist = higher.wordlist.or(self.wordlist.take());
     }
 }
 

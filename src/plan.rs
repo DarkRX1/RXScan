@@ -124,6 +124,9 @@ pub struct ScanPlan {
     /// (configuration/profile only). `None` means level-derived defaults.
     #[serde(default)]
     pub discovery_ports: Option<Vec<u16>>,
+    /// Phase 11: optional streamed managed content candidate file.
+    #[serde(default)]
+    pub content_wordlist: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Error)]
@@ -191,6 +194,7 @@ impl ScanPlan {
         let level = cli.level.or(config.level).unwrap_or(2);
         let speed = cli.speed.or(config.speed).unwrap_or_default();
         let profile_name = cli.profile.clone().or(config.profile.clone());
+        let content_wordlist = cli.wordlist.clone().or(config.wordlist.clone());
         let host_requested = cli.ping || cli.discover;
         let udp_requested = cli.udp;
         let ports_requested = cli.ports.is_some()
@@ -276,9 +280,13 @@ impl ScanPlan {
             "Web probe policy: {}.",
             crate::web::WebPolicy::new(level, goal, speed).describe()
         ));
+        reasons.push(format!(
+            "Content discovery policy: {}.",
+            crate::content::ContentDiscoveryPolicy::new(level, goal, speed).describe()
+        ));
         let mut skipped = level_skipped;
         skipped.push(
-            "Phase 8 runs real bounded host discovery, native TCP connect port scanning, native service probing, and bounded HTTP/1.1 web observations (single exchanges, bounded redirects, no crawling); ARP/ND, UDP, robots/sitemap traversal, directory/content discovery, endpoint/API enumeration, fuzzing, wordlists, cipher enumeration, DNS, and the fingerprint engine remain deferred."
+            "Phase 11 runs real bounded host discovery, native TCP connect port scanning, native service probing, bounded HTTP/1.1 web observations, bounded crawling, baseline intelligence, and managed content discovery; ARP/ND, UDP, contextual fuzzing, form submission, JavaScript execution, cipher enumeration, DNS execution, vulnerability checks, and the fingerprint engine remain deferred."
                 .to_owned(),
         );
         Ok(Self {
@@ -302,6 +310,7 @@ impl ScanPlan {
             budgets,
             discovery_mode,
             discovery_ports,
+            content_wordlist,
         })
     }
     pub fn explain(&self) -> String {
@@ -342,7 +351,7 @@ impl ScanPlan {
                 .map(|governor| governor.retry_limit())
                 .unwrap_or(0);
         format!(
-            "RXScan Phase 8 plan\ngoal: {:?}\nlevel: {}\nspeed: {}\nprofile: {}\ndiscovery: {}\nspeed policy: {governor}\neffective concurrency: {effective_concurrency}\nretry limit: {retry_limit}\ntask budget: {}\nretry budget: {}\nevidence budget (bytes): {}\nexecution timeout (ms): {}\nhost budget: {}\nqueue capacity: {}\ntargets:\n{targets}\nmodules:\n{modules}\ntcp ports: {:?}\ndiscovery policy: {}\ntcp policy: {}\nservice policy: {}\nweb policy: {}\nscope: {} allow rule(s), {} exclusion(s)\nwhy:\n{reasons}\nskipped:\n{skipped}",
+            "RXScan Phase 11 plan\ngoal: {:?}\nlevel: {}\nspeed: {}\nprofile: {}\ndiscovery: {}\nspeed policy: {governor}\neffective concurrency: {effective_concurrency}\nretry limit: {retry_limit}\ntask budget: {}\nretry budget: {}\nevidence budget (bytes): {}\nexecution timeout (ms): {}\nhost budget: {}\nqueue capacity: {}\ntargets:\n{targets}\nmodules:\n{modules}\ntcp ports: {:?}\ndiscovery policy: {}\ntcp policy: {}\nservice policy: {}\nweb policy: {}\ncontent policy: {}\nscope: {} allow rule(s), {} exclusion(s)\nwhy:\n{reasons}\nskipped:\n{skipped}",
             self.goal,
             self.level,
             self.speed,
@@ -371,6 +380,8 @@ impl ScanPlan {
             .describe(),
             crate::service_probe::ServicePolicy::new(self.level, self.goal, self.speed).describe(),
             crate::web::WebPolicy::new(self.level, self.goal, self.speed).describe(),
+            crate::content::ContentDiscoveryPolicy::new(self.level, self.goal, self.speed)
+                .describe(),
             self.scope.allowed.len(),
             self.scope.exclusions.len()
         )

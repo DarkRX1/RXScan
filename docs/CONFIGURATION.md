@@ -1,6 +1,6 @@
 # Configuration
 
-Phase 1–9 support explicit TOML layers:
+Phase 1–10 support explicit TOML layers:
 
 ```text
 built-in defaults < --config GLOBAL.toml < --project-config PROJECT.toml < CLI
@@ -22,6 +22,7 @@ max_execution_time = "60s"
 max_evidence_bytes = "64MiB"
 max_hosts = 256
 discovery_ports = "80,443"
+wordlist = "paths.txt"
 ```
 
 `level` must be 1–5. `speed` is `slow`, `balanced`, `fast`, `auto`, or 0–100. A CLI value always wins. Lists from a higher layer replace lower-layer lists so a project cannot silently inherit a broader scope.
@@ -102,3 +103,23 @@ Invalid values fail fast (exit 2): zero/negative-equivalent, values exceeding ha
 - `--speed` affects pressure only: connection/response timeout, scheduler concurrency, retry/backoff. It does not change link/form/script/robots/sitemap interpretation, canonicalization, or endpoint classifications.
 - Forms are observation-only. RXScan records action/method/input names/types and scope status, but never submits forms, creates values, logs in, mutates parameters, or infers vulnerabilities from a form.
 - Static resources are not recursively fetched by default. Scripts may be fetched at L4+ only when explicitly referenced and in scope; images/styles/frames are recorded as relationships. JavaScript is scanned only for conservative string literals; it is never executed.
+
+## Phase 10 baseline policy
+
+- No new CLI flags or TOML keys: baseline intelligence follows existing `--level`, `--goal`, `--speed`, scope, and scheduler budgets. Future tuning may expose explicit caps but may not exceed hard ceilings.
+- Baseline eligibility: confirmed `EndpointObserved` and in-scope `EndpointDiscovered` events may propose `Baseline` tasks through the Decision Engine. The baseline module does not enqueue follow-up work.
+- Level matrix: L1 basic response signature and endpoint classification; L2 exact duplicate-ready signatures; L3 normalized signatures plus two inert missing-path samples per origin; L4 bounded similarity/template signals and parameter inventory; L5 deterministic interestingness score with structured factors.
+- Hard caps: response body bytes used for signatures 64KiB; synthetic missing-path requests 2/origin; origin baseline registry 512 origins; signature representative index 1024 entries; template candidate buckets 8 representatives; endpoint baseline proposals 128/completion; parameter records 32/task; baseline findings 8/task. Redirect caps, header/body caps, deadlines, retries, and cancellation reuse Phase 8 web policy and scheduler limits.
+- Synthetic paths are same-origin only and shaped as `/__rxscan_baseline_<token>__`. They characterize missing-resource behavior; they are not directory discovery, wordlists, sensitive path guessing, traversal, injection, or fuzzing.
+- Normalization is conservative: lowercasing, whitespace collapse, tag-adjacent whitespace cleanup, and obvious long numeric/request-ID runs. It avoids collapsing unrelated short pages with the same title.
+- `--speed` affects pressure only: concurrency, task timeout, connection timeout, response timeout, retry/backoff. It does not change fingerprint algorithms, similarity thresholds, endpoint classes, soft-404 interpretation, wildcard interpretation, parameter value classes, or interestingness scoring.
+- Parameter inventory records names, source (`query` currently; form metadata remains Phase 9 observation evidence), method, and value shape class. RXScan does not mutate values, submit forms, fuzz parameters, or retain secret semantics as findings.
+
+## Phase 11 managed content discovery policy
+
+- `-w, --wordlist FILE` or TOML `wordlist = "paths.txt"` supplies an explicit managed content candidate file. Files are read incrementally with `BufRead`; RXScan does not load the whole file into memory.
+- The built-in candidate set contains exactly 12 ordinary resource names: `/`, `/index.html`, `/robots.txt`, `/sitemap.xml`, `/login`, `/docs/`, `/api/`, `/status`, `/health`, `/assets/`, `/static/`, `/app.js`. It contributes well under 1KiB of static string data and intentionally excludes credentials, traversal strings, backups, exploit payloads, and secret-hunting permutations.
+- Candidate normalization trims whitespace, ignores blank lines and leading `#` comments, removes fragments, collapses duplicate slashes, preserves query strings, and adds a leading slash. It rejects lines over 512 bytes, absolute URLs, authorities, backslashes, control characters, malformed values, and `.`/`..` traversal components including simple encoded-dot forms.
+- Level matrix: L1 disabled; L2 first 4 built-in candidates, request cap 8; L3 first 8 built-ins, request cap 32; L4 all built-ins plus user file, request cap 64; L5 all built-ins plus user file, request cap 128. Hard caps are candidates read 2000, admitted 512, response bytes 64KiB, discovered endpoints 64, events 256, evidence 128, findings 16, dedup entries 1024.
+- Phase 11 classification reuses Phase 10 origin-baseline normalized hashes when available. A 200 response matching missing-resource baseline is `soft_not_found`/`wildcard_like`, not a discovered endpoint. A bounded scan-lifetime contacted-request registry (4096 entries) prevents redundant canonical GET contacts where semantics permit reuse, including crawler/content duplicates; at capacity it stops tracking new entries and scanning remains scope-checked and bounded by normal budgets.
+- `--speed` affects only connection/response timeouts, retry/backoff, and scheduler pressure. It never changes candidate contents, normalization, baseline classification, dedup identity, or evidence meaning.

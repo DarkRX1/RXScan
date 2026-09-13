@@ -516,10 +516,13 @@ fn decision_engine_admits_crawl_roots_and_bounded_same_origin_followups() {
             assets: Vec::new(),
         },
     );
-    assert_eq!(roots.len(), 1);
-    assert_eq!(roots[0].kind, TaskKind::Crawl);
+    let crawl_roots: Vec<_> = roots
+        .iter()
+        .filter(|task| task.kind == TaskKind::Crawl)
+        .collect();
+    assert_eq!(crawl_roots.len(), 1);
     assert_eq!(
-        roots[0].params.get("is_root").map(String::as_str),
+        crawl_roots[0].params.get("is_root").map(String::as_str),
         Some("true")
     );
 
@@ -554,13 +557,17 @@ fn decision_engine_admits_crawl_roots_and_bounded_same_origin_followups() {
             assets: Vec::new(),
         },
     );
-    assert_eq!(followups.len(), 1);
+    let crawl_followups: Vec<_> = followups
+        .iter()
+        .filter(|task| task.kind == TaskKind::Crawl)
+        .collect();
+    assert_eq!(crawl_followups.len(), 1);
     assert_eq!(
-        followups[0].params.get("url").map(String::as_str),
+        crawl_followups[0].params.get("url").map(String::as_str),
         Some("http://127.0.0.1:8080/child")
     );
     assert_eq!(
-        followups[0].params.get("depth").map(String::as_str),
+        crawl_followups[0].params.get("depth").map(String::as_str),
         Some("1")
     );
 }

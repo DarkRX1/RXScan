@@ -355,6 +355,7 @@ pub fn crawl_task_params(
 pub struct CrawlModule {
     policy: CrawlPolicy,
     scope_guard: Arc<dyn ScopeGuard>,
+    contacts: crate::contact::ContactRegistry,
 }
 
 impl CrawlModule {
@@ -362,6 +363,19 @@ impl CrawlModule {
         Self {
             policy,
             scope_guard,
+            contacts: crate::contact::ContactRegistry::new(),
+        }
+    }
+
+    pub fn with_contact_registry(
+        policy: CrawlPolicy,
+        scope_guard: Arc<dyn ScopeGuard>,
+        contacts: crate::contact::ContactRegistry,
+    ) -> Self {
+        Self {
+            policy,
+            scope_guard,
+            contacts,
         }
     }
 
@@ -378,7 +392,8 @@ impl Module for CrawlModule {
     fn execute(&self, context: ModuleContext) -> ModuleFuture {
         let policy = self.policy.clone();
         let guard = self.scope_guard.clone();
-        Box::pin(async move { execute_crawl(&policy, guard.as_ref(), context) })
+        let contacts = self.contacts.clone();
+        Box::pin(async move { execute_crawl(&policy, guard.as_ref(), &contacts, context) })
     }
 }
 
@@ -630,6 +645,7 @@ fn fetch_document(
     start: &WebTarget,
     policy: &CrawlPolicy,
     guard: &dyn ScopeGuard,
+    contacts: &crate::contact::ContactRegistry,
     cancel: &CancellationToken,
     task_deadline: Instant,
     requests_made: &mut usize,
@@ -692,6 +708,18 @@ fn fetch_document(
                 }
             }
         };
+        let purpose = if hops == 0 {
+            crate::contact::RequestPurpose::CrawlPage
+        } else {
+            crate::contact::RequestPurpose::RedirectFollow
+        };
+        if !contacts.claim(&current, purpose) {
+            notes.push(format!(
+                "request for {} skipped because it was already contacted in this scan",
+                current.canonical()
+            ));
+            return Ok((None, notes, hops));
+        }
         let remaining = task_deadline
             .saturating_duration_since(Instant::now())
             .min(policy.response_timeout());
@@ -865,6 +893,7 @@ fn push_relationship(
 fn execute_crawl(
     policy: &CrawlPolicy,
     guard: &dyn ScopeGuard,
+    contacts: &crate::contact::ContactRegistry,
     context: ModuleContext,
 ) -> Result<ModuleOutput, ModuleError> {
     let task = context.task.clone();
@@ -935,6 +964,7 @@ fn execute_crawl(
     let mut state = CrawlRunState {
         policy,
         guard,
+        contacts,
         cancel: &cancel,
         task_deadline,
         target_label: target_label.clone(),
@@ -988,6 +1018,7 @@ fn execute_crawl(
 struct CrawlRunState<'a> {
     policy: &'a CrawlPolicy,
     guard: &'a dyn ScopeGuard,
+    contacts: &'a crate::contact::ContactRegistry,
     cancel: &'a CancellationToken,
     task_deadline: Instant,
     target_label: String,
@@ -1183,6 +1214,7 @@ impl CrawlRunState<'_> {
             &page.url,
             self.policy,
             self.guard,
+            self.contacts,
             self.cancel,
             self.task_deadline,
             &mut self.requests_made,
@@ -1607,6 +1639,7 @@ impl CrawlRunState<'_> {
             url,
             self.policy,
             self.guard,
+            self.contacts,
             self.cancel,
             self.task_deadline,
             &mut self.requests_made,
@@ -1677,6 +1710,7 @@ impl CrawlRunState<'_> {
             &origin,
             self.policy,
             self.guard,
+            self.contacts,
             self.cancel,
             self.task_deadline,
             &mut self.requests_made,
@@ -1791,6 +1825,7 @@ impl CrawlRunState<'_> {
             url,
             self.policy,
             self.guard,
+            self.contacts,
             self.cancel,
             self.task_deadline,
             &mut self.requests_made,

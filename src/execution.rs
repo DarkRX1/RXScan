@@ -61,6 +61,7 @@ pub enum TaskKind {
     TlsProbe,
     DnsProbe,
     Fingerprint,
+    Baseline,
     Crawl,
     ContentDiscovery,
     Fuzz,

@@ -400,6 +400,7 @@ fn module_name_for_kind(kind: &TaskKind) -> String {
         TaskKind::TlsProbe => "rxscan.tls".to_owned(),
         TaskKind::DnsProbe => "rxscan.dns".to_owned(),
         TaskKind::Fingerprint => "rxscan.fingerprint".to_owned(),
+        TaskKind::Baseline => "rxscan.baseline".to_owned(),
         TaskKind::Crawl => "rxscan.crawl".to_owned(),
         TaskKind::ContentDiscovery => "rxscan.content".to_owned(),
         TaskKind::Fuzz => "rxscan.fuzz".to_owned(),

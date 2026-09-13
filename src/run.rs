@@ -138,23 +138,45 @@ pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
         web_policy,
         guard.clone(),
     )));
+    let contact_registry = crate::contact::ContactRegistry::new();
+    let baseline_similarity = crate::baseline::BaselineSimilarityRegistry::new();
     let crawl_policy = crate::crawl::CrawlPolicy::new(plan.level, plan.goal, plan.speed);
-    scheduler.register_module(Arc::new(crate::crawl::CrawlModule::new(
+    scheduler.register_module(Arc::new(crate::crawl::CrawlModule::with_contact_registry(
         crawl_policy,
         guard.clone(),
+        contact_registry.clone(),
     )));
+    let baseline_policy = crate::baseline::BaselinePolicy::new(plan.level, plan.goal, plan.speed);
+    scheduler.register_module(Arc::new(
+        crate::baseline::BaselineModule::with_shared_state(
+            baseline_policy,
+            guard.clone(),
+            contact_registry.clone(),
+            baseline_similarity,
+        ),
+    ));
+    let content_policy =
+        crate::content::ContentDiscoveryPolicy::new(plan.level, plan.goal, plan.speed);
+    scheduler.register_module(Arc::new(
+        crate::content::ContentDiscoveryModule::with_contact_registry(
+            content_policy,
+            guard.clone(),
+            contact_registry,
+        ),
+    ));
     for module in phase5_control_modules() {
         scheduler.register_module(Arc::new(module));
     }
     // Decision Engine: host facts propose scoped port tasks, open ports
     // propose scoped service tasks, confirmed web services propose web tasks.
-    scheduler.set_decision_engine(Arc::new(Phase7Engine::new(
+    scheduler.set_decision_engine(Arc::new(Phase7Engine::new_with_content_wordlist(
         guard.clone(),
         plan.stable_id(),
         plan.level,
         plan.goal,
         plan.tcp_ports.clone(),
         plan.speed,
+        plan.content_wordlist.clone(),
     )));
     for task in tasks {
         // Lowering scope-checks; scheduler admission is the second

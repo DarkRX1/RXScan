@@ -372,6 +372,12 @@ pub enum RelationshipKind {
     ReferencesEndpoint,
     ReferencesSitemap,
     ListsEndpoint,
+    DuplicateOf,
+    SimilarTo,
+    UsesOriginBaseline,
+    ParameterOf,
+    DiscoveredByContentProbe,
+    DerivedFromCandidateSource,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "subject_type", content = "id", rename_all = "snake_case")]
@@ -474,6 +480,24 @@ pub enum EventKind {
     RobotsObserved,
     SitemapObserved,
     CrawlBudgetExhausted,
+    BaselineStarted,
+    BaselineCompleted,
+    ResponseSignatureObserved,
+    OriginBaselineObserved,
+    Soft404Observed,
+    WildcardBehaviorObserved,
+    DuplicateObserved,
+    SimilarResponseObserved,
+    EndpointClassified,
+    ParameterObserved,
+    BaselineBudgetExhausted,
+    ContentDiscoveryStarted,
+    CandidateAttempted,
+    ContentDiscovered,
+    ContentRejectedByBaseline,
+    ContentRedirectObserved,
+    ContentDiscoveryBudgetExhausted,
+    ContentDiscoveryCompleted,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Event {

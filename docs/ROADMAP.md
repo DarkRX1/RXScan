@@ -13,9 +13,10 @@ Each phase requires tests, benchmark/regression evidence where applicable, docum
 | 6 | Native TCP Port Discovery Engine: TCP connect scanning via scheduler, port-state model, bounded tasks, Decision Engine V1, open-port JSONL + summary | Complete |
 | 7 | Service Intelligence + Native Protocol Probing: SSH/HTTP/TLS/HTTPS/FTP/SMTP/Redis/MySQL/PostgreSQL/generic probes via scheduler, service assets, Decision Engine open-port→service, evidence-graded confidence | Complete |
 | 8 | HTTP/TLS Web Foundation: bounded HTTP/1.1 observations, canonical URLs, bounded redirects, TLS/certificate evidence, Decision Engine service→web, no crawling | Complete |
-| 9 | Bounded Web Crawler + Endpoint Graph: confirmed endpoint→crawl proposals, bounded same-origin extraction, forms/robots/sitemaps/static-JS observations, endpoint relationships | Complete (current) |
-| 10 | UDP, TLS cipher enumeration, technology fingerprint engine | Not implemented |
-| 11–15 | DNS, deeper crawler/content/API workflows, fuzzing | Not implemented |
+| 9 | Bounded Web Crawler + Endpoint Graph: confirmed endpoint→crawl proposals, bounded same-origin extraction, forms/robots/sitemaps/static-JS observations, endpoint relationships | Complete |
+| 10 | Baseline Web Intelligence: bounded response signatures, conservative normalization/similarity, soft-404/wildcard origin baselines, endpoint classes, parameter inventory, interestingness metadata | Complete |
+| 11 | Managed Content Discovery: bounded built-in/user-file path candidates, Phase 10 baseline filtering, typed content evidence, no fuzzing | Complete (current) |
+| 12–15 | Contextual fuzzing, DNS, deeper API workflows, UDP, technology fingerprinting | Not implemented |
 | 16–19 | Decision engine workflows, API workflows, checks, graph/correlation | Not implemented |
 | 20–24 | Outputs, resume/diff/projects, packs, benchmark lab, releases | Not implemented |
 
@@ -27,6 +28,10 @@ Phase 8 adds the HTTP/TLS web foundation: bounded HTTP/1.1 GET/HEAD observations
 
 Phase 9 adds deterministic bounded crawling from confirmed HTTP/HTTPS endpoint evidence only. `HttpProbe` completions propose root `Crawl` tasks through the Decision Engine; crawler discoveries return to the Decision Engine for same-origin follow-up proposals with inherited depth/page budgets. Extraction covers links, forms as observation-only metadata, script/style/image/frame/canonical references, robots.txt, sitemap XML, and conservative static JavaScript string literals. Out-of-scope candidates are recorded and never contacted. Still absent by design: directory brute forcing, path guessing, wordlists, parameter mutation/fuzzing, form submission, authentication automation, JavaScript execution, headless browsers, vulnerability checks, exploitation, and arbitrary scope expansion.
 
+Phase 10 adds baseline web intelligence for confirmed and crawled endpoints. `HttpProbe`/`Crawl` outputs propose `Baseline` tasks through the Decision Engine; endpoint-specific tasks record signatures/classes/parameters while origin-level synthetic missing-path probes are deduped per decision output. Signatures include raw and normalized SHA-256 body fingerprints, selected header/title/HTML-structure hashes, status, MIME, length bucket, and truncation. Soft-404 and wildcard-like behavior require two same-origin inert missing-path samples. Still absent by design: wordlists, guessed paths beyond inert baseline tokens, parameter mutation/fuzzing, form submission, vulnerability scanning, JavaScript execution, headless browsers, UDP, cipher enumeration, and technology fingerprinting.
+
+Phase 11 adds managed content discovery. Content tasks are proposed by the Decision Engine from confirmed web origins and Phase 10 origin baselines; the module consumes a small built-in candidate set and optional streamed `-w/--wordlist` file. Candidates are path/resource names only, normalized into the same origin, scope-checked before contact, deduped by canonical URL, fetched with Phase 8 HTTP/TLS primitives, and filtered with Phase 10 baseline signatures. It does not perform placeholder fuzzing, parameter mutation, form submission, method enumeration, recursive directory explosion, vulnerability scanning, JavaScript execution, or headless browsing.
+
 ## Phase 9 exit criteria
 
 - Crawl eligibility starts only from confirmed `EndpointObserved` HTTP/HTTPS evidence; port numbers and guesses are insufficient.
@@ -37,6 +42,25 @@ Phase 9 adds deterministic bounded crawling from confirmed HTTP/HTTPS endpoint e
 - Scope is checked before admission, execution, request, redirect, discovered fetch, JS fetch, robots fetch, sitemap fetch, and Decision Engine follow-up.
 - Typed events/evidence/assets include crawl lifecycle, endpoint discoveries, link/form/script/robots/sitemap observations, budget exhaustion, and relationships (`LinksTo`, `SubmitsTo`, `LoadsScript`, `ReferencesEndpoint`, `ReferencesSitemap`, `ListsEndpoint`).
 - Tests are deterministic/local-only and include canary proof that forms are not submitted and out-of-scope links receive zero contacts. Baseline recorded in `docs/benchmark-results/phase9-crawler-baseline.md`.
+
+## Phase 10 exit criteria
+
+- Baseline eligibility starts from confirmed `EndpointObserved` or in-scope `EndpointDiscovered` evidence only; the `Baseline` module never self-schedules.
+- Baseline requests reuse Phase 8 `WebTarget` and HTTP/TLS fetch primitives, including redirect caps, per-hop scope checks, deadlines, cancellation, and body/header bounds.
+- Level matrix: L1 basic signature/classification only; L2 adds exact duplicate-ready signatures; L3 adds normalized signatures plus two synthetic missing-path samples for soft-404/wildcard characterization; L4 enables bounded similarity/template grouping signals and parameter inventory; L5 adds deterministic interestingness scoring. Hard caps include 64KiB signature body input, two synthetic requests/origin, 128 endpoint proposals/completion, 32 parameter records/task, and 8 baseline findings/task.
+- Normalization is conservative: lowercase, whitespace collapse, tag-adjacent whitespace cleanup, and obvious long numeric/request IDs normalized; unrelated short pages with the same title are not collapsed.
+- Synthetic paths use inert `__rxscan_baseline_<token>__` names on the same origin only. They are not wordlist/content discovery and never expand scope.
+- Typed output includes baseline lifecycle, response signature, origin baseline, soft-404, wildcard, endpoint classification, parameter, budget-exhaustion events, evidence, and relationships for future duplicate/similarity grouping.
+- Tests are deterministic/local-only and cover signatures, similarity thresholds, soft-404/wildcard, redirect canaries, parameters, cancellation/timeout/stale scope, JSONL round trip, and production Scheduler/Decision Engine admission. Baseline recorded in `docs/benchmark-results/phase10-baseline-intelligence.md`.
+
+## Phase 11 exit criteria
+
+- Content discovery starts from confirmed web origin evidence and Decision Engine proposals; modules never self-schedule.
+- Candidate sources are a 12-entry built-in set plus explicit streamed user files at L4+. Blank lines and `#` comments are ignored; lines over 512 bytes, absolute URLs, authorities, backslashes, control characters, and traversal components are rejected.
+- Level matrix: L1 disabled; L2 tiny built-in set; L3 larger built-in set with baseline-aware filtering; L4 full built-in set plus streamed user file; L5 largest Phase 11 request/candidate budgets. Speed controls pressure only.
+- Hard caps include 2,000 candidate lines read, 512 admitted candidates, 128 requests/task, 64KiB response bytes, 64 discovered endpoints, 256 events, 128 evidence records, 16 findings, and 1,024 dedup entries.
+- Typed output includes content lifecycle, candidate attempts, discovered/rejected/redirect observations, budget exhaustion, endpoint assets, evidence, and relationships (`DiscoveredByContentProbe`, `DerivedFromCandidateSource`).
+- Tests are deterministic/local-only and cover built-in/user candidate sources, streaming, dedup, baseline rejection, canary redirects, budgets, cancellation, timeout, scheduler integration, level/speed behavior, JSONL, provenance, and IPv6 where loopback bind is available. Benchmark recorded in `docs/benchmark-results/phase11-content-discovery.md`.
 
 ## MVP v0.1 gate
 

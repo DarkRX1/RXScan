@@ -255,6 +255,7 @@ pub fn priority_for_kind(kind: &TaskKind) -> u8 {
             TaskKind::HttpProbe => 45,
             TaskKind::TlsProbe => 40,
             TaskKind::Fingerprint => 35,
+            TaskKind::Baseline => 32,
             TaskKind::ContentDiscovery => 30,
             TaskKind::Crawl => 25,
             TaskKind::Fuzz => 20,

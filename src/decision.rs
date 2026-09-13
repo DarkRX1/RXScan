@@ -20,6 +20,7 @@
 //! and are ignored gracefully instead of rescanning.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -432,6 +433,8 @@ pub struct Phase7Engine {
     service: ServiceDecisionEngine,
     web: WebDecisionEngine,
     crawl: CrawlDecisionEngine,
+    baseline: BaselineDecisionEngine,
+    content: ContentDecisionEngine,
 }
 
 impl Phase7Engine {
@@ -443,6 +446,27 @@ impl Phase7Engine {
         tcp_selection: TcpPortSelection,
         speed: crate::plan::SpeedSetting,
     ) -> Self {
+        Self::new_with_content_wordlist(
+            scope_guard,
+            plan_id,
+            level,
+            goal,
+            tcp_selection,
+            speed,
+            None,
+        )
+    }
+
+    pub fn new_with_content_wordlist(
+        scope_guard: Arc<dyn ScopeGuard>,
+        plan_id: ScanPlanId,
+        level: u8,
+        goal: ScanGoal,
+        tcp_selection: TcpPortSelection,
+        speed: crate::plan::SpeedSetting,
+        content_wordlist: Option<PathBuf>,
+    ) -> Self {
+        let origin_baselines = crate::baseline::OriginBaselineRegistry::new();
         Self {
             tcp: TcpDecisionEngine::new(
                 scope_guard.clone(),
@@ -460,7 +484,30 @@ impl Phase7Engine {
                 speed,
             ),
             web: WebDecisionEngine::new(scope_guard.clone(), plan_id.clone(), speed),
-            crawl: CrawlDecisionEngine::new(scope_guard, plan_id, level, goal, speed),
+            crawl: CrawlDecisionEngine::new(
+                scope_guard.clone(),
+                plan_id.clone(),
+                level,
+                goal,
+                speed,
+            ),
+            baseline: BaselineDecisionEngine::new(
+                scope_guard.clone(),
+                plan_id.clone(),
+                level,
+                goal,
+                speed,
+                origin_baselines.clone(),
+            ),
+            content: ContentDecisionEngine::new(
+                scope_guard,
+                plan_id,
+                level,
+                goal,
+                speed,
+                content_wordlist,
+                origin_baselines,
+            ),
         }
     }
 }
@@ -472,8 +519,13 @@ impl crate::execution::DecisionEngine for Phase7Engine {
             TaskKind::PortDiscovery => self.service.follow_up_tasks(completed, output),
             TaskKind::ServiceProbe => self.web.follow_up_tasks(completed, output),
             TaskKind::HttpProbe | TaskKind::Crawl => self.crawl.follow_up_tasks(completed, output),
+            TaskKind::Baseline => Vec::new(),
             _ => Vec::new(),
         }
+        .into_iter()
+        .chain(self.baseline.follow_up_tasks(completed, output))
+        .chain(self.content.follow_up_tasks(completed, output))
+        .collect()
     }
 }
 
@@ -876,6 +928,380 @@ impl crate::execution::DecisionEngine for CrawlDecisionEngine {
                 )
             })
             .collect()
+    }
+}
+
+#[derive(Clone)]
+pub struct BaselineDecisionEngine {
+    scope_guard: Arc<dyn ScopeGuard>,
+    plan_id: ScanPlanId,
+    level: u8,
+    speed: crate::plan::SpeedSetting,
+    origin_baselines: crate::baseline::OriginBaselineRegistry,
+}
+
+impl BaselineDecisionEngine {
+    pub fn new(
+        scope_guard: Arc<dyn ScopeGuard>,
+        plan_id: ScanPlanId,
+        level: u8,
+        _goal: ScanGoal,
+        speed: crate::plan::SpeedSetting,
+        origin_baselines: crate::baseline::OriginBaselineRegistry,
+    ) -> Self {
+        Self {
+            scope_guard,
+            plan_id,
+            level: level.clamp(1, 5),
+            speed,
+            origin_baselines,
+        }
+    }
+
+    fn baseline_task(
+        &self,
+        url: &crate::web::WebTarget,
+        source_endpoint: &str,
+        source: &str,
+        origin_baseline: bool,
+    ) -> Option<Task> {
+        let scope_target = crate::web_probe::scope_target_for_web_target(url);
+        if !self.scope_guard.permits(&scope_target) {
+            return None;
+        }
+        let mut params =
+            crate::baseline::baseline_task_params(url, source_endpoint, origin_baseline);
+        params.insert("source".to_owned(), source.to_owned());
+        let governor = crate::execution::SpeedGovernor::new(self.speed, 1).ok()?;
+        let provenance = crate::model::Provenance::new(
+            "rxscan.decision",
+            "10.0.0",
+            self.plan_id.clone(),
+            Timestamp::now(),
+        )
+        .ok()?;
+        Task::new_with_params(
+            TaskKind::Baseline,
+            None,
+            Vec::new(),
+            Some(crate::model::AssetId(source_endpoint.to_owned())),
+            self.plan_id.clone(),
+            priority_for_kind(&TaskKind::Baseline),
+            governor.default_timeout(),
+            governor.default_retry_policy(),
+            crate::baseline::BASELINE_MODULE_NAME,
+            provenance,
+            scope_target,
+            params,
+            self.scope_guard.as_ref(),
+        )
+        .ok()
+    }
+}
+
+impl crate::execution::DecisionEngine for BaselineDecisionEngine {
+    fn follow_up_tasks(&self, completed: &Task, output: &ModuleOutput) -> Vec<Task> {
+        if self.level == 0 {
+            return Vec::new();
+        }
+        if completed.kind == TaskKind::Baseline {
+            remember_origin_baselines(&self.origin_baselines, output);
+            return Vec::new();
+        }
+        let mut proposals = Vec::new();
+        let mut origins = BTreeSet::new();
+        for event in &output.events {
+            let source = match event.kind {
+                crate::model::EventKind::EndpointObserved => "confirmed-endpoint",
+                crate::model::EventKind::EndpointDiscovered => "crawl-discovery",
+                _ => continue,
+            };
+            if matches!(event.kind, crate::model::EventKind::EndpointDiscovered)
+                && !event
+                    .details
+                    .data
+                    .get("scope_permitted")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+            {
+                continue;
+            }
+            let Some(url_text) = event
+                .details
+                .data
+                .get("url")
+                .and_then(serde_json::Value::as_str)
+            else {
+                continue;
+            };
+            let Ok(url) = crate::web::WebTarget::parse(url_text) else {
+                continue;
+            };
+            let origin = crate::baseline::origin_root(&url).canonical();
+            let origin_baseline =
+                origins.insert(origin.clone()) && !self.origin_baselines.has(&origin);
+            let source_endpoint = event
+                .asset_id
+                .as_ref()
+                .map(|id| id.0.as_str())
+                .unwrap_or("");
+            if source_endpoint.is_empty() {
+                continue;
+            }
+            if let Some(task) = self.baseline_task(&url, source_endpoint, source, origin_baseline) {
+                proposals.push(task);
+            }
+            if proposals.len() >= crate::baseline::MAX_ENDPOINT_COMPARISONS {
+                break;
+            }
+        }
+        proposals
+    }
+}
+
+fn remember_origin_baselines(
+    registry: &crate::baseline::OriginBaselineRegistry,
+    output: &ModuleOutput,
+) {
+    for event in &output.events {
+        if !matches!(event.kind, crate::model::EventKind::OriginBaselineObserved) {
+            continue;
+        }
+        let Some(origin) = event
+            .details
+            .data
+            .get("origin")
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+        let hashes = event
+            .details
+            .data
+            .get("normalized_sha256")
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .unwrap_or_default();
+        registry.remember(origin.to_owned(), hashes);
+    }
+}
+
+#[derive(Clone)]
+pub struct ContentDecisionEngine {
+    scope_guard: Arc<dyn ScopeGuard>,
+    plan_id: ScanPlanId,
+    level: u8,
+    goal: ScanGoal,
+    speed: crate::plan::SpeedSetting,
+    wordlist: Option<PathBuf>,
+    origin_baselines: crate::baseline::OriginBaselineRegistry,
+}
+
+impl ContentDecisionEngine {
+    pub fn new(
+        scope_guard: Arc<dyn ScopeGuard>,
+        plan_id: ScanPlanId,
+        level: u8,
+        goal: ScanGoal,
+        speed: crate::plan::SpeedSetting,
+        wordlist: Option<PathBuf>,
+        origin_baselines: crate::baseline::OriginBaselineRegistry,
+    ) -> Self {
+        Self {
+            scope_guard,
+            plan_id,
+            level: level.clamp(1, 5),
+            goal,
+            speed,
+            wordlist,
+            origin_baselines,
+        }
+    }
+
+    fn content_task(
+        &self,
+        url: &crate::web::WebTarget,
+        _source_endpoint: &str,
+        baseline_hashes: Option<&str>,
+    ) -> Option<Task> {
+        let policy = crate::content::ContentDiscoveryPolicy::new(self.level, self.goal, self.speed);
+        if !policy.enabled() {
+            return None;
+        }
+        let root = crate::baseline::origin_root(url);
+        let scope_target = crate::web_probe::scope_target_for_web_target(&root);
+        if !self.scope_guard.permits(&scope_target) {
+            return None;
+        }
+        let origin_endpoint = crate::web::endpoint_asset_id(&root);
+        let mut params =
+            crate::content::content_task_params(&root, &origin_endpoint, self.wordlist.as_deref());
+        let stored_hashes = self.origin_baselines.get_hashes(&root.canonical());
+        let baseline_hashes = baseline_hashes
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .or(stored_hashes);
+        if let Some(hash) = baseline_hashes.filter(|value| !value.is_empty()) {
+            params.insert("baseline_normalized_sha256".to_owned(), hash.to_owned());
+        }
+        let governor = crate::execution::SpeedGovernor::new(self.speed, 1).ok()?;
+        let provenance = crate::model::Provenance::new(
+            "rxscan.decision",
+            "11.0.0",
+            self.plan_id.clone(),
+            Timestamp::now(),
+        )
+        .ok()?;
+        Task::new_with_params(
+            TaskKind::ContentDiscovery,
+            None,
+            Vec::new(),
+            Some(crate::model::AssetId(origin_endpoint)),
+            self.plan_id.clone(),
+            priority_for_kind(&TaskKind::ContentDiscovery),
+            governor.default_timeout(),
+            governor.default_retry_policy(),
+            crate::content::CONTENT_MODULE_NAME,
+            provenance,
+            scope_target,
+            params,
+            self.scope_guard.as_ref(),
+        )
+        .ok()
+    }
+}
+
+impl crate::execution::DecisionEngine for ContentDecisionEngine {
+    fn follow_up_tasks(&self, completed: &Task, output: &ModuleOutput) -> Vec<Task> {
+        if self.level < 2 {
+            return Vec::new();
+        }
+        let mut proposals = Vec::new();
+        let mut origins = BTreeSet::new();
+        if completed.kind == TaskKind::Baseline {
+            remember_origin_baselines(&self.origin_baselines, output);
+            let mut baseline_by_origin: BTreeMap<String, String> = BTreeMap::new();
+            for event in &output.events {
+                if !matches!(event.kind, crate::model::EventKind::OriginBaselineObserved) {
+                    continue;
+                }
+                let Some(origin) = event
+                    .details
+                    .data
+                    .get("origin")
+                    .and_then(serde_json::Value::as_str)
+                else {
+                    continue;
+                };
+                let hashes = event
+                    .details
+                    .data
+                    .get("normalized_sha256")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    })
+                    .unwrap_or_default();
+                baseline_by_origin.insert(origin.to_owned(), hashes);
+            }
+            for event in &output.events {
+                if !matches!(event.kind, crate::model::EventKind::BaselineCompleted) {
+                    continue;
+                }
+                let Some(url_text) = event
+                    .details
+                    .data
+                    .get("url")
+                    .and_then(serde_json::Value::as_str)
+                else {
+                    continue;
+                };
+                let Ok(url) = crate::web::WebTarget::parse(url_text) else {
+                    continue;
+                };
+                let origin = crate::baseline::origin_root(&url).canonical();
+                if !origins.insert(origin.clone()) {
+                    continue;
+                }
+                if !baseline_by_origin.contains_key(&origin) {
+                    continue;
+                }
+                let source_endpoint = completed
+                    .associated_asset_id
+                    .as_ref()
+                    .map(|id| id.0.as_str())
+                    .unwrap_or("");
+                if source_endpoint.is_empty() {
+                    continue;
+                }
+                if let Some(task) = self.content_task(
+                    &url,
+                    source_endpoint,
+                    baseline_by_origin.get(&origin).map(String::as_str),
+                ) {
+                    proposals.push(task);
+                }
+            }
+        } else if self.level == 2 && matches!(completed.kind, TaskKind::HttpProbe | TaskKind::Crawl)
+        {
+            for event in &output.events {
+                let source_event = matches!(
+                    event.kind,
+                    crate::model::EventKind::EndpointObserved
+                        | crate::model::EventKind::EndpointDiscovered
+                );
+                if !source_event {
+                    continue;
+                }
+                if matches!(event.kind, crate::model::EventKind::EndpointDiscovered)
+                    && !event
+                        .details
+                        .data
+                        .get("scope_permitted")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false)
+                {
+                    continue;
+                }
+                let Some(url_text) = event
+                    .details
+                    .data
+                    .get("url")
+                    .and_then(serde_json::Value::as_str)
+                else {
+                    continue;
+                };
+                let Ok(url) = crate::web::WebTarget::parse(url_text) else {
+                    continue;
+                };
+                let origin = crate::baseline::origin_root(&url).canonical();
+                if !origins.insert(origin) {
+                    continue;
+                }
+                let source_endpoint = event
+                    .asset_id
+                    .as_ref()
+                    .map(|id| id.0.as_str())
+                    .unwrap_or("");
+                if source_endpoint.is_empty() {
+                    continue;
+                }
+                if let Some(task) = self.content_task(&url, source_endpoint, None) {
+                    proposals.push(task);
+                }
+            }
+        }
+        proposals
     }
 }
 

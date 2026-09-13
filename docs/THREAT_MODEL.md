@@ -23,6 +23,10 @@ RXScan is for authorized, scoped, non-destructive reconnaissance. Its central ri
 | Unbounded handshake/memory blowup | per-probe wall budgets plus task-deadline truncation, 2–32KiB read caps with truncation flags, fixed small writes, no cipher enumeration | 7 |
 | Crawler scope drift / recursive explosion | confirmed-endpoint eligibility, Decision Engine-only recursion, same-origin follow-ups, hard depth/page/request/candidate caps, per-request scope checks, out-of-scope observations without contact | 9 |
 | Unsafe web interaction | forms observed but never submitted; no parameter mutation, credentials, JavaScript execution, headless browser, wordlists, fuzzing, or vulnerability payloads | 9 |
+| Baseline probe drift / accidental discovery | inert same-origin synthetic paths only, two-sample hard cap, Decision Engine-only admission, no wordlists or sensitive path names | 10 |
+| False duplicate/soft-404 claims | conservative signatures, bounded similarity thresholds, two-sample missing-path baseline, inconclusive state for weak signals | 10 |
+| Managed content discovery becoming fuzzing | small reviewed built-in set, explicit streamed user file, no placeholders/mutation/method enumeration/forms/payloads, hard candidate/request caps | 11 |
+| Candidate path escape | same-origin URL construction, traversal/authority/control/backslash rejection, canonical dedup, scope check before every contact | 11 |
 
 Modules never receive authority to bypass policy. Discovery may be recorded without authorizing active work against a new asset.
 
@@ -69,3 +73,20 @@ Modules never receive authority to bypass policy. Discovery may be recorded with
 - HTML/robots/sitemap/JavaScript parsing is bounded and fail-safe. Malformed content yields fewer observations, never panics or speculative endpoints.
 - Forms are observation only: method/action/input metadata is recorded, but RXScan never submits, mutates, authenticates, or infers vulnerabilities from forms.
 - Static JavaScript extraction is conservative literal scanning from explicitly referenced in-scope scripts at L4+. No JavaScript execution, DOM emulation, dynamic instrumentation, or headless browser exists.
+
+## Phase 10 baseline safety notes
+
+- Baseline tasks reuse Phase 8 `WebTarget` and HTTP/TLS primitives; there is no separate raw HTTP stack. Redirects are capped, loop-checked, and scope-checked before follow.
+- Synthetic missing-resource paths are deterministic per task, clearly inert, same-origin, and capped at two samples/origin. Scan-lifetime origin state is keyed by scheme + canonical host + effective port so equivalent origins do not repeat synthetic characterization across separate completion batches. Synthetic paths are never drawn from dictionaries and never include admin, backup, secret, traversal, injection, shell, or authentication strings.
+- Baseline classification is evidence-backed and conservative. Soft-404/wildcard observations require repeated missing-path evidence; weak or mixed signals remain `Inconclusive`.
+- Parameter handling is inventory only. Names and value-shape classes may be recorded; values are not mutated, replayed, submitted, fuzzed, or turned into vulnerability claims.
+- Similarity work is bounded by proposal/comparison caps plus compact scan-lifetime indexes. Exact/normalized hashes are primary signals; template similarity uses small capped buckets and requires compatible status/MIME, matching title/structure, close length, and enough body material to avoid collapsing unrelated short pages.
+
+## Phase 11 managed content discovery safety notes
+
+- Content discovery is native Rust and uses the existing Phase 8 web primitives. There is no second HTTP client, external scanner, Python/Java/Node runtime, browser, database, LLM, or subprocess fuzzing tool.
+- Candidate files are streamed line-by-line. RXScan never loads the full wordlist into memory; line length, candidates read, candidates admitted, requests, dedup entries, events, evidence, findings, and response bytes are capped.
+- Candidates are resource paths only. Absolute URLs, authorities, backslashes, control characters, traversal components, and oversized/malformed lines are rejected before URL construction.
+- Baseline-aware filtering uses Phase 10 normalized missing-resource signatures. A success status alone is insufficient to classify content as discovered.
+- Content discovery shares the scan-lifetime contacted-request registry with crawl/baseline modules so canonical duplicate GET URLs are not contacted repeatedly. This registry is not an authorization mechanism; scope checks still run at every contact boundary.
+- Content modules never self-schedule; discovered endpoints are typed events that return to the Decision Engine for existing crawl/baseline follow-ups.
