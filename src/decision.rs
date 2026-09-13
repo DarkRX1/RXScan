@@ -24,8 +24,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use sha2::{Digest, Sha256};
+
 use crate::discovery::HostState;
-use crate::execution::{ModuleOutput, ScopeGuard, Task, TaskKind, TaskScopeTarget};
+use crate::execution::{ModuleOutput, ScopeGuard, Task, TaskId, TaskKind, TaskScopeTarget};
 use crate::level::priority_for_kind;
 use crate::model::{ScanPlanId, Timestamp};
 use crate::plan::{ScanGoal, TcpPortSelection};
@@ -1315,6 +1317,7 @@ pub struct FuzzDecisionEngine {
     level: u8,
     goal: ScanGoal,
     speed: crate::plan::SpeedSetting,
+    origin_budget: crate::fuzz::FuzzOriginBudget,
 }
 
 impl FuzzDecisionEngine {
@@ -1331,6 +1334,7 @@ impl FuzzDecisionEngine {
             level: level.clamp(1, 5),
             goal,
             speed,
+            origin_budget: crate::fuzz::FuzzOriginBudget::new(),
         }
     }
 
@@ -1357,7 +1361,7 @@ impl FuzzDecisionEngine {
             Timestamp::now(),
         )
         .ok()?;
-        Task::new_with_params(
+        let mut task = Task::new_with_params(
             TaskKind::Fuzz,
             None,
             Vec::new(),
@@ -1372,8 +1376,38 @@ impl FuzzDecisionEngine {
             crate::fuzz::fuzz_task_params(url, source_endpoint, param, Some(signature)),
             self.scope_guard.as_ref(),
         )
-        .ok()
+        .ok()?;
+        task.id = fuzz_plan_task_id(&self.plan_id, url, source_endpoint, param, signature);
+        Some(task)
     }
+}
+
+fn fuzz_plan_task_id(
+    plan_id: &ScanPlanId,
+    url: &crate::web::WebTarget,
+    source_endpoint: &str,
+    param: &str,
+    signature: &crate::baseline::ResponseSignature,
+) -> TaskId {
+    let identity = serde_json::json!({
+        "plan": plan_id.0,
+        "module": crate::fuzz::FUZZ_MODULE_NAME,
+        "kind": "fuzz",
+        "source_endpoint": source_endpoint,
+        "url": url.canonical(),
+        "param": param,
+        "baseline_raw_sha256": signature.raw_sha256,
+        "baseline_normalized_sha256": signature.normalized_sha256,
+    });
+    let bytes = serde_json::to_vec(&identity).expect("fuzz identity serializes");
+    let digest = Sha256::digest(&bytes);
+    TaskId(format!(
+        "task_{}",
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    ))
 }
 
 impl crate::execution::DecisionEngine for FuzzDecisionEngine {
@@ -1431,6 +1465,15 @@ impl crate::execution::DecisionEngine for FuzzDecisionEngine {
                 }
                 let key = format!("{}#{name}", url.canonical());
                 if !seen.insert(key) {
+                    continue;
+                }
+                let origin = crate::fuzz::origin_key(&url);
+                let plan_key = format!("{}#{name}", url.canonical());
+                let policy = crate::fuzz::FuzzPolicy::new(self.level, self.goal, self.speed);
+                if !self
+                    .origin_budget
+                    .claim(&origin, &plan_key, policy.tasks_per_origin_limit())
+                {
                     continue;
                 }
                 if let Some(task) = self.fuzz_task(&url, source_endpoint, &name, &signature) {

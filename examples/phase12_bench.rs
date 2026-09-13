@@ -91,6 +91,8 @@ fn fixture() -> (u16, Arc<AtomicBool>, Arc<Mutex<Vec<String>>>) {
                     response(200, "application/json", r#"{"enabled":false}"#)
                 } else if path.starts_with("/echo?") {
                     response(200, "text/html", &format!("<html>{path}</html>"))
+                } else if path.starts_with("/same?") {
+                    response(200, "text/html", "<html>same</html>")
                 } else if path.starts_with("/redir?") {
                     redirect("/landing")
                 } else if path == "/landing" {
@@ -190,6 +192,8 @@ fn main() {
         WebTarget::parse(&format!("http://127.0.0.1:{port}/items?limit=20")).unwrap(),
         WebTarget::parse(&format!("http://127.0.0.1:{port}/toggle?enabled=true")).unwrap(),
         WebTarget::parse(&format!("http://127.0.0.1:{port}/echo?q=alice")).unwrap(),
+        WebTarget::parse(&format!("http://127.0.0.1:{port}/echo?q=alice")).unwrap(),
+        WebTarget::parse(&format!("http://127.0.0.1:{port}/same?q=alice")).unwrap(),
         WebTarget::parse(&format!("http://127.0.0.1:{port}/redir?next=home")).unwrap(),
         WebTarget::parse(&format!("http://127.0.0.1:{port}/echo?csrf_token=abc")).unwrap(),
     ];
@@ -240,6 +244,15 @@ fn main() {
         .tasks()
         .filter(|task| task.kind == TaskKind::Fuzz)
         .count();
+    let potential_fuzz_inputs = endpoints
+        .iter()
+        .filter(|endpoint| {
+            endpoint.query.as_deref().is_some_and(|query| {
+                url::form_urlencoded::parse(query.as_bytes())
+                    .any(|(name, _)| !rxscan::fuzz::is_sensitive_name(&name))
+            })
+        })
+        .count();
     let skipped_sensitive = endpoints
         .iter()
         .filter(|endpoint| {
@@ -261,6 +274,13 @@ fn main() {
         .clone()
         .filter(|event| matches!(event.kind, EventKind::FuzzInputReflected))
         .count();
+    let no_meaningful_change = events
+        .clone()
+        .filter(|event| {
+            matches!(event.kind, EventKind::FuzzBehaviorDeltaObserved)
+                && event.details.data["outcome"] == "no_meaningful_change"
+        })
+        .count();
     let inconclusive = events
         .filter(|event| {
             matches!(event.kind, EventKind::FuzzBehaviorDeltaObserved)
@@ -277,6 +297,7 @@ fn main() {
                 "/items?limit=20"
                     | "/toggle?enabled=true"
                     | "/echo?q=alice"
+                    | "/same?q=alice"
                     | "/redir?next=home"
                     | "/echo?csrf_token=abc"
             )
@@ -300,6 +321,7 @@ fn main() {
                 "/items?limit=20"
                     | "/toggle?enabled=true"
                     | "/echo?q=alice"
+                    | "/same?q=alice"
                     | "/redir?next=home"
                     | "/echo?csrf_token=abc"
                     | "/landing"
@@ -321,7 +343,10 @@ fn main() {
     println!("skipped_sensitive_inputs={skipped_sensitive}");
     println!("mutations_generated={mutations_generated}");
     println!("unique_mutation_requests={mutation_requests}");
-    println!("dedup_avoided_requests=0");
+    println!(
+        "dedup_avoided_requests={}",
+        potential_fuzz_inputs.saturating_sub(eligible_inputs)
+    );
     println!("baseline_reused={eligible_inputs}");
     println!("baseline_requests={baseline_requests}");
     println!("baseline_synthetic_requests={baseline_synthetic}");
@@ -330,6 +355,7 @@ fn main() {
     println!("retry_requests={retry_requests}");
     println!("total_network_requests={total_network_requests}");
     println!("behavior_deltas={behavior_deltas}");
+    println!("no_meaningful_change={no_meaningful_change}");
     println!("reflections={reflections}");
     println!("inconclusive={inconclusive}");
     println!("completed_tasks={}", report.completed.len());

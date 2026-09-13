@@ -57,10 +57,17 @@ impl ContactRegistry {
             return true;
         }
         let url = target.canonical();
-        if matches!(
+        let cross_module_dedup = matches!(
             purpose,
             RequestPurpose::ContentCandidate | RequestPurpose::CrawlPage
-        ) && state.by_url.contains_key(&url)
+        );
+        if cross_module_dedup
+            && state.by_url.get(&url).is_some_and(|seen| {
+                matches!(
+                    seen,
+                    RequestPurpose::ContentCandidate | RequestPurpose::CrawlPage
+                )
+            })
         {
             return false;
         }
@@ -72,7 +79,11 @@ impl ContactRegistry {
         if !state.exact.insert(key) {
             return false;
         }
-        state.by_url.entry(url).or_insert(purpose);
+        if cross_module_dedup {
+            state.by_url.insert(url, purpose);
+        } else {
+            state.by_url.entry(url).or_insert(purpose);
+        }
         if state.exact.len() >= MAX_CONTACT_REGISTRY_ENTRIES {
             state.full = true;
         }

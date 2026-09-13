@@ -8,7 +8,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     net::IpAddr,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -42,6 +42,8 @@ pub const MAX_FUZZ_EVIDENCE: usize = 16;
 pub const MAX_FUZZ_FINDINGS: usize = 4;
 pub const MAX_MUTATION_VALUE_BYTES: usize = 32;
 pub const MAX_FUZZ_DEDUP_ENTRIES: usize = 64;
+pub const MAX_FUZZ_ORIGIN_BUDGETS: usize = 256;
+pub const MAX_FUZZ_TASKS_PER_ORIGIN_HARD: usize = 8;
 
 #[derive(Debug, Clone)]
 pub struct FuzzPolicy {
@@ -90,6 +92,15 @@ impl FuzzPolicy {
         }
     }
 
+    pub fn tasks_per_origin_limit(&self) -> usize {
+        match self.level {
+            0..=2 => 0,
+            3 => 2,
+            4 => 4,
+            _ => MAX_FUZZ_TASKS_PER_ORIGIN_HARD,
+        }
+    }
+
     pub fn web_policy(&self) -> WebPolicy {
         WebPolicy::new(self.level, self.goal, self.speed)
     }
@@ -112,6 +123,58 @@ impl FuzzPolicy {
             self.request_limit(),
             MAX_FUZZ_RESPONSE_BYTES,
         )
+    }
+}
+
+#[derive(Debug, Default)]
+struct OriginBudgetState {
+    plans_by_origin: BTreeMap<String, BTreeSet<String>>,
+    full: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FuzzOriginBudget {
+    state: Arc<Mutex<OriginBudgetState>>,
+}
+
+impl FuzzOriginBudget {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn claim(&self, origin: &str, plan_key: &str, per_origin_limit: usize) -> bool {
+        if per_origin_limit == 0 {
+            return false;
+        }
+        let mut state = self.state.lock().unwrap();
+        if let Some(plans) = state.plans_by_origin.get_mut(origin) {
+            if plans.contains(plan_key) {
+                return true;
+            }
+            if plans.len() >= per_origin_limit {
+                return false;
+            }
+            plans.insert(plan_key.to_owned());
+            return true;
+        }
+        if state.full || state.plans_by_origin.len() >= MAX_FUZZ_ORIGIN_BUDGETS {
+            state.full = true;
+            return false;
+        }
+        let mut plans = BTreeSet::new();
+        plans.insert(plan_key.to_owned());
+        state.plans_by_origin.insert(origin.to_owned(), plans);
+        true
+    }
+
+    pub fn count_for_origin(&self, origin: &str) -> usize {
+        self.state
+            .lock()
+            .unwrap()
+            .plans_by_origin
+            .get(origin)
+            .map(BTreeSet::len)
+            .unwrap_or(0)
     }
 }
 
@@ -255,6 +318,11 @@ pub fn is_sensitive_name(name: &str) -> bool {
     ]
     .iter()
     .any(|part| lower.contains(part))
+}
+
+pub fn origin_key(url: &WebTarget) -> String {
+    let root = crate::baseline::origin_root(url);
+    root.canonical()
 }
 
 fn execute_fuzz(
