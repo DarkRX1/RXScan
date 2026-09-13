@@ -380,6 +380,11 @@ pub enum RelationshipKind {
     DerivedFromCandidateSource,
     BehaviorDiffersFrom,
     ReflectsInput,
+    HostnameResolvesToIp,
+    HostnameAliasesTo,
+    MailExchangeFor,
+    NameServerFor,
+    ReverseResolvesTo,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "subject_type", content = "id", rename_all = "snake_case")]
@@ -508,6 +513,13 @@ pub enum EventKind {
     FuzzSkippedSensitiveInput,
     FuzzBudgetExhausted,
     ContextualFuzzCompleted,
+    DnsResolutionStarted,
+    DnsRecordObserved,
+    DnsAliasObserved,
+    DnsReverseObserved,
+    DnsQueryFailed,
+    DnsBudgetExhausted,
+    DnsResolutionCompleted,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Event {

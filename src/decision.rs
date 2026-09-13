@@ -20,6 +20,7 @@
 //! and are ignored gracefully instead of rescanning.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,7 +30,7 @@ use sha2::{Digest, Sha256};
 use crate::discovery::HostState;
 use crate::execution::{ModuleOutput, ScopeGuard, Task, TaskId, TaskKind, TaskScopeTarget};
 use crate::level::priority_for_kind;
-use crate::model::{ScanPlanId, Timestamp};
+use crate::model::{AssetId, ScanPlanId, Timestamp};
 use crate::plan::{ScanGoal, TcpPortSelection};
 
 /// Deterministic V1 engine: host → TCP proposals only.
@@ -438,6 +439,7 @@ pub struct Phase7Engine {
     baseline: BaselineDecisionEngine,
     content: ContentDecisionEngine,
     fuzz: FuzzDecisionEngine,
+    dns: DnsDecisionEngine,
 }
 
 impl Phase7Engine {
@@ -511,7 +513,8 @@ impl Phase7Engine {
                 content_wordlist,
                 origin_baselines,
             ),
-            fuzz: FuzzDecisionEngine::new(scope_guard, plan_id, level, goal, speed),
+            fuzz: FuzzDecisionEngine::new(scope_guard.clone(), plan_id.clone(), level, goal, speed),
+            dns: DnsDecisionEngine::new(scope_guard, plan_id, level, goal, speed),
         }
     }
 }
@@ -530,6 +533,7 @@ impl crate::execution::DecisionEngine for Phase7Engine {
         .chain(self.baseline.follow_up_tasks(completed, output))
         .chain(self.content.follow_up_tasks(completed, output))
         .chain(self.fuzz.follow_up_tasks(completed, output))
+        .chain(self.dns.follow_up_tasks(completed, output))
         .collect()
     }
 }
@@ -1485,6 +1489,122 @@ impl crate::execution::DecisionEngine for FuzzDecisionEngine {
             }
         }
         proposals
+    }
+}
+
+#[derive(Clone)]
+pub struct DnsDecisionEngine {
+    scope_guard: Arc<dyn ScopeGuard>,
+    plan_id: ScanPlanId,
+    level: u8,
+    goal: ScanGoal,
+    speed: crate::plan::SpeedSetting,
+}
+
+impl DnsDecisionEngine {
+    pub fn new(
+        scope_guard: Arc<dyn ScopeGuard>,
+        plan_id: ScanPlanId,
+        level: u8,
+        goal: ScanGoal,
+        speed: crate::plan::SpeedSetting,
+    ) -> Self {
+        Self {
+            scope_guard,
+            plan_id,
+            level: level.clamp(1, 5),
+            goal,
+            speed,
+        }
+    }
+
+    fn host_task(&self, ip: IpAddr, source_asset: Option<AssetId>) -> Option<Task> {
+        let scope_target = TaskScopeTarget::Ip(ip);
+        if !self.scope_guard.permits(&scope_target) {
+            return None;
+        }
+        let governor = crate::execution::SpeedGovernor::new(self.speed, 1).ok()?;
+        let provenance = crate::model::Provenance::new(
+            "rxscan.decision",
+            "13.0.0",
+            self.plan_id.clone(),
+            Timestamp::now(),
+        )
+        .ok()?;
+        Task::new_with_params(
+            TaskKind::HostDiscovery,
+            None,
+            Vec::new(),
+            source_asset,
+            self.plan_id.clone(),
+            priority_for_kind(&TaskKind::HostDiscovery),
+            governor.default_timeout(),
+            governor.default_retry_policy(),
+            crate::host_discovery::HOST_DISCOVERY_MODULE_NAME,
+            provenance,
+            scope_target,
+            BTreeMap::from([
+                ("target".to_owned(), ip.to_string()),
+                ("source".to_owned(), "dns".to_owned()),
+            ]),
+            self.scope_guard.as_ref(),
+        )
+        .ok()
+    }
+}
+
+impl crate::execution::DecisionEngine for DnsDecisionEngine {
+    fn follow_up_tasks(&self, completed: &Task, output: &ModuleOutput) -> Vec<Task> {
+        if completed.kind != TaskKind::DnsProbe || self.level == 0 {
+            return Vec::new();
+        }
+        if !matches!(
+            self.goal,
+            ScanGoal::Recon
+                | ScanGoal::Inventory
+                | ScanGoal::Baseline
+                | ScanGoal::Research
+                | ScanGoal::Custom
+        ) {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let mut seen = BTreeSet::new();
+        for event in &output.events {
+            if !matches!(event.kind, crate::model::EventKind::DnsRecordObserved) {
+                continue;
+            }
+            let record_type = event
+                .details
+                .data
+                .get("record_type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            if record_type != "A" && record_type != "AAAA" {
+                continue;
+            }
+            let Some(value) = event
+                .details
+                .data
+                .get("value")
+                .and_then(serde_json::Value::as_str)
+            else {
+                continue;
+            };
+            let Ok(ip) = value.parse::<IpAddr>() else {
+                continue;
+            };
+            if !seen.insert(ip) {
+                continue;
+            }
+            if let Some(task) = self.host_task(ip, event.asset_id.clone()) {
+                out.push(task);
+            }
+            if out.len() >= 16 {
+                break;
+            }
+        }
+        out
     }
 }
 

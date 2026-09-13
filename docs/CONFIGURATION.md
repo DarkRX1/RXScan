@@ -134,3 +134,11 @@ Invalid values fail fast (exit 2): zero/negative-equivalent, values exceeding ha
 - Sensitive names containing password/passwd/token/csrf/secret/otp/auth/session are skipped. Skips are typed observations when a fuzz task is explicitly created for such an input.
 - Hard caps: 4 parameters/endpoint, 4 mutations/parameter, 8 mutations/task, 8 requests/task, 8 fuzz tasks/origin, 256 tracked fuzz origins/scan, 64KiB response bytes, 64 events/task, 16 evidence records/task, 4 neutral findings/task, 64 task-local dedup keys, plus the 4096-entry scan-lifetime contacted-request registry.
 - `--speed` affects only pressure: connection/response timeouts, retry/backoff, and scheduler pressure. It never changes mutation values, safety filtering, delta thresholds, signature normalization, or evidence meaning.
+
+## Phase 13 DNS policy
+
+- No new CLI flags or TOML keys: DNS uses existing `--goal`, `--level`, `--speed`, scope, and scheduler budgets. Production uses system resolver configuration by default; tests and benchmarks can pass an explicit resolver task parameter.
+- Hostnames canonicalize by lowercasing, trimming one root dot, validating label length/characters, and rejecting empty/oversized/malformed names. IDNA is NOT IMPLEMENTED.
+- Level matrix: L1-L2 query A/AAAA/CNAME only; L3 adds MX/NS; L4-L5 add TXT/PTR observations. UDP truncation is observable as `Truncated`; TCP fallback, wildcard DNS, SRV, DoH/DoT, custom resolver CLI UX, subdomain brute force, and AXFR/IXFR are NOT IMPLEMENTED.
+- Hard caps: 512-byte UDP packet, 16 records/response, 48 records/task, 64 events/task, 32 evidence records/task, 8 CNAME hops, 256 TXT bytes/record, 1024 TXT bytes/task, 4096 scan-lifetime DNS query keys, 256 tracked domains, and 32 DNS tasks/domain.
+- `--speed` affects DNS timeout/retry pressure only. It does not change record types, hostname eligibility, task identity, scope, retained relationships, or interpretation.

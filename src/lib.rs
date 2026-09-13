@@ -7,6 +7,7 @@ pub mod content;
 pub mod crawl;
 pub mod decision;
 pub mod discovery;
+pub mod dns;
 pub mod execution;
 pub mod extract;
 pub mod fuzz;

@@ -133,6 +133,12 @@ pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
         service_policy,
         guard.clone(),
     )));
+    let dns_registry = crate::dns::DnsRegistry::new();
+    scheduler.register_module(Arc::new(crate::dns::DnsModule::with_registry(
+        crate::dns::DnsPolicy::new(plan.level, plan.goal, plan.speed),
+        guard.clone(),
+        dns_registry,
+    )));
     let web_policy = crate::web::WebPolicy::new(plan.level, plan.goal, plan.speed);
     scheduler.register_module(Arc::new(crate::web_probe::WebProbeModule::new(
         web_policy,

@@ -27,6 +27,7 @@ RXScan is for authorized, scoped, non-destructive reconnaissance. Its central ri
 | False duplicate/soft-404 claims | conservative signatures, bounded similarity thresholds, two-sample missing-path baseline, inconclusive state for weak signals | 10 |
 | Managed content discovery becoming fuzzing | small reviewed built-in set, explicit streamed user file, no placeholders/mutation/method enumeration/forms/payloads, hard candidate/request caps | 11 |
 | Contextual fuzzing becoming exploit fuzzing | observed GET query context required, inert one-parameter mutations, sensitive-name skip list, no POST/forms/cookies/headers/path traversal/payload banks, neutral behavior-delta output only | 12 |
+| DNS intelligence expanding scope or becoming enumeration | explicit/observed scoped hostnames only, bounded query/record/domain caps, DNS observations do not authorize third-party active follow-up, no brute-force subdomain enumeration, no zone transfer automation | 13 |
 | Candidate path escape | same-origin URL construction, traversal/authority/control/backslash rejection, canonical dedup, scope check before every contact | 11 |
 
 Modules never receive authority to bypass policy. Discovery may be recorded without authorizing active work against a new asset.
@@ -99,3 +100,11 @@ Modules never receive authority to bypass policy. Discovery may be recorded with
 - Mutations are inert and bounded: omission, empty value, tiny numeric/boolean alternatives, and short `rxscan_<token>` text values. One parameter changes per request; pairwise/cartesian mutation is not implemented.
 - Sensitive names containing password/passwd/token/csrf/secret/otp/auth/session are skipped. POST forms, GET-form active submission, cookies, headers, path-variable fuzzing, traversal strings, injection payloads, credential attacks, and vulnerability checks are deferred or explicitly out of scope.
 - Results are behavior observations only: status/content-type/redirect/body/template changes and exact inert-token reflection. RXScan does not infer XSS, SQL injection, auth bypass, SSRF, command injection, or any confirmed vulnerability from Phase 12 deltas.
+
+## Phase 13 DNS safety notes
+
+- DNS uses bounded native UDP queries and defensive packet parsing. Raw DNS packets are dropped after typed records/evidence are extracted.
+- A, AAAA, CNAME, MX, NS, TXT, and PTR observations enrich the asset graph; they do not by themselves authorize active scanning of referenced third-party infrastructure.
+- A/AAAA follow-ups are proposed only by the Decision Engine and only when the resulting IP independently satisfies central scope.
+- TXT is informational and byte-bounded. RXScan does not scrape secrets or infer DNS/mail vulnerabilities.
+- Wildcard DNS, SRV, AXFR/IXFR, public resolver rotation, subdomain brute force, DNS amplification, spoofing, and takeover checks are NOT IMPLEMENTED.
