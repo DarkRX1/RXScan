@@ -169,3 +169,11 @@ TargetSpec, Scope Guard, ScanPlan, stable IDs/events, scheduler, speed/budgets, 
 - Decision Engine proposes bounded WebProbe work for confirmed HTTP/HTTPS services only (scope/policy/budget/dedup enforced); `HttpProbe` completions propose nothing — no crawling follow-ups.
 - `--level` sets breadth (HEAD vs GET, redirect depth, body detail), never pressure; `--speed` sets timeouts/concurrency only, never classification (same bytes classify identically at any speed).
 - Tests are deterministic/local-only (scripted HTTP, in-test rustls+rcgen HTTPS, silent/oversized/delayed/malformed/loop/cap/canary fixtures); benchmark baseline recorded in `docs/benchmark-results/phase8-web-baseline.md` with no Internet traffic and no httpx/Nuclei claims; all Phase 0–7 suites remain green.
+
+## Phase 16 exit criteria
+
+- Deterministic offline analysis consumes validated Phase 14 state and optional Phase 15 diff records; no Scheduler/module/network execution occurs.
+- Priority output is attention ranking, not severity or exploitability. Scores are explicit bounded components and preserve Phase 15 certainty.
+- Signals have stable IDs, typed categories/reasons, bounded evidence references, bounded related assets, deterministic ordering, duplicate collapse, and output truncation metadata.
+- Analysis works with and without diff; diff-backed new/changed/corroborated signals rank above equivalent persistent observations, while inconclusive records retain uncertainty penalties.
+- CLI exposure is minimal (`rxscan analyze`) and does not implement Phase 17 report templates, HTML/Markdown/PDF exports, dashboards, or alerting.

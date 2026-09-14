@@ -139,3 +139,12 @@ Verified locally on 2026-09-12 (see validation results in the Phase 4 completion
 - Missing entities are coverage-aware: comparable completed coverage can produce confirmed removals, while reduced level/module coverage, partial tasks, or timeout/error/cancelled states produce inconclusive missing records.
 - Local tests cover same-state/no-change, insertion order, speed-only difference, checkpoint path independence, incompatible targets, added/modified assets, port/service transition, DNS relationship changes, finding changes, reduced/expanded coverage semantics, network-error false-removal prevention, invalid checkpoints, output cap truncation, IPv4/IPv6 state, and large bounded comparison.
 - `cargo run --example phase15_bench` — controlled local diff benchmark recorded in `docs/benchmark-results/phase15-scan-diff.md`.
+
+## Phase 16 verification
+
+- Phase 16 adds `analysis`, a zero-network deterministic attention-ranking layer over validated Phase 14 scan state and optional Phase 15 `DiffReport` records.
+- Output is typed `AnalysisReport` schema version `1` with bounded `PrioritySignal` records, score components, attention bands, reason codes, evidence IDs, related asset IDs, and `network_requests=0`.
+- Scores are attention ranking, not vulnerability severity: evidence, novelty/change, exposure, corroboration, breadth, context, and uncertainty penalty are explicit integer components clamped to 0..100. Bands are `HighAttention` 80–100, `MediumAttention` 50–79, `LowAttention` 20–49, and `Informational` 0–19.
+- `rxscan analyze [--json|--jsonl] [--diff <old.rxscan>] <current.rxscan>` is a thin offline CLI wrapper. It does not start the Scheduler, contact DNS/TCP/HTTP services, mutate checkpoints, or implement Phase 17 reporting.
+- Local tests cover analysis without diff, diff-boosted new/changed exposure, confirmed vs inconclusive priority, corroboration, reflection/admin wording safety, soft404 suppression, out-of-scope relationship marking, duplicate/cap determinism, invalid diff pairing, IPv6 state, zero-network counters, speed/timestamp/insertion-order invariance, and finding priority.
+- `cargo run --example phase16_bench` — controlled offline analysis benchmark recorded in `docs/benchmark-results/phase16-analysis-prioritization.md`.

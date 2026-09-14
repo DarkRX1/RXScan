@@ -161,3 +161,20 @@ Invalid values fail fast (exit 2): zero/negative-equivalent, values exceeding ha
 - Speed, scan IDs, timestamps, checkpoint paths, and insertion order are not semantic differences.
 - Missing assets/relationships/findings are confirmed removed only with comparable completed coverage. Reduced level/module coverage, incomplete tasks, and timeout/error/cancelled task states produce inconclusive missing records.
 - Phase 15 does not assign severity, risk, regression labels, alerts, history storage, or Phase 16 prioritization.
+
+## Phase 16 analysis policy
+
+- `rxscan analyze [--json|--jsonl] [--diff <old.rxscan>] <current.rxscan>` loads validated checkpoints and emits deterministic attention signals. It is offline and does not use the Scheduler.
+- Analysis schema version is `1`. Detailed emitted signals are capped at 10000 and top output defaults to 100.
+- Score components are bounded integers: evidence 0–25, novelty 0–25, exposure 0–20, corroboration 0–15, breadth 0–10, context 0–10, uncertainty penalty 0–30. Total score is clamped 0..100.
+- Exact Phase 16 score constants:
+  - Evidence: port +20, service +18, web +16, host/IP +12, DNS relationship +16, reflection relationship +18, uncertainty signal +8, finding confidence `confidence / 4` capped at +25.
+  - Novelty: confirmed added +22, expanded-coverage added +12, modified +18, unchanged +0.
+  - Exposure: open port +18, non-open observed port +8, service +14, web +10, host/IP +4, finding affected asset present +8.
+  - Corroboration: multiple evidence sources +6, duplicate-signal merge +4 per merge capped at +15.
+  - Breadth: relationship degree adds up to +10 when degree is at least 3.
+  - Context: unusual port +3, sensitive-looking path token +4, DNS relationship +6, reflection +10, uncertainty context +4, finding severity info/low/medium/high/critical = +2/+4/+6/+8/+10.
+  - Uncertainty penalty: soft404/wildcard +20, out-of-scope relationship +10, inconclusive missing +20, inconclusive Phase 15 certainty +12, standalone uncertainty signal +18. Component cap is 30.
+- Attention bands are `HighAttention` 80–100, `MediumAttention` 50–79, `LowAttention` 20–49, and `Informational` 0–19. These are not vulnerability severity labels.
+- Per-signal evidence references and related asset references are each capped at 16.
+- Phase 16 does not expose scoring weights as configuration knobs and does not implement Phase 17 reporting/export templates.

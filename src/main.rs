@@ -1,10 +1,14 @@
 use clap::Parser;
-use rxscan::{cli::Cli, diff, plan::ScanPlan, run};
+use rxscan::{analysis, cli::Cli, diff, plan::ScanPlan, run};
 
 fn main() {
     let args = std::env::args().collect::<Vec<_>>();
     if args.get(1).is_some_and(|arg| arg == "diff") {
         run_diff(&args);
+        return;
+    }
+    if args.get(1).is_some_and(|arg| arg == "analyze") {
+        run_analyze(&args);
         return;
     }
     let cli = Cli::parse();
@@ -41,6 +45,74 @@ fn main() {
         Err(error) => {
             eprintln!("rxscan: {error}");
             std::process::exit(error.exit_code());
+        }
+    }
+}
+
+fn run_analyze(args: &[String]) {
+    let mut json = false;
+    let mut diff_path: Option<String> = None;
+    let mut checkpoint: Option<String> = None;
+    let mut iter = args[2..].iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--json" | "--jsonl" => json = true,
+            "--diff" => {
+                let Some(path) = iter.next() else {
+                    eprintln!("rxscan analyze: --diff requires a baseline checkpoint path");
+                    std::process::exit(2);
+                };
+                diff_path = Some(path.to_owned());
+            }
+            value if checkpoint.is_none() => checkpoint = Some(value.to_owned()),
+            _ => {
+                eprintln!(
+                    "rxscan analyze: usage: rxscan analyze [--json|--jsonl] [--diff <old.rxscan>] <current.rxscan>"
+                );
+                std::process::exit(2);
+            }
+        }
+    }
+    let Some(current) = checkpoint else {
+        eprintln!(
+            "rxscan analyze: usage: rxscan analyze [--json|--jsonl] [--diff <old.rxscan>] <current.rxscan>"
+        );
+        std::process::exit(2);
+    };
+    let options = analysis::AnalysisOptions::default();
+    let result = if let Some(old) = diff_path {
+        match diff::diff_checkpoints(
+            std::path::Path::new(&old),
+            std::path::Path::new(&current),
+            diff::DiffOptions::default(),
+        ) {
+            Ok((diff_report, _, _, _)) => analysis::analyze_checkpoint_with_diff(
+                std::path::Path::new(&current),
+                &diff_report,
+                options,
+            )
+            .map(|(report, _)| report),
+            Err(error) => {
+                eprintln!("rxscan analyze: {error}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        analysis::analyze_checkpoint(std::path::Path::new(&current), options)
+            .map(|(report, _)| report)
+    };
+    match result {
+        Ok(report) if json => match analysis::to_json(&report) {
+            Ok(text) => println!("{text}"),
+            Err(error) => {
+                eprintln!("rxscan analyze: {error}");
+                std::process::exit(1);
+            }
+        },
+        Ok(report) => println!("{}", analysis::human_summary(&report)),
+        Err(error) => {
+            eprintln!("rxscan analyze: {error}");
+            std::process::exit(1);
         }
     }
 }

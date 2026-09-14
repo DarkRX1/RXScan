@@ -124,3 +124,11 @@ Modules never receive authority to bypass policy. Discovery may be recorded with
 - Diff never contacts checkpoint-provided targets, starts Scheduler work, executes commands, mutates checkpoints, or widens scope.
 - Diff records are capped at 10000 detailed entries. Aggregate counts continue and truncation is explicit.
 - Phase 15 reports semantic change only. It does not assign severity, risk, regression status, or Phase 16 prioritization.
+
+## Phase 16 analysis safety notes
+
+- Analysis inputs are validated scan states and optional diff records. Checkpoint loading reuses Phase 14 validation; invalid input fails before analysis and before any network work.
+- Analysis is offline: it never starts host discovery, TCP, service, DNS, HTTP, crawl, content discovery, or fuzz modules.
+- Attention score is not severity, exploitability, CVSS, or vulnerability likelihood. Inconclusive Phase 15 certainty remains inconclusive and receives an uncertainty penalty rather than an upgraded conclusion.
+- Generated labels are bounded and control characters are stripped. Signals keep evidence/asset references rather than copying raw HTTP bodies, DNS packets, banners, credentials, cookies, or large evidence bodies.
+- Output is capped and sorted deterministically. Phase 16 does not implement report templates, alerts, dashboards, or historical project storage.
