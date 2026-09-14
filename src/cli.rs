@@ -103,6 +103,14 @@ pub struct Cli {
     #[arg(long, value_name = "PATH")]
     pub output: Option<std::path::PathBuf>,
 
+    /// Save a bounded Phase 14 checkpoint after execution.
+    #[arg(long, value_name = "PATH")]
+    pub checkpoint: Option<std::path::PathBuf>,
+
+    /// Resume from a bounded Phase 14 checkpoint. Target/scope/level/goal come from the checkpoint.
+    #[arg(long, value_name = "PATH")]
+    pub resume: Option<std::path::PathBuf>,
+
     /// Output format. Only `jsonl` is supported in Phase 4.
     #[arg(long, value_name = "FORMAT")]
     pub format: Option<String>,

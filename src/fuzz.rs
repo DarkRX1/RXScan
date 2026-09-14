@@ -176,6 +176,45 @@ impl FuzzOriginBudget {
             .map(BTreeSet::len)
             .unwrap_or(0)
     }
+
+    pub fn snapshot(&self) -> Vec<(String, Vec<String>)> {
+        self.state
+            .lock()
+            .unwrap()
+            .plans_by_origin
+            .iter()
+            .take(MAX_FUZZ_ORIGIN_BUDGETS)
+            .map(|(origin, plans)| {
+                (
+                    origin.clone(),
+                    plans
+                        .iter()
+                        .take(MAX_FUZZ_TASKS_PER_ORIGIN_HARD)
+                        .cloned()
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
+    pub fn restore(records: &[(String, Vec<String>)]) -> Result<Self, String> {
+        if records.len() > MAX_FUZZ_ORIGIN_BUDGETS {
+            return Err("too many fuzz origin budgets".to_owned());
+        }
+        let budget = Self::new();
+        for (origin, plans) in records {
+            if plans.len() > MAX_FUZZ_TASKS_PER_ORIGIN_HARD || origin.len() > 4096 {
+                return Err("invalid fuzz origin budget".to_owned());
+            }
+            for plan in plans {
+                if plan.len() > 4096 || !budget.claim(origin, plan, MAX_FUZZ_TASKS_PER_ORIGIN_HARD)
+                {
+                    return Err("invalid fuzz origin budget".to_owned());
+                }
+            }
+        }
+        Ok(budget)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

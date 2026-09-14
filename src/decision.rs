@@ -472,6 +472,32 @@ impl Phase7Engine {
         content_wordlist: Option<PathBuf>,
     ) -> Self {
         let origin_baselines = crate::baseline::OriginBaselineRegistry::new();
+        let fuzz_budget = crate::fuzz::FuzzOriginBudget::new();
+        Self::new_with_state(
+            scope_guard,
+            plan_id,
+            level,
+            goal,
+            tcp_selection,
+            speed,
+            content_wordlist,
+            origin_baselines,
+            fuzz_budget,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_state(
+        scope_guard: Arc<dyn ScopeGuard>,
+        plan_id: ScanPlanId,
+        level: u8,
+        goal: ScanGoal,
+        tcp_selection: TcpPortSelection,
+        speed: crate::plan::SpeedSetting,
+        content_wordlist: Option<PathBuf>,
+        origin_baselines: crate::baseline::OriginBaselineRegistry,
+        fuzz_budget: crate::fuzz::FuzzOriginBudget,
+    ) -> Self {
         Self {
             tcp: TcpDecisionEngine::new(
                 scope_guard.clone(),
@@ -513,7 +539,14 @@ impl Phase7Engine {
                 content_wordlist,
                 origin_baselines,
             ),
-            fuzz: FuzzDecisionEngine::new(scope_guard.clone(), plan_id.clone(), level, goal, speed),
+            fuzz: FuzzDecisionEngine::with_origin_budget(
+                scope_guard.clone(),
+                plan_id.clone(),
+                level,
+                goal,
+                speed,
+                fuzz_budget,
+            ),
             dns: DnsDecisionEngine::new(scope_guard, plan_id, level, goal, speed),
         }
     }
@@ -1339,6 +1372,24 @@ impl FuzzDecisionEngine {
             goal,
             speed,
             origin_budget: crate::fuzz::FuzzOriginBudget::new(),
+        }
+    }
+
+    pub fn with_origin_budget(
+        scope_guard: Arc<dyn ScopeGuard>,
+        plan_id: ScanPlanId,
+        level: u8,
+        goal: ScanGoal,
+        speed: crate::plan::SpeedSetting,
+        origin_budget: crate::fuzz::FuzzOriginBudget,
+    ) -> Self {
+        Self {
+            scope_guard,
+            plan_id,
+            level: level.clamp(1, 5),
+            goal,
+            speed,
+            origin_budget,
         }
     }
 

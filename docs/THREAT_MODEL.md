@@ -28,6 +28,7 @@ RXScan is for authorized, scoped, non-destructive reconnaissance. Its central ri
 | Managed content discovery becoming fuzzing | small reviewed built-in set, explicit streamed user file, no placeholders/mutation/method enumeration/forms/payloads, hard candidate/request caps | 11 |
 | Contextual fuzzing becoming exploit fuzzing | observed GET query context required, inert one-parameter mutations, sensitive-name skip list, no POST/forms/cookies/headers/path traversal/payload banks, neutral behavior-delta output only | 12 |
 | DNS intelligence expanding scope or becoming enumeration | explicit/observed scoped hostnames only, bounded query/record/domain caps, DNS observations do not authorize third-party active follow-up, no brute-force subdomain enumeration, no zone transfer automation | 13 |
+| Checkpoint resume widening authority or replaying unsafe state | checkpoint file treated as untrusted input, schema/size/count validation before execution, persisted scope is authoritative maximum, resume goes through Scheduler, completed work stays completed, raw bodies/packets/secrets excluded | 14 |
 | Candidate path escape | same-origin URL construction, traversal/authority/control/backslash rejection, canonical dedup, scope check before every contact | 11 |
 
 Modules never receive authority to bypass policy. Discovery may be recorded without authorizing active work against a new asset.
@@ -108,3 +109,10 @@ Modules never receive authority to bypass policy. Discovery may be recorded with
 - A/AAAA follow-ups are proposed only by the Decision Engine and only when the resulting IP independently satisfies central scope.
 - TXT is informational and byte-bounded. RXScan does not scrape secrets or infer DNS/mail vulnerabilities.
 - Wildcard DNS, SRV, AXFR/IXFR, public resolver rotation, subdomain brute force, DNS amplification, spoofing, and takeover checks are NOT IMPLEMENTED.
+
+## Phase 14 persistence safety notes
+
+- Checkpoints are untrusted JSON input. RXScan validates schema version, file size, counts, task scope, graph references, and registry bounds before any resume execution.
+- Checkpoints persist semantic state only. They do not contain sockets, thread handles, raw HTTP bodies, raw DNS packets, TLS sessions, credentials, cookies, or wordlists.
+- Resume cannot widen persisted scope. Running/ready tasks are restored as pending/interrupted rather than falsely completed.
+- Phase 14 does not implement encrypted checkpoints, tamper-proof signatures, automatic crash recovery, or Phase 15 scan diff/change detection.

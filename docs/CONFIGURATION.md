@@ -142,3 +142,13 @@ Invalid values fail fast (exit 2): zero/negative-equivalent, values exceeding ha
 - Level matrix: L1-L2 query A/AAAA/CNAME only; L3 adds MX/NS; L4-L5 add TXT/PTR observations. UDP truncation is observable as `Truncated`; TCP fallback, wildcard DNS, SRV, DoH/DoT, custom resolver CLI UX, subdomain brute force, and AXFR/IXFR are NOT IMPLEMENTED.
 - Hard caps: 512-byte UDP packet, 16 records/response, 48 records/task, 64 events/task, 32 evidence records/task, 8 CNAME hops, 256 TXT bytes/record, 1024 TXT bytes/task, 4096 scan-lifetime DNS query keys, 256 tracked domains, and 32 DNS tasks/domain.
 - `--speed` affects DNS timeout/retry pressure only. It does not change record types, hostname eligibility, task identity, scope, retained relationships, or interpretation.
+
+## Phase 14 persistence policy
+
+- `--checkpoint <PATH>` writes a bounded versioned JSON checkpoint after execution. `--resume <PATH>` validates and resumes that checkpoint through the normal Scheduler.
+- Checkpoint schema version is `1`; unknown versions fail cleanly. The hard file-size cap is 8 MiB.
+- Writes use a temp file beside the checkpoint, write, flush, file sync, then rename. The old checkpoint is preserved for validation/temp-write/rename failures before a successful rename. Parent-directory fsync and crash durability across power loss are NOT IMPLEMENTED.
+- Resume uses the persisted `ScanPlan` as the semantic authority. `--speed` may be overridden because speed is pressure only; target, scope, level, and goal are not widened by resume.
+- Running/ready tasks are restored as pending/interrupted work. Succeeded tasks remain completed and are not re-run.
+- Persisted registries include compact ContactRegistry entries, origin baseline hashes, fuzz origin-budget consumption, DNS query keys, and DNS per-domain task consumption. Raw HTTP bodies, DNS packets, sockets, TLS sessions, cookies, credentials, and wordlists are not persisted.
+- Automatic crash recovery, checkpoint migration, encrypted checkpoints, output-history diffing, and Phase 15 scan comparison are NOT IMPLEMENTED.

@@ -310,6 +310,26 @@ impl Task {
             params,
         })
     }
+
+    pub fn canonical_identity(&self) -> TaskId {
+        canonical_task_id(
+            &self.scan_plan_id,
+            &self.module_name,
+            &self.kind,
+            &self.associated_asset_id,
+            &self.parent_task_id,
+            &self.dependencies,
+            self.priority,
+            self.timeout_ms,
+            &self.retry_policy,
+            &self.scope_target,
+            &self.params,
+        )
+    }
+
+    pub fn identity_is_valid(&self) -> bool {
+        self.id == self.canonical_identity()
+    }
 }
 
 /// Canonical deterministic task identity.
@@ -736,7 +756,7 @@ impl EventSink for VecEventSink {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModuleOutput {
     pub events: Vec<Event>,
     pub evidence: Vec<Evidence>,
@@ -966,6 +986,44 @@ impl Scheduler {
             SchedulerEventKind::TaskCreated,
             None,
             provenance,
+        );
+        Ok(id)
+    }
+
+    pub fn restore_task(
+        &mut self,
+        mut task: Task,
+        output: Option<ModuleOutput>,
+    ) -> Result<TaskId, SchedulerError> {
+        if !self.scope_guard.permits(&task.scope_target) {
+            return Err(SchedulerError::OutOfScope);
+        }
+        if self.tasks.contains_key(&task.id) {
+            return Err(SchedulerError::DuplicateTask);
+        }
+        self.ledger.admit(&task, &self.budgets, false)?;
+        if matches!(task.state, TaskState::Running | TaskState::Ready) {
+            task.state = TaskState::Pending;
+            task.attempt = 0;
+            task.cancel_requested = false;
+        }
+        let queued = false;
+        let ready_at = Instant::now();
+        let id = task.id.clone();
+        if matches!(task.state, TaskState::Succeeded) {
+            if let Some(output) = output {
+                self.completed_outputs.insert(id.clone(), output);
+            }
+        }
+        self.tasks.insert(
+            id.clone(),
+            TaskRecord {
+                task,
+                cancellation: CancellationToken::default(),
+                queued,
+                ready_at,
+                execution_started: None,
+            },
         );
         Ok(id)
     }

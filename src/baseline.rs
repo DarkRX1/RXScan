@@ -222,6 +222,31 @@ impl OriginBaselineRegistry {
             state.full = true;
         }
     }
+
+    pub fn snapshot(&self) -> Vec<(String, String)> {
+        self.state
+            .lock()
+            .unwrap()
+            .records
+            .iter()
+            .take(MAX_ORIGIN_BASELINES)
+            .map(|(origin, record)| (origin.clone(), record.normalized_sha256.clone()))
+            .collect()
+    }
+
+    pub fn restore(records: &[(String, String)]) -> Result<Self, String> {
+        if records.len() > MAX_ORIGIN_BASELINES {
+            return Err("too many origin baselines".to_owned());
+        }
+        let registry = Self::new();
+        for (origin, hash) in records {
+            if origin.len() > 4096 || hash.len() > 4096 {
+                return Err("invalid origin baseline".to_owned());
+            }
+            registry.remember(origin.clone(), hash.clone());
+        }
+        Ok(registry)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -329,6 +354,39 @@ impl BaselineSimilarityRegistry {
             state.full = true;
         }
         events
+    }
+
+    pub fn reconstruct_from_outputs(&self, outputs: &[crate::execution::ModuleOutput]) {
+        for output in outputs {
+            for event in &output.events {
+                if !matches!(
+                    event.kind,
+                    crate::model::EventKind::ResponseSignatureObserved
+                ) {
+                    continue;
+                }
+                let Some(url) = event
+                    .details
+                    .data
+                    .get("url")
+                    .and_then(serde_json::Value::as_str)
+                else {
+                    continue;
+                };
+                let Some(signature_value) = event.details.data.get("signature") else {
+                    continue;
+                };
+                let Ok(signature) =
+                    serde_json::from_value::<ResponseSignature>(signature_value.clone())
+                else {
+                    continue;
+                };
+                let Some(asset) = event.asset_id.as_ref() else {
+                    continue;
+                };
+                let _ = self.observe(url, asset, &signature, &event.provenance);
+            }
+        }
     }
 }
 

@@ -18,7 +18,8 @@ Each phase requires tests, benchmark/regression evidence where applicable, docum
 | 11 | Managed Content Discovery: bounded built-in/user-file path candidates, Phase 10 baseline filtering, typed content evidence, no fuzzing | Complete |
 | 12 | Contextual Fuzzing: bounded safe GET query-parameter mutations from observed inputs, response delta intelligence, no exploit payloads | Complete |
 | 13 | DNS / Asset Intelligence: bounded native DNS A/AAAA/CNAME/MX/NS/TXT/PTR observations, DNS asset graph, scoped follow-up proposals | Complete (current) |
-| 14–15 | Persistence/resume, deeper API workflows, UDP, technology fingerprinting | Not implemented |
+| 14 | Persistence / Resume: bounded versioned checkpoints, atomic save, validated resume through Scheduler, no scan diffing | Complete (current) |
+| 15 | Scan Diff / Change Detection | Not implemented |
 | 16–19 | Decision engine workflows, API workflows, checks, graph/correlation | Not implemented |
 | 20–24 | Outputs, resume/diff/projects, packs, benchmark lab, releases | Not implemented |
 
@@ -37,6 +38,8 @@ Phase 11 adds managed content discovery. Content tasks are proposed by the Decis
 Phase 12 adds contextual behavioral fuzzing for already-observed safe GET query parameters. `Baseline` response-signature events with concrete query parameters may propose `Fuzz` tasks through the Decision Engine for `fuzz`/`custom` goals at L3+. A scan-lifetime origin budget caps fuzz task admission per canonical origin, so one origin cannot consume all fuzz work. Mutations are inert and one-parameter-at-a-time: omit, empty, tiny numeric/boolean neighbor, or short `rxscan_<token>` text variants depending on observed value type. Responses are fetched with Phase 8 primitives, compared against Phase 10 signatures, and emitted as behavior deltas/reflection observations only. It does not perform exploit payloads, injection banks, POST/form submission, credential attacks, cookie fuzzing, path traversal, path-variable fuzzing, vulnerability findings, DNS execution, JavaScript execution, or headless browsing.
 
 Phase 13 adds bounded DNS / asset intelligence. `DnsProbe` tasks run a native UDP DNS client with defensive packet parsing and support A, AAAA, CNAME, MX, NS, TXT, and PTR observations. DNS records become compact typed events/evidence/assets/relationships; A/AAAA results may propose existing HostDiscovery follow-ups only through the Decision Engine and only when the resulting IP is independently in scope. DNS observations do not authorize third-party infrastructure. Wildcard DNS, SRV, custom CLI resolver UX, TCP fallback, DoH/DoT, brute-force subdomain enumeration, and AXFR/IXFR automation are NOT IMPLEMENTED.
+
+Phase 14 adds lightweight checkpoint/resume for one scan. `--checkpoint` writes a schema-versioned JSON checkpoint with semantic `ScanPlan`, task snapshots, compact outputs, and bounded registry state. `--resume` validates the checkpoint before reconstructing tasks through the Scheduler. Completed tasks are not re-run; running/ready tasks become pending/interrupted. Scope cannot be widened. Phase 15 scan comparison, history analytics, migration, encryption, and automatic crash recovery are NOT IMPLEMENTED.
 
 ## Phase 9 exit criteria
 

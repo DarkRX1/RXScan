@@ -18,6 +18,7 @@ pub mod lowering;
 pub mod model;
 pub mod modules;
 pub mod output;
+pub mod persistence;
 pub mod plan;
 pub mod ports;
 pub mod probes;

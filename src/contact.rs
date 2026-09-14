@@ -27,9 +27,16 @@ pub enum RequestPurpose {
     FuzzMutation,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ContactRegistryEntry {
+    pub method: String,
+    pub url: String,
+    pub purpose: RequestPurpose,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct ContactKey {
-    method: &'static str,
+    method: String,
     url: String,
     purpose: RequestPurpose,
 }
@@ -72,7 +79,7 @@ impl ContactRegistry {
             return false;
         }
         let key = ContactKey {
-            method: "GET",
+            method: "GET".to_owned(),
             url: url.clone(),
             purpose,
         };
@@ -96,5 +103,47 @@ impl ContactRegistry {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    pub fn snapshot(&self) -> Vec<ContactRegistryEntry> {
+        self.state
+            .lock()
+            .unwrap()
+            .exact
+            .iter()
+            .take(MAX_CONTACT_REGISTRY_ENTRIES)
+            .map(|key| ContactRegistryEntry {
+                method: key.method.clone(),
+                url: key.url.clone(),
+                purpose: key.purpose,
+            })
+            .collect()
+    }
+
+    pub fn restore(entries: &[ContactRegistryEntry]) -> Result<Self, String> {
+        if entries.len() > MAX_CONTACT_REGISTRY_ENTRIES {
+            return Err("too many contact registry entries".to_owned());
+        }
+        let registry = Self::new();
+        {
+            let mut state = registry.state.lock().unwrap();
+            for entry in entries {
+                if entry.method != "GET" || entry.url.len() > 4096 {
+                    return Err("invalid contact registry entry".to_owned());
+                }
+                let key = ContactKey {
+                    method: entry.method.clone(),
+                    url: entry.url.clone(),
+                    purpose: entry.purpose,
+                };
+                state.exact.insert(key);
+                state
+                    .by_url
+                    .entry(entry.url.clone())
+                    .or_insert(entry.purpose);
+            }
+            state.full = state.exact.len() >= MAX_CONTACT_REGISTRY_ENTRIES;
+        }
+        Ok(registry)
     }
 }

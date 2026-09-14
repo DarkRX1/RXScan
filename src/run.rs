@@ -46,6 +46,10 @@ pub enum RunError {
     Scheduler(#[from] crate::execution::SchedulerError),
     #[error(transparent)]
     Output(#[from] OutputError),
+    #[error(transparent)]
+    Persistence(#[from] crate::persistence::PersistenceError),
+    #[error("invalid resume invocation: {0}")]
+    InvalidResume(String),
 }
 
 impl RunError {
@@ -56,6 +60,8 @@ impl RunError {
             Self::Lower(_) => 2,
             Self::Scheduler(_) => 1,
             Self::Output(_) => 1,
+            Self::Persistence(_) => 1,
+            Self::InvalidResume(_) => 2,
         }
     }
 }
@@ -85,7 +91,25 @@ pub struct RunReport {
 pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
     let output_path = cli.output.clone();
     let format = cli.format.clone();
-    let plan = ScanPlan::compile(cli)?;
+    let checkpoint_path = cli.checkpoint.clone().or_else(|| cli.resume.clone());
+    if cli.resume.is_some() {
+        validate_resume_cli(&cli)?;
+    }
+    let loaded = if let Some(path) = cli.resume.as_deref() {
+        Some(crate::persistence::load_checkpoint(path)?)
+    } else {
+        None
+    };
+    let mut plan = if let Some(loaded) = &loaded {
+        let mut plan = loaded.state.plan.clone();
+        if let Some(speed) = cli.speed {
+            plan.speed = speed;
+        }
+        plan
+    } else {
+        ScanPlan::compile(cli)?
+    };
+    plan.explain_requested = false;
     if plan.explain_requested {
         // --explain never executes; caller prints plan.explain().
         return Ok(RunReport {
@@ -97,8 +121,14 @@ pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
             open_ports_summary: String::new(),
         });
     }
-    let tasks = lower_plan_to_tasks(&plan)?;
-    let task_count = tasks.len();
+    let tasks = if loaded.is_none() {
+        lower_plan_to_tasks(&plan)?
+    } else {
+        Vec::new()
+    };
+    let task_count = loaded
+        .as_ref()
+        .map_or(tasks.len(), |loaded| loaded.state.tasks.len());
     let budgets: BudgetLimits = plan.budgets.clone();
     budgets.validate()?;
     let governor = SpeedGovernor::new(plan.speed, budgets.max_concurrency)?;
@@ -133,19 +163,43 @@ pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
         service_policy,
         guard.clone(),
     )));
-    let dns_registry = crate::dns::DnsRegistry::new();
+    let restored_registries = loaded.as_ref().map(|loaded| &loaded.state.registries);
+    let dns_registry = restored_registries
+        .map(|registries| registries.restore_dns_registry())
+        .transpose()?
+        .unwrap_or_default();
     scheduler.register_module(Arc::new(crate::dns::DnsModule::with_registry(
         crate::dns::DnsPolicy::new(plan.level, plan.goal, plan.speed),
         guard.clone(),
-        dns_registry,
+        dns_registry.clone(),
     )));
     let web_policy = crate::web::WebPolicy::new(plan.level, plan.goal, plan.speed);
     scheduler.register_module(Arc::new(crate::web_probe::WebProbeModule::new(
         web_policy,
         guard.clone(),
     )));
-    let contact_registry = crate::contact::ContactRegistry::new();
+    let contact_registry = restored_registries
+        .map(|registries| registries.restore_contact_registry())
+        .transpose()?
+        .unwrap_or_default();
+    let origin_baselines = restored_registries
+        .map(|registries| registries.restore_origin_baselines())
+        .transpose()?
+        .unwrap_or_default();
+    let fuzz_budget = restored_registries
+        .map(|registries| registries.restore_fuzz_budget())
+        .transpose()?
+        .unwrap_or_default();
     let baseline_similarity = crate::baseline::BaselineSimilarityRegistry::new();
+    if let Some(loaded) = &loaded {
+        let outputs = loaded
+            .state
+            .outputs
+            .iter()
+            .map(|output| output.output.clone())
+            .collect::<Vec<_>>();
+        baseline_similarity.reconstruct_from_outputs(&outputs);
+    }
     let crawl_policy = crate::crawl::CrawlPolicy::new(plan.level, plan.goal, plan.speed);
     scheduler.register_module(Arc::new(crate::crawl::CrawlModule::with_contact_registry(
         crawl_policy,
@@ -174,14 +228,14 @@ pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
     scheduler.register_module(Arc::new(crate::fuzz::FuzzModule::with_contact_registry(
         fuzz_policy,
         guard.clone(),
-        contact_registry,
+        contact_registry.clone(),
     )));
     for module in phase5_control_modules() {
         scheduler.register_module(Arc::new(module));
     }
     // Decision Engine: host facts propose scoped port tasks, open ports
     // propose scoped service tasks, confirmed web services propose web tasks.
-    scheduler.set_decision_engine(Arc::new(Phase7Engine::new_with_content_wordlist(
+    scheduler.set_decision_engine(Arc::new(Phase7Engine::new_with_state(
         guard.clone(),
         plan.stable_id(),
         plan.level,
@@ -189,13 +243,19 @@ pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
         plan.tcp_ports.clone(),
         plan.speed,
         plan.content_wordlist.clone(),
+        origin_baselines.clone(),
+        fuzz_budget.clone(),
     )));
-    for task in tasks {
-        // Lowering scope-checks; scheduler admission is the second
-        // enforcement point; dispatch + module pre-execution re-check
-        // (defense in depth). Duplicates cannot occur (lowering dedupes);
-        // engine proposals dedup gracefully via best-effort admission.
-        scheduler.add_task(task)?;
+    if let Some(loaded) = &loaded {
+        crate::persistence::restore_scheduler_state(&mut scheduler, &loaded.state)?;
+    } else {
+        for task in tasks {
+            // Lowering scope-checks; scheduler admission is the second
+            // enforcement point; dispatch + module pre-execution re-check
+            // (defense in depth). Duplicates cannot occur (lowering dedupes);
+            // engine proposals dedup gracefully via best-effort admission.
+            scheduler.add_task(task)?;
+        }
     }
     let scheduler_report = scheduler.run()?;
     let events = sink.events();
@@ -221,6 +281,19 @@ pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
         writer.flush()?;
         jsonl_bytes = writer.bytes_written();
     }
+    if let Some(path) = checkpoint_path.as_deref() {
+        let state = crate::persistence::PersistedScanState::from_scheduler(
+            plan.clone(),
+            &scheduler,
+            crate::persistence::PersistedRegistries::from_runtime(
+                &contact_registry,
+                &origin_baselines,
+                &fuzz_budget,
+                &dns_registry,
+            ),
+        );
+        crate::persistence::save_checkpoint(path, &state)?;
+    }
 
     Ok(RunReport {
         plan,
@@ -230,6 +303,63 @@ pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
         output_path: output_path.map(|path| path.display().to_string()),
         open_ports_summary: crate::service_probe::human_service_table(&module_outputs),
     })
+}
+
+fn validate_resume_cli(cli: &Cli) -> Result<(), RunError> {
+    let mut rejected = Vec::new();
+    if cli.target.is_some() {
+        rejected.push("target");
+    }
+    if cli.targets.is_some() {
+        rejected.push("--targets");
+    }
+    if cli.config.is_some() {
+        rejected.push("--config");
+    }
+    if cli.project_config.is_some() {
+        rejected.push("--project-config");
+    }
+    if cli.goal.is_some() {
+        rejected.push("--goal");
+    }
+    if cli.level.is_some() {
+        rejected.push("--level");
+    }
+    if cli.profile.is_some() {
+        rejected.push("--profile");
+    }
+    if !cli.scope.is_empty() {
+        rejected.push("--scope");
+    }
+    if !cli.exclude.is_empty() {
+        rejected.push("--exclude");
+    }
+    if cli.ports.is_some() || cli.all_ports {
+        rejected.push("--ports/--all-ports");
+    }
+    if cli.ping || cli.discover || cli.udp {
+        rejected.push("--ping/--discover/--udp");
+    }
+    if cli.wordlist.is_some() {
+        rejected.push("--wordlist");
+    }
+    if cli.max_tasks.is_some()
+        || cli.max_retries.is_some()
+        || cli.max_concurrency.is_some()
+        || cli.max_hosts.is_some()
+        || cli.max_execution_time.is_some()
+        || cli.max_evidence_bytes.is_some()
+    {
+        rejected.push("budget overrides");
+    }
+    if rejected.is_empty() {
+        Ok(())
+    } else {
+        Err(RunError::InvalidResume(format!(
+            "{} cannot be supplied with --resume; start a fresh scan to change scan semantics",
+            rejected.join(", ")
+        )))
+    }
 }
 
 fn write_outputs<W: std::io::Write>(

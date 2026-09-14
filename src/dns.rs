@@ -164,6 +164,19 @@ struct DnsQueryKey {
     resolver: SocketAddr,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DnsQueryRegistryEntry {
+    pub name: String,
+    pub record_type: DnsRecordType,
+    pub resolver: SocketAddr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DnsDomainRegistryEntry {
+    pub domain: String,
+    pub names: Vec<String>,
+}
+
 #[derive(Debug, Default)]
 struct DnsRegistryState {
     queries: BTreeSet<DnsQueryKey>,
@@ -250,6 +263,69 @@ impl DnsRegistry {
         names.insert(name.to_owned());
         state.domains.insert(domain.to_owned(), names);
         true
+    }
+
+    pub fn snapshot_queries(&self) -> Vec<DnsQueryRegistryEntry> {
+        self.state
+            .lock()
+            .unwrap()
+            .queries
+            .iter()
+            .take(MAX_DNS_REGISTRY_ENTRIES)
+            .map(|key| DnsQueryRegistryEntry {
+                name: key.name.clone(),
+                record_type: key.record_type,
+                resolver: key.resolver,
+            })
+            .collect()
+    }
+
+    pub fn snapshot_domains(&self) -> Vec<DnsDomainRegistryEntry> {
+        self.state
+            .lock()
+            .unwrap()
+            .domains
+            .iter()
+            .take(MAX_DNS_DOMAINS)
+            .map(|(domain, names)| DnsDomainRegistryEntry {
+                domain: domain.clone(),
+                names: names
+                    .iter()
+                    .take(MAX_DNS_TASKS_PER_DOMAIN_HARD)
+                    .cloned()
+                    .collect(),
+            })
+            .collect()
+    }
+
+    pub fn restore(
+        queries: &[DnsQueryRegistryEntry],
+        domains: &[DnsDomainRegistryEntry],
+    ) -> Result<Self, String> {
+        if queries.len() > MAX_DNS_REGISTRY_ENTRIES || domains.len() > MAX_DNS_DOMAINS {
+            return Err("too many DNS registry entries".to_owned());
+        }
+        let registry = Self::new();
+        for query in queries {
+            if canonical_hostname(&query.name).is_err() {
+                return Err("invalid DNS query name".to_owned());
+            }
+            registry.claim_query(&query.name, query.record_type, query.resolver);
+        }
+        for domain in domains {
+            if domain.names.len() > MAX_DNS_TASKS_PER_DOMAIN_HARD
+                || canonical_hostname(&domain.domain).is_err()
+            {
+                return Err("invalid DNS domain budget".to_owned());
+            }
+            for name in &domain.names {
+                if !registry.claim_domain_task(&domain.domain, name, MAX_DNS_TASKS_PER_DOMAIN_HARD)
+                {
+                    return Err("invalid DNS domain budget".to_owned());
+                }
+            }
+        }
+        Ok(registry)
     }
 }
 
