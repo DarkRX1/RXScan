@@ -187,3 +187,11 @@ Invalid values fail fast (exit 2): zero/negative-equivalent, values exceeding ha
 - `--summary-only` suppresses detailed human sections while preserving aggregate counts. `--top N` controls human attention rows and is capped at 100.
 - `--output <path>` writes atomically via temp file, flush, file sync, and rename. It rejects output paths that are the same as the current or baseline checkpoint. Parent-directory fsync and power-loss durability guarantees are NOT IMPLEMENTED.
 - Reporting has no TOML configuration and adds no production dependencies. It never starts the Scheduler or contacts host discovery, TCP, service, DNS, HTTP/TLS, crawler, content discovery, or fuzz modules.
+
+## Phase 18 project policy
+
+- `rxscan project create <project.rxproj>` creates a tiny versioned JSON project (schema `1`, near-instant, no network, no background process). Moving the file never changes semantic identity.
+- `rxscan project add <project.rxproj> <scan.rxscan>` validates the project and checkpoint, computes the semantic fingerprint, deduplicates by stable entity/relationship/finding identity, merges observations, updates compact `BTreeMap` indexes, and saves atomically (temp, flush, sync, rename) with revision conflict detection.
+- `rxscan project summary|show|neighbors|scans|findings|changes|attention` are offline bounded queries. `neighbors` defaults to depth 1 (hard max 3) and limit 100 (hard max 1000); over-max values are clamped explicitly. `findings|changes|attention` accept an optional entity filter and `--limit` (hard max 1000). Human output is concise and sanitized; `--json` prints deterministic pretty JSON; `--jsonl` streams one object per line.
+- Importing the same semantic scan twice is a duplicate no-op. Repeated identical imports keep storage stable; small-delta imports grow with the delta only.
+- Project mode keeps options minimal by design: no graph tuning knobs, no TOML configuration, no daemon/watcher/indexer flags. It never rescans, never widens scope, and never grants authorization. Hard caps: 16 MiB file, 10k scans, 200k entities, 300k relationships, 500k observations, 50k findings, 100k changes, 100k analysis refs, 256 observations per entity.

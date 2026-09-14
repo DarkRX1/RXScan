@@ -20,8 +20,11 @@ Each phase requires tests, benchmark/regression evidence where applicable, docum
 | 13 | DNS / Asset Intelligence: bounded native DNS A/AAAA/CNAME/MX/NS/TXT/PTR observations, DNS asset graph, scoped follow-up proposals | Complete (current) |
 | 14 | Persistence / Resume: bounded versioned checkpoints, atomic save, validated resume through Scheduler, no scan diffing | Complete (current) |
 | 15 | Scan Diff / Change Detection: offline semantic checkpoint comparison with coverage-aware certainty | Complete (current) |
-| 16–19 | Decision engine workflows, API workflows, checks, graph/correlation | Not implemented |
-| 20–24 | Outputs, resume/diff/projects, packs, benchmark lab, releases | Not implemented |
+| 16 | Analysis / Prioritization: offline deterministic attention ranking | Complete (current) |
+| 17 | Reporting: offline deterministic human/JSON/JSONL/raw semantic renderers | Complete (current) |
+| 18 | Project / Graph Mode: offline compact multi-scan semantic graph with bounded queries | Complete (current) |
+| 19 | Decision engine workflows, API workflows, checks | Not implemented |
+| 20–24 | Outputs, packs, benchmark lab, releases | Not implemented |
 
 Phase 6 is the first real port-scanning engine (TCP connect only). No UDP scanning, SSH protocol enumeration, HTTP crawling, fuzzing, DNS enumeration, vulnerability checks, exploitation, or broad service fingerprinting exist yet (open means open; versions belong to Phase 7). Deeper network tasks still run as `Skipped` (`module unavailable`).
 
@@ -185,3 +188,12 @@ TargetSpec, Scope Guard, ScanPlan, stable IDs/events, scheduler, speed/budgets, 
 - Human output is concise, terminal-safe, bounded, and preserves wording distinctions: attention is not severity, finding confidence is separate from attention score, and inconclusive missing is not removed.
 - JSON output is one deterministic report model; JSONL emits independently parseable records; raw export is typed semantic persisted data, not raw HTTP/DNS/TLS payloads.
 - CLI exposure is minimal (`rxscan report`) with format, diff, analysis, summary-only, top-N, and output-path controls. HTML, PDF, template engines, project history, graph mode, dashboards, and Phase 18 storage are NOT IMPLEMENTED.
+
+## Phase 18 exit criteria
+
+- Offline project graph organizes validated Phase 14 checkpoints with optional P15/P16 refs; no Scheduler/module/network execution, daemon, watcher, indexer, or background work occurs.
+- `ProjectState` schema `1` separates entities from observations, deduplicates by stable semantic identity (severity-aware findings), and stores compact P15 certainty-preserving change refs plus P16 score/band-preserving analysis refs without rescoring.
+- Semantic fingerprint ignores timestamps, speed, paths, and order; duplicate imports are no-ops; entity ids stay stable across import orders while `import_sequence` defines chronology explicitly.
+- Graph queries are bounded (depth default 1/hard 3, limit default 100/hard 1000), cycle-safe, deterministically ordered, and truncated explicitly. No query language, PageRank, embeddings, or all-pairs work exists.
+- Storage is versioned JSON with atomic temp/flush/sync/rename writes, revision/fingerprint conflict detection, 16 MiB file cap, and collection caps. Corrupt/oversized/dangling inputs are rejected before mutation. Raw bodies/packets, credentials, cookies, and absolute source paths never persist. Membership never grants authorization.
+- CLI exposure is minimal (`rxscan project create|add|summary|show|neighbors|scans|findings|changes|attention`) with human/JSON/JSONL renderers. Normal scan/diff/analyze/report paths never initialize project state. No new production dependencies. Benchmark recorded in `docs/benchmark-results/phase18-project-graph.md`.

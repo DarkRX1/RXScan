@@ -141,3 +141,14 @@ Modules never receive authority to bypass policy. Discovery may be recorded with
 - Output paths are treated as filesystem IO only, never shell commands. Report output refuses to overwrite the current or baseline checkpoint path.
 - Raw export is typed semantic data: assets, relationships, evidence metadata, findings, task snapshots, registries, diff, and analysis. It does not reintroduce raw HTTP bodies, DNS packets, TLS records, sockets, credentials, cookies, or project history.
 - Phase 17 does not implement HTML/PDF/template engines, project history, graph mode, scan databases, trend analysis, severity scoring, or vulnerability inference.
+
+## Phase 18 project safety notes
+
+- Project and checkpoint inputs are untrusted JSON. RXScan validates schema version, file size (16 MiB project cap), collection caps, stable ids, and all entity/relationship/observation/scan/finding/change/analysis references before any query or mutation. Corrupt/oversized/dangling inputs fail before mutation with zero network.
+- Project mode is offline: create/add/summary/show/neighbors/scans/findings/changes/attention never start the Scheduler and never contact host discovery, TCP, service, DNS, HTTP/TLS, crawl, content, or fuzz modules. No auto-rescan, file watcher, daemon, indexer, telemetry, sync, or cloud path exists.
+- Semantic fingerprinting ignores timestamps, speed, paths, and order so re-imports are idempotent; absolute checkpoint paths are never stored as semantic identity and moving the project file preserves identity.
+- Storage is bounded by construction: one entity/relationship/finding per stable semantic identity plus compact observation counts/history (256 per entity), no HTTP bodies/DNS packets/TLS records/cookies/credentials, no duplicate checkpoint blobs, and explicit hard caps. At capacity callers get a clear error, never silent drops.
+- Graph traversal is bounded (depth 1 default/3 max, limit 100 default/1000 max, visited-set cycle safety, deterministic ordering, truncation metadata). No unbounded queues, all-pairs work, PageRank, or embeddings exist.
+- Human output sanitizes control characters and bounds field length; machine JSON/JSONL preserve data via JSON encoding. Oversized ids, NUL bytes, path tricks, and forbidden credential/raw markers are rejected on import and validated on load.
+- Concurrent writers are detected via monotonic revision plus fingerprint mismatch (atomic temp/flush/sync/rename, no silent last-write-wins). Parent-directory fsync and power-loss durability are NOT IMPLEMENTED; the race window is documented.
+- Project membership is observational only: external (`scope=out_of_scope`) entities stay marked and never authorize scanning, widen scope, or trigger active work. P15 owns change certainty (`InconclusiveMissing` never becomes removed); P16 owns scoring (project never rescores).

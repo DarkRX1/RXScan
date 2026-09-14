@@ -1,5 +1,5 @@
 use clap::Parser;
-use rxscan::{analysis, cli::Cli, diff, plan::ScanPlan, report, run};
+use rxscan::{analysis, cli::Cli, diff, plan::ScanPlan, project, report, run};
 
 fn main() {
     let args = std::env::args().collect::<Vec<_>>();
@@ -13,6 +13,10 @@ fn main() {
     }
     if args.get(1).is_some_and(|arg| arg == "report") {
         run_report(&args);
+        return;
+    }
+    if args.get(1).is_some_and(|arg| arg == "project") {
+        run_project(&args);
         return;
     }
     let cli = Cli::parse();
@@ -49,6 +53,389 @@ fn main() {
         Err(error) => {
             eprintln!("rxscan: {error}");
             std::process::exit(error.exit_code());
+        }
+    }
+}
+
+fn run_project(args: &[String]) {
+    let Some(command) = args.get(2).map(String::as_str) else {
+        eprintln!(
+            "rxscan project: usage: rxscan project create|add|summary|show|neighbors|scans|findings|changes|attention ..."
+        );
+        std::process::exit(2);
+    };
+    match command {
+        "--help" | "-h" => {
+            println!(
+                "rxscan project create <project.rxproj>\nrxscan project add <project.rxproj> <scan.rxscan>\nrxscan project summary <project.rxproj> [--json]\nrxscan project show <project.rxproj> <entity> [--json]\nrxscan project neighbors <project.rxproj> <entity> [--depth N] [--limit N] [--json|--jsonl]\nrxscan project scans <project.rxproj> [--json]\nrxscan project findings <project.rxproj> [entity] [--limit N] [--json|--jsonl]\nrxscan project changes <project.rxproj> [entity] [--limit N] [--json|--jsonl]\nrxscan project attention <project.rxproj> [entity] [--limit N] [--json|--jsonl]"
+            );
+        }
+        "create" => {
+            let Some(path) = args.get(3) else {
+                eprintln!("rxscan project create: missing project path");
+                std::process::exit(2);
+            };
+            match project::create_project(std::path::Path::new(path)) {
+                Ok(state) => println!(
+                    "project created: {} revision={} network_requests=0",
+                    state.project_id, state.revision
+                ),
+                Err(error) => {
+                    eprintln!("rxscan project create: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "add" => {
+            let (Some(project_path), Some(scan_path)) = (args.get(3), args.get(4)) else {
+                eprintln!("rxscan project add: usage: rxscan project add <project> <scan>");
+                std::process::exit(2);
+            };
+            match project::add_checkpoint(
+                std::path::Path::new(project_path),
+                std::path::Path::new(scan_path),
+            ) {
+                Ok(summary) => println!(
+                    "project import duplicate={} entities_added={} relationships_added={} observations_added={} findings_added={} network_requests=0",
+                    summary.duplicate_scan,
+                    summary.entities_added,
+                    summary.relationships_added,
+                    summary.observations_added,
+                    summary.findings_added
+                ),
+                Err(error) => {
+                    eprintln!("rxscan project add: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "summary" => {
+            let Some(path) = args.get(3) else {
+                eprintln!("rxscan project summary: missing project path");
+                std::process::exit(2);
+            };
+            let json = args[4..].iter().any(|a| a == "--json");
+            match project::load_project_with_timing(std::path::Path::new(path)) {
+                Ok((state, _, bytes)) if json => {
+                    let summary = state.summary(bytes);
+                    println!("{}", serde_json::to_string_pretty(&summary).unwrap());
+                }
+                Ok((state, _, bytes)) => println!("{}", project::render_summary(&state, bytes)),
+                Err(error) => {
+                    eprintln!("rxscan project summary: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "show" => {
+            let (Some(path), Some(entity)) = (args.get(3), args.get(4)) else {
+                eprintln!("rxscan project show: usage: rxscan project show <project> <entity>");
+                std::process::exit(2);
+            };
+            if entity.starts_with("--") {
+                eprintln!(
+                    "rxscan project show: usage: rxscan project show <project> <entity> [--json]"
+                );
+                std::process::exit(2);
+            }
+            let json = args[5..].iter().any(|a| a == "--json");
+            match project::load_project(std::path::Path::new(path)) {
+                Ok(state) if json => match state.entities.get(entity) {
+                    Some(found) => println!("{}", serde_json::to_string_pretty(found).unwrap()),
+                    None => {
+                        eprintln!("rxscan project show: project entity not found: {entity}");
+                        std::process::exit(1);
+                    }
+                },
+                Ok(state) => match project::render_entity(&state, entity) {
+                    Ok(text) => println!("{text}"),
+                    Err(error) => {
+                        eprintln!("rxscan project show: {error}");
+                        std::process::exit(1);
+                    }
+                },
+                Err(error) => {
+                    eprintln!("rxscan project show: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "neighbors" => {
+            let (Some(path), Some(entity)) = (args.get(3), args.get(4)) else {
+                eprintln!(
+                    "rxscan project neighbors: usage: rxscan project neighbors <project> <entity> [--depth N] [--limit N] [--json|--jsonl]"
+                );
+                std::process::exit(2);
+            };
+            let mut depth = project::DEFAULT_QUERY_DEPTH;
+            let mut limit = project::DEFAULT_QUERY_LIMIT;
+            let mut json = false;
+            let mut jsonl = false;
+            let mut iter = args[5..].iter();
+            while let Some(arg) = iter.next() {
+                match arg.as_str() {
+                    "--depth" => {
+                        let Some(value) = iter.next() else {
+                            eprintln!("rxscan project neighbors: --depth requires a value");
+                            std::process::exit(2);
+                        };
+                        depth = value.parse().unwrap_or(project::DEFAULT_QUERY_DEPTH);
+                    }
+                    "--limit" => {
+                        let Some(value) = iter.next() else {
+                            eprintln!("rxscan project neighbors: --limit requires a value");
+                            std::process::exit(2);
+                        };
+                        limit = value.parse().unwrap_or(project::DEFAULT_QUERY_LIMIT);
+                    }
+                    "--json" => json = true,
+                    "--jsonl" => jsonl = true,
+                    _ => {
+                        eprintln!("rxscan project neighbors: unsupported option {arg}");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            match project::load_project(std::path::Path::new(path)) {
+                Ok(state) if jsonl => {
+                    if let Err(error) = project::render_neighbors_jsonl(
+                        &state,
+                        entity,
+                        depth,
+                        limit,
+                        std::io::stdout(),
+                    ) {
+                        eprintln!("rxscan project neighbors: {error}");
+                        std::process::exit(1);
+                    }
+                }
+                Ok(state) if json => match state.neighbors(entity, depth, limit) {
+                    Ok(result) => println!("{}", serde_json::to_string_pretty(&result).unwrap()),
+                    Err(error) => {
+                        eprintln!("rxscan project neighbors: {error}");
+                        std::process::exit(1);
+                    }
+                },
+                Ok(state) => match state.neighbors(entity, depth, limit) {
+                    Ok(result) => {
+                        println!(
+                            "neighbors total={} emitted={} truncated={} network_requests=0",
+                            result.results_total, result.results_emitted, result.truncated
+                        );
+                        for record in result.records {
+                            println!(
+                                "{} {:?} {}",
+                                record.depth, record.relationship_kind, record.entity_id
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("rxscan project neighbors: {error}");
+                        std::process::exit(1);
+                    }
+                },
+                Err(error) => {
+                    eprintln!("rxscan project neighbors: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "scans" => {
+            let Some(path) = args.get(3) else {
+                eprintln!("rxscan project scans: missing project path");
+                std::process::exit(2);
+            };
+            let json = args[4..].iter().any(|a| a == "--json");
+            match project::load_project(std::path::Path::new(path)) {
+                Ok(state) if json => {
+                    let scans: Vec<_> = state.scans.values().collect();
+                    println!("{}", serde_json::to_string_pretty(&scans).unwrap());
+                }
+                Ok(state) => {
+                    for scan in state.scans.values() {
+                        println!(
+                            "{} sequence={} entities={} relationships={}",
+                            scan.scan_id.0,
+                            scan.import_sequence,
+                            scan.entity_count,
+                            scan.relationship_count
+                        );
+                    }
+                }
+                Err(error) => {
+                    eprintln!("rxscan project scans: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "findings" | "changes" | "attention" => {
+            let Some(path) = args.get(3) else {
+                eprintln!("rxscan project {command}: missing project path");
+                std::process::exit(2);
+            };
+            // Optional entity filter: args[4] when present and not a flag.
+            let entity: Option<String> = args.get(4).and_then(|v| {
+                if v.starts_with("--") {
+                    None
+                } else {
+                    Some(v.clone())
+                }
+            });
+            let start = if entity.is_some() { 5 } else { 4 };
+            let mut limit = project::DEFAULT_QUERY_LIMIT;
+            let mut json = false;
+            let mut jsonl = false;
+            let mut iter = args.get(start..).unwrap_or(&[]).iter();
+            while let Some(arg) = iter.next() {
+                match arg.as_str() {
+                    "--limit" => {
+                        let Some(value) = iter.next() else {
+                            eprintln!("rxscan project {command}: --limit requires a value");
+                            std::process::exit(2);
+                        };
+                        limit = value.parse().unwrap_or(project::DEFAULT_QUERY_LIMIT);
+                    }
+                    "--json" => json = true,
+                    "--jsonl" => jsonl = true,
+                    other if other.starts_with("--") && entity.is_none() && start == 4 => {
+                        // Already handled flags above; unknown flags rejected.
+                        eprintln!("rxscan project {command}: unsupported option {other}");
+                        std::process::exit(2);
+                    }
+                    other => {
+                        eprintln!("rxscan project {command}: unsupported option {other}");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            let state = match project::load_project(std::path::Path::new(path)) {
+                Ok(state) => state,
+                Err(error) => {
+                    eprintln!("rxscan project {command}: {error}");
+                    std::process::exit(1);
+                }
+            };
+            let entity_ref = entity.as_deref();
+            match command {
+                "findings" => {
+                    if jsonl {
+                        match state.findings_query(entity_ref, limit) {
+                            Ok(result) => {
+                                if let Err(error) = project::render_records_jsonl(
+                                    "project_finding",
+                                    &result,
+                                    std::io::stdout(),
+                                ) {
+                                    eprintln!("rxscan project findings: {error}");
+                                    std::process::exit(1);
+                                }
+                            }
+                            Err(error) => {
+                                eprintln!("rxscan project findings: {error}");
+                                std::process::exit(1);
+                            }
+                        }
+                    } else if json {
+                        match state.findings_query(entity_ref, limit) {
+                            Ok(result) => {
+                                println!("{}", serde_json::to_string_pretty(&result).unwrap())
+                            }
+                            Err(error) => {
+                                eprintln!("rxscan project findings: {error}");
+                                std::process::exit(1);
+                            }
+                        }
+                    } else {
+                        match project::render_findings(&state, entity_ref, limit) {
+                            Ok(text) => print!("{text}"),
+                            Err(error) => {
+                                eprintln!("rxscan project findings: {error}");
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                }
+                "changes" => {
+                    if jsonl {
+                        match state.changes_query(entity_ref, limit) {
+                            Ok(result) => {
+                                if let Err(error) = project::render_records_jsonl(
+                                    "project_change",
+                                    &result,
+                                    std::io::stdout(),
+                                ) {
+                                    eprintln!("rxscan project changes: {error}");
+                                    std::process::exit(1);
+                                }
+                            }
+                            Err(error) => {
+                                eprintln!("rxscan project changes: {error}");
+                                std::process::exit(1);
+                            }
+                        }
+                    } else if json {
+                        match state.changes_query(entity_ref, limit) {
+                            Ok(result) => {
+                                println!("{}", serde_json::to_string_pretty(&result).unwrap())
+                            }
+                            Err(error) => {
+                                eprintln!("rxscan project changes: {error}");
+                                std::process::exit(1);
+                            }
+                        }
+                    } else {
+                        match project::render_changes(&state, entity_ref, limit) {
+                            Ok(text) => print!("{text}"),
+                            Err(error) => {
+                                eprintln!("rxscan project changes: {error}");
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    if jsonl {
+                        match state.attention_query(entity_ref, limit) {
+                            Ok(result) => {
+                                if let Err(error) = project::render_records_jsonl(
+                                    "project_attention",
+                                    &result,
+                                    std::io::stdout(),
+                                ) {
+                                    eprintln!("rxscan project attention: {error}");
+                                    std::process::exit(1);
+                                }
+                            }
+                            Err(error) => {
+                                eprintln!("rxscan project attention: {error}");
+                                std::process::exit(1);
+                            }
+                        }
+                    } else if json {
+                        match state.attention_query(entity_ref, limit) {
+                            Ok(result) => {
+                                println!("{}", serde_json::to_string_pretty(&result).unwrap())
+                            }
+                            Err(error) => {
+                                eprintln!("rxscan project attention: {error}");
+                                std::process::exit(1);
+                            }
+                        }
+                    } else {
+                        match project::render_attention(&state, entity_ref, limit) {
+                            Ok(text) => print!("{text}"),
+                            Err(error) => {
+                                eprintln!("rxscan project attention: {error}");
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        _ => {
+            eprintln!("rxscan project: unknown command {command}");
+            std::process::exit(2);
         }
     }
 }

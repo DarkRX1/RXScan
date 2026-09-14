@@ -24,6 +24,7 @@ pub mod persistence;
 pub mod plan;
 pub mod ports;
 pub mod probes;
+pub mod project;
 pub mod report;
 pub mod run;
 pub mod scope;
