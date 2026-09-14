@@ -1,0 +1,154 @@
+{
+  "schema_version": 1,
+  "scan_id": "plan_c4d7089e5de142f3",
+  "saved_at": 2,
+  "plan": {
+    "targets": [
+      {
+        "original_input": "127.0.0.1",
+        "kind": "ipv4",
+        "normalized_addresses": [
+          "127.0.0.1"
+        ],
+        "hostnames": [],
+        "schemes": [],
+        "explicit_ports": [],
+        "cidr": null
+      }
+    ],
+    "scope": {
+      "allowed": [
+        {
+          "ip": "127.0.0.1"
+        },
+        {
+          "network": "127.0.0.0/8"
+        }
+      ],
+      "exclusions": []
+    },
+    "goal": "recon",
+    "level": 2,
+    "speed": "balanced",
+    "profile": null,
+    "config_sources": [],
+    "modules": [
+      "target_normalization",
+      "scope_guard",
+      "plan_compilation",
+      "host_discovery"
+    ],
+    "tcp_ports": "Common",
+    "udp_requested": false,
+    "explain_requested": false,
+    "reasons": [
+      "Every input is normalized into TargetSpec before planning.",
+      "Scope is deny-by-default: seed targets and explicit --scope rules are the only permitted expansion.",
+      "Goal Recon, level 2, and speed Balanced remain independent policy controls.",
+      "Target normalization, Scope Guard, and plan compilation always run.",
+      "Level 2 with goal Recon selects: {\"custom\":\"rxscan.control.validate\"}, \"host_discovery\".",
+      "No port selection supplied; port tasks use a conservative common-set intent without expanding ports.",
+      "Speed policy: speed Balanced -> concurrency 2, retry_limit 2, default_timeout_ms 15000, deterministic baseline (non-adaptive in Phase 4; auto == balanced).",
+      "Budgets: max_tasks 1000, max_retries 1000, max_concurrency 4 (effective 2), max_execution_time_ms 60000, max_evidence_bytes 67108864, max_hosts 256.",
+      "Host discovery policy: discovery lightweight level 2: icmp on (x1, 1000ms), tcp on (80,443, 1000ms).",
+      "TCP port policy: tcp level-automatic level 2 (Recon): 22,80,443,8080,8443 [v1], timeout 800ms, concurrency 64, retries 1.",
+      "Service probe policy: service level 2 (Recon): planner ≤6 probes/port, probe budget 2000ms.",
+      "Web probe policy: web level 2 (Recon): method HEAD, redirects ≤0, connect 800ms, response 2000ms.",
+      "Content discovery policy: content discovery level 2 (Recon): builtin 4, user-file false, request cap 8, candidate cap 16, body cap 65536."
+    ],
+    "skipped": [
+      "TcpDiscovery not selected by level 2 + goal Recon (no explicit request).",
+      "UdpDiscovery not selected by level 2 + goal Recon (no explicit request).",
+      "Phase 4 executes only control/host/port scaffold tasks; deeper network intents run as Skipped (module unavailable) without fake results.",
+      "Phase 12 runs real bounded host discovery, native TCP connect port scanning, native service probing, bounded HTTP/1.1 web observations, bounded crawling, baseline intelligence, managed content discovery, and safe contextual GET query fuzzing where observed evidence permits; ARP/ND, UDP, POST/form fuzzing, path-variable fuzzing, JavaScript execution, cipher enumeration, DNS execution, vulnerability checks, and the fingerprint engine remain deferred."
+    ],
+    "budgets": {
+      "max_tasks": 1000,
+      "max_retries": 1000,
+      "max_concurrency": 4,
+      "max_execution_time_ms": 60000,
+      "max_evidence_bytes": 67108864,
+      "max_hosts": 256,
+      "per_module": {}
+    },
+    "discovery_mode": "lightweight",
+    "discovery_ports": null,
+    "content_wordlist": null
+  },
+  "tasks": [
+    {
+      "task": {
+        "id": "task_653763e6b16d6e125de65568646b6ef298c585830abd92b64e437a89ca10ce8c",
+        "kind": "host_discovery",
+        "parent_task_id": null,
+        "dependencies": [],
+        "associated_asset_id": null,
+        "scan_plan_id": "plan_c4d7089e5de142f3",
+        "priority": 80,
+        "state": "succeeded",
+        "created_at": 0,
+        "timeout_ms": 2000,
+        "deadline": 2000,
+        "retry_policy": {
+          "max_attempts": 1,
+          "base_delay_ms": 0
+        },
+        "attempt": 0,
+        "retry_count": 0,
+        "cancel_requested": false,
+        "module_name": "phase20.test",
+        "provenance": {
+          "module_name": "phase20.test",
+          "module_version": "20.0.0",
+          "scan_plan_id": "plan_c4d7089e5de142f3",
+          "timestamp": 0
+        },
+        "budget": {
+          "task_cost": 1,
+          "evidence_bytes": 0
+        },
+        "scope_target": {
+          "target_type": "ip",
+          "value": "127.0.0.1"
+        },
+        "params": {
+          "target": "127.0.0.1"
+        }
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "task_id": "task_653763e6b16d6e125de65568646b6ef298c585830abd92b64e437a89ca10ce8c",
+      "output": {
+        "events": [],
+        "evidence": [],
+        "findings": [],
+        "assets": [
+          {
+            "schema_version": 1,
+            "id": "asset_ip_1e4138f9899ea24f",
+            "kind": "ip",
+            "identity": "127.0.0.1",
+            "attributes": {},
+            "first_seen": 0,
+            "last_seen": 0,
+            "provenance": {
+              "module_name": "phase20.test",
+              "module_version": "20.0.0",
+              "scan_plan_id": "plan_c4d7089e5de142f3",
+              "timestamp": 0
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "registries": {
+    "contacts": [],
+    "origin_baselines": [],
+    "fuzz_origin_budgets": [],
+    "dns_queries": [],
+    "dns_domains": []
+  }
+}

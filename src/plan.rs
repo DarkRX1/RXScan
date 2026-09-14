@@ -145,6 +145,8 @@ pub enum PlanError {
     InvalidBudget { field: String, reason: String },
     #[error("invalid --format '{0}': only 'jsonl' is supported in Phase 4")]
     InvalidFormat(String),
+    #[error("unreadable --wordlist file '{0}': provide a readable candidate file")]
+    UnreadableWordlist(String),
 }
 
 impl ScanPlan {
@@ -195,6 +197,19 @@ impl ScanPlan {
         let speed = cli.speed.or(config.speed).unwrap_or_default();
         let profile_name = cli.profile.clone().or(config.profile.clone());
         let content_wordlist = cli.wordlist.clone().or(config.wordlist.clone());
+        // Phase 20: fail fast on an unreadable candidate file. Without this
+        // a typo'd path degrades to zero content tasks with zero feedback
+        // whenever no web surface proposes content work. A directory or
+        // missing path is rejected here (exit 2); read errors mid-stream
+        // remain bounded task failures.
+        if let Some(path) = &content_wordlist {
+            let readable = std::fs::metadata(path)
+                .map(|meta| meta.is_file())
+                .unwrap_or(false);
+            if !readable {
+                return Err(PlanError::UnreadableWordlist(path.display().to_string()));
+            }
+        }
         let host_requested = cli.ping || cli.discover;
         let udp_requested = cli.udp;
         let ports_requested = cli.ports.is_some()

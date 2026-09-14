@@ -184,13 +184,6 @@ pub fn parent_asset_id_for_ip(ip: &IpAddr) -> String {
     format!("asset_ip_{}", fnv_hex(&format!("ip:{ip}")))
 }
 
-fn parent_asset_id_for_host(host: &str) -> String {
-    format!(
-        "asset_host_{}",
-        fnv_hex(&format!("host:{}", host.to_ascii_lowercase()))
-    )
-}
-
 /// Stable child port-asset ID: parent + protocol + port. Never collides
 /// across parents (`10.0.0.1:80` vs `10.0.0.2:80`) or protocols
 /// (`tcp/80` vs future `udp/80`).
@@ -649,6 +642,16 @@ fn execute_port_scan(
                 PortState::Closed => {
                     *counts.get_mut("closed").unwrap() += 1;
                     if detailed {
+                        push_port_state_asset(
+                            &mut assets,
+                            parent_id,
+                            ip,
+                            &target_label,
+                            probe,
+                            "closed",
+                            started_at,
+                            &provenance,
+                        );
                         push_event(
                             &mut events,
                             EventKind::PortClosed,
@@ -668,6 +671,16 @@ fn execute_port_scan(
                 PortState::FilteredOrTimedOut => {
                     *counts.get_mut("filtered_or_timed_out").unwrap() += 1;
                     if detailed {
+                        push_port_state_asset(
+                            &mut assets,
+                            parent_id,
+                            ip,
+                            &target_label,
+                            probe,
+                            "filtered_or_timed_out",
+                            started_at,
+                            &provenance,
+                        );
                         push_event(
                             &mut events,
                             EventKind::PortTimedOut,
@@ -687,6 +700,16 @@ fn execute_port_scan(
                 PortState::Error => {
                     *counts.get_mut("error").unwrap() += 1;
                     if detailed {
+                        push_port_state_asset(
+                            &mut assets,
+                            parent_id,
+                            ip,
+                            &target_label,
+                            probe,
+                            "error",
+                            started_at,
+                            &provenance,
+                        );
                         push_event(
                             &mut events,
                             EventKind::PortProbeError,
@@ -729,48 +752,54 @@ fn execute_port_scan(
         }),
         &provenance,
     )?;
-    // Summary evidence (always) so JSONL preserves counts even when per-port
-    // detail was truncated for huge scans.
+    // Summary evidence (always when an anchor exists) so JSONL preserves
+    // counts even when per-port detail was truncated for huge scans.
+    //
+    // Phase 20: the anchor must be an asset this output owns. Anchoring to
+    // the parent host asset dangled whenever no host asset existed anywhere
+    // (e.g. level-1 port-only scans: `--checkpoint` then failed validation
+    // on the scan's own state), and emitting the parent here would collide
+    // with the host module's copy. The first port asset is deterministic
+    // (outputs are port-ordered); when the output holds no assets at all
+    // the evidence is skipped because the always-emitted PortScanCompleted
+    // event already preserves counts/open_ports/truncated/unscanned.
     let confidence = Confidence::new(90).map_err(|_| ModuleError::Failed {
         message: "invalid confidence".to_owned(),
         retryable: false,
     })?;
-    let summary_asset = AssetId(
-        parent_ids
-            .first()
-            .cloned()
-            .unwrap_or_else(|| parent_asset_id_for_host(&target_label)),
-    );
-    let summary_details = BoundedDetails::from_value(
-        serde_json::json!({
-            "target": target_label,
-            "port_source": resolved.source.to_string(),
-            "ports_requested": resolved.ports.len(),
-            "counts": counts,
-            "open": open_records,
-            "truncated": truncated_any,
-            "unscanned": unscanned_total,
-            "elapsed_ms": elapsed_ms,
-        }),
-        crate::model::MAX_EVIDENCE_DETAILS_BYTES,
-    )
-    .map_err(|_| ModuleError::Failed {
-        message: "evidence details too large".to_owned(),
-        retryable: false,
-    })?;
-    evidence_items.push(
-        Evidence::new(
-            TCP_DISCOVERY_MODULE_NAME,
-            summary_asset,
-            summary_details,
-            confidence,
-            provenance,
+    if let Some(anchor) = assets.first() {
+        let summary_asset = anchor.id.clone();
+        let summary_details = BoundedDetails::from_value(
+            serde_json::json!({
+                "target": target_label,
+                "port_source": resolved.source.to_string(),
+                "ports_requested": resolved.ports.len(),
+                "counts": counts,
+                "open": open_records,
+                "truncated": truncated_any,
+                "unscanned": unscanned_total,
+                "elapsed_ms": elapsed_ms,
+            }),
+            crate::model::MAX_EVIDENCE_DETAILS_BYTES,
         )
         .map_err(|_| ModuleError::Failed {
-            message: "invalid evidence".to_owned(),
+            message: "evidence details too large".to_owned(),
             retryable: false,
-        })?,
-    );
+        })?;
+        evidence_items.push(
+            Evidence::new(
+                TCP_DISCOVERY_MODULE_NAME,
+                summary_asset,
+                summary_details,
+                confidence,
+                provenance,
+            )
+            .map_err(|_| ModuleError::Failed {
+                message: "invalid evidence".to_owned(),
+                retryable: false,
+            })?,
+        );
+    }
 
     Ok(ModuleOutput {
         events,
@@ -815,6 +844,47 @@ fn finish_empty_scan(
         findings: Vec::new(),
         assets: Vec::new(),
     })
+}
+
+/// Phase 20: typed Port asset for a detailed non-open observation.
+///
+/// Detailed closed/filtered/error events carry this asset's stable ID, so
+/// the asset must exist: checkpoint validation (and the JSONL asset model)
+/// requires every event `asset_id` to resolve. Bounded by the same
+/// `detailed` gate as the events (ports <= 256), with no evidence or
+/// findings — repetitive negative results stay compact by design.
+#[allow(clippy::too_many_arguments)]
+fn push_port_state_asset(
+    assets: &mut Vec<Asset>,
+    parent_id: &str,
+    ip: &IpAddr,
+    target_label: &str,
+    probe: &crate::tcp_scanner::PortProbe,
+    state: &str,
+    started_at: Timestamp,
+    provenance: &Provenance,
+) {
+    let asset_id = port_asset_id(parent_id, "tcp", probe.port);
+    assets.push(Asset {
+        schema_version: crate::model::SCHEMA_VERSION,
+        id: AssetId(asset_id),
+        kind: AssetKind::Port,
+        identity: port_asset_identity(parent_id, "tcp", probe.port),
+        attributes: BTreeMap::from([
+            ("transport".to_owned(), "tcp".to_owned()),
+            ("port".to_owned(), probe.port.to_string()),
+            ("state".to_owned(), state.to_owned()),
+            ("address".to_owned(), ip.to_string()),
+            ("target".to_owned(), target_label.to_owned()),
+            (
+                "latency_ms".to_owned(),
+                (probe.latency.as_millis() as u64).to_string(),
+            ),
+        ]),
+        first_seen: started_at,
+        last_seen: started_at,
+        provenance: provenance.clone(),
+    });
 }
 
 fn push_event(

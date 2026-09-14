@@ -153,6 +153,36 @@ Modules never receive authority to bypass policy. Discovery may be recorded with
 - Concurrent writers are detected via monotonic revision plus fingerprint mismatch (atomic temp/flush/sync/rename, no silent last-write-wins). Parent-directory fsync and power-loss durability are NOT IMPLEMENTED; the race window is documented.
 - Project membership is observational only: external (`scope=out_of_scope`) entities stay marked and never authorize scanning, widen scope, or trigger active work. P15 owns change certainty (`InconclusiveMissing` never becomes removed); P16 owns scoring (project never rescores).
 
+## Phase 20 production safety notes
+
+- Interruption is safe by construction: scan outputs, checkpoints, projects,
+  and reports all replace files via temp + file-sync + atomic rename, so a
+  killed run leaves prior valid files byte-identical and never presents
+  truncated output as complete (proven by SIGINT tests against real scans).
+  Stale `*.tmp-*` files from killed runs are inert.
+- Machine output cannot be confused with diagnostics: `--json`/`--jsonl`/
+  `--raw` and JSONL streams go to stdout (or the requested file) while
+  warnings/errors go to stderr; closed pipes exit silently instead of
+  panicking. Every JSONL line parses independently; JSON output contains no
+  NaN/infinity.
+- User-controlled input cannot panic the CLI: non-UTF-8 arguments, malformed
+  targets/CIDRs/ports/speeds/levels, unknown config keys, unreadable
+  wordlists, corrupt checkpoints/projects, unwritable outputs, and excluded
+  seeds all fail with named errors and conventional exit codes (0/2/1).
+- Contact accounting is order-independent where it matters: crawler fetches
+  are never suppressed by content claims (link extraction is irreplaceable),
+  while content still skips crawler-fetched URLs (bounded, documented).
+- No telemetry, update checks, auto-update, crash reporting, or network
+  activity exists outside explicit scan modules; offline commands hold zero
+  network requests (FD-delta proven). Secrets are never submitted (no auth
+  headers, no POST); observed secrets persist only inside documented bounded
+  truncations, never as raw blobs.
+- Supply chain: 10 production / 1 dev dependency, all permissive-licensed
+  per local metadata; `Cargo.lock` committed; CI builds `--locked`; no
+  build scripts, no shell-outs, minimal `unsafe` confined to audited Linux
+  syscall wrappers. Release artifacts are checksummed, never signed (no
+  identity configured — stated, not implied).
+
 ## Phase 19 resource-exhaustion safety notes
 
 - Every grow-with-work container derives from an explicit budget or hard

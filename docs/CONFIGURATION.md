@@ -207,3 +207,18 @@ Invalid values fail fast (exit 2): zero/negative-equivalent, values exceeding ha
   hard maxima (scheduler 64, TCP 256); `available_parallelism` is
   informational only and never sizes worker pools. No expert-only flags were
   added; simple UX is preserved.
+
+## Phase 20 strictness policy
+
+- Unknown TOML keys are rejected with file name and location (exit 2).
+  Forward compatibility across config versions is therefore explicit: an old
+  binary refuses a config containing keys it does not understand rather than
+  silently ignoring them. There is no config format version field; the
+  supported key set is this document.
+- `--wordlist` (CLI or `wordlist` key) must name a readable regular file at
+  plan-compile time, otherwise planning fails naming the file (exit 2).
+  A readable wordlist at level 1–3 is accepted but inert by policy
+  (user-file candidates are level 4+); read errors mid-stream remain bounded
+  task failures.
+- Precedence is unchanged and tested: built-in defaults < `--config` global
+  < `--project-config` project < CLI.

@@ -70,10 +70,26 @@ impl ContactRegistry {
         );
         if cross_module_dedup
             && state.by_url.get(&url).is_some_and(|seen| {
-                matches!(
-                    seen,
-                    RequestPurpose::ContentCandidate | RequestPurpose::CrawlPage
-                )
+                // Phase 20 asymmetric cross-module rule. Content candidates
+                // still skip URLs the crawler already fetched (P11 contract:
+                // classification of an already-discovered endpoint is
+                // redundant — the baseline module classifies endpoints
+                // independently). But crawl page fetches are NEVER blocked by
+                // content claims: only the crawler extracts links, so
+                // skipping a content-fetched page would silently drop entire
+                // crawl subtrees depending on task completion order (P20
+                // finding: adding an unrelated open port reordered tasks and
+                // lost all crawl coverage of the first host). Same-purpose
+                // duplicates still collapse in both directions.
+                match purpose {
+                    RequestPurpose::CrawlPage => {
+                        matches!(seen, RequestPurpose::CrawlPage)
+                    }
+                    _ => matches!(
+                        seen,
+                        RequestPurpose::ContentCandidate | RequestPurpose::CrawlPage
+                    ),
+                }
             })
         {
             return false;

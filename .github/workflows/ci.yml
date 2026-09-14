@@ -4,11 +4,17 @@ on:
   push:
   pull_request:
 
+# Minimal permissions: read-only checkout, no writes (Phase 20 supply-chain
+# hygiene). The release workflow (if added later) must keep its own minimal
+# scope and must never publish from CI without a version-tag gate.
 permissions:
   contents: read
 
 jobs:
   rust:
+    # Primary supported platform is Linux x86_64 (the only platform RXScan
+    # is built, tested, and benchmarked on for v0.1.0). No macOS/Windows
+    # support is claimed.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,6 +23,7 @@ jobs:
           toolchain: 1.85.0
           components: rustfmt, clippy
       - run: cargo fmt --check
-      - run: cargo check
-      - run: cargo test
-      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo check --locked
+      - run: cargo test --locked
+      - run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      - run: cargo build --release --locked

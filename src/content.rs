@@ -646,23 +646,31 @@ impl ContentRunState<'_> {
             message: "invalid content discovery event".to_owned(),
             retryable: false,
         })?;
-        event.relationships.push(
-            Relationship::new(
-                RelationshipKind::DiscoveredByContentProbe,
-                RelationshipSubject::Asset(asset.clone()),
-                RelationshipSubject::Asset(AssetId(
-                    self.origin
-                        .canonical()
-                        .replace("://", "_")
-                        .replace(['/', ':'], "_"),
-                )),
-                self.provenance.clone(),
-            )
-            .map_err(|_| ModuleError::Failed {
-                message: "invalid content relationship".to_owned(),
-                retryable: false,
-            })?,
-        );
+        // Phase 20: reference the origin's real endpoint asset ID (the same
+        // function http/crawl use), never a mangled URL string: checkpoint
+        // validation requires every relationship endpoint to resolve to a
+        // persisted asset. The origin asset is ensured in this output so the
+        // edge resolves even when no other module assetized the origin; the
+        // persistence merge collapses identical IDs deterministically.
+        // A discovery whose target IS the origin carries no edge (self-links
+        // are rejected); the event itself still records it.
+        let origin_asset = AssetId(crate::web::endpoint_asset_id(self.origin));
+        if asset != origin_asset {
+            let provenance = self.provenance.clone();
+            ensure_endpoint_asset(&mut self.output.assets, self.origin, &provenance)?;
+            event.relationships.push(
+                Relationship::new(
+                    RelationshipKind::DiscoveredByContentProbe,
+                    RelationshipSubject::Asset(asset.clone()),
+                    RelationshipSubject::Asset(origin_asset),
+                    self.provenance.clone(),
+                )
+                .map_err(|_| ModuleError::Failed {
+                    message: "invalid content relationship".to_owned(),
+                    retryable: false,
+                })?,
+            );
+        }
         self.output.events.push(event);
         push_event(
             &mut self.output.events,

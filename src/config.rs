@@ -11,7 +11,7 @@ use thiserror::Error;
 use crate::plan::{ScanGoal, SpeedSetting};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ConfigLayer {
     pub goal: Option<ScanGoal>,
     pub level: Option<u8>,

@@ -30,7 +30,7 @@ use crate::{
     host_discovery::HostDiscoveryModule,
     lowering::{LowerError, lower_plan_to_tasks},
     modules::phase5_control_modules,
-    output::{OutputError, create_file_writer},
+    output::{OutputError, create_atomic_file_writer},
     plan::{PlanError, ScanPlan},
     service_probe::ServicePolicy,
     tcp_discovery::TcpScanPolicy,
@@ -266,10 +266,11 @@ pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
     // (assets, events, evidence) flow into the same typed JSONL envelope.
     let mut jsonl_bytes = 0u64;
     if let Some(path) = output_path.as_deref() {
-        let mut writer = create_file_writer(path, budgets.max_evidence_bytes)?;
-        write_outputs(&mut writer, &events, &module_outputs)?;
-        writer.flush()?;
-        jsonl_bytes = writer.bytes_written();
+        // Phase 20: atomic file output. A prior valid file is never touched
+        // until the full stream completes (SIGINT-safe by rename).
+        let mut writer = create_atomic_file_writer(path, budgets.max_evidence_bytes)?;
+        write_outputs(writer.writer_mut(), &events, &module_outputs)?;
+        jsonl_bytes = writer.finish()?;
     } else if format
         .as_deref()
         .is_some_and(|format| format.eq_ignore_ascii_case("jsonl"))

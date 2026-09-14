@@ -1230,7 +1230,12 @@ fn emit_parameter(
     record: &ParameterRecord,
     provenance: &Provenance,
 ) -> Result<(), ModuleError> {
-    let mut event = Event::new(
+    // Phase 20: no synthetic `asset_param_*` relationship. The parameter
+    // record (name, kind, sensitivity) lives in the event details, which is
+    // what the fuzz decision engine consumes; a relationship endpoint must
+    // resolve to a persisted asset, and no parameter asset exists in the
+    // model. The event itself stays anchored to the endpoint asset.
+    let event = Event::new(
         EventKind::ParameterObserved,
         Some(asset.clone()),
         BoundedDetails::from_value(serde_json::json!(record), MAX_EVENT_DETAILS_BYTES).map_err(
@@ -1245,21 +1250,6 @@ fn emit_parameter(
         message: "invalid parameter event".to_owned(),
         retryable: false,
     })?;
-    event.relationships.push(
-        Relationship::new(
-            RelationshipKind::ParameterOf,
-            RelationshipSubject::Asset(AssetId(format!(
-                "asset_param_{}",
-                sha256_hex(record.name.as_bytes())
-            ))),
-            RelationshipSubject::Asset(asset.clone()),
-            provenance.clone(),
-        )
-        .map_err(|_| ModuleError::Failed {
-            message: "invalid parameter relationship".to_owned(),
-            retryable: false,
-        })?,
-    );
     output.events.push(event);
     Ok(())
 }

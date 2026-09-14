@@ -1114,6 +1114,13 @@ impl CrawlRunState<'_> {
         use crate::crawl::CandidateSource as Source;
         let in_scope = self.guard.permits(&scope_target_for_url(url));
         if !in_scope {
+            // The discovered URL is assetized (like any observed endpoint;
+            // P18 external-entity semantics) but never contacted or
+            // followed: emit_candidate returns None below, so no follow-up
+            // task can correlate. Assetizing keeps the discovery
+            // relationship resolvable for checkpoint validation while the
+            // event details preserve the scope denial.
+            let endpoint_id = self.ensure_endpoint_asset(url, parent_asset_id, resource)?;
             let mut event = Event::new(
                 EventKind::EndpointDiscovered,
                 None,
@@ -1144,7 +1151,7 @@ impl CrawlRunState<'_> {
                 &mut event,
                 source.relationship(),
                 AssetId(parent_asset_id.to_owned()),
-                AssetId(crate::web::endpoint_asset_id(url)),
+                endpoint_id.clone(),
                 &self.provenance,
             )?;
             self.events.push(event);

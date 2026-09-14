@@ -168,6 +168,30 @@ Verified locally on 2026-09-12 (see validation results in the Phase 4 completion
 - Local tests (40) cover create/import, semantic fingerprint invariance, duplicate and repeated duplicate import, incremental import, entity/relationship/finding dedup, severity preservation, target separation, IPv6 service/endpoint survival, external entity marking without authorization, change certainty, attention preservation, depth/cycle/result caps, query ordering, corrupt/unsupported/dangling rejection, relocation/path invariance, determinism, import-order semantics, atomic save, save-failure preservation, conflict detection, collection-limit boundaries, human conciseness, JSON determinism, streaming JSONL, terminal safety, raw-marker/credential exclusion, path-leak exclusion, CLI paths, zero-network counters, lazy isolation, thread bounds, memory bounds, large bounded growth, fingerprint no-clone audit, high-degree/adversarial bounded queries, capped determinism, lower-bound totals, large open memory, oversized-save preservation, and cap/streaming audits.
 - `cargo run --example phase18_bench` — controlled offline project benchmark recorded in `docs/benchmark-results/phase18-project-graph.md`.
 
+## Phase 20 verification (release candidate ready, NOT released)
+
+- Phase 20 proves release readiness without assuming it: clean build/install,
+  predictable CLI, safe interruption, stable formats, useful errors, no
+  hidden runtimes, offline guarantees, reproducible validation, and
+  artifact/source correspondence. No new reconnaissance capability.
+- Release-critical fixes: speed-governor single derivation (exact regression
+  tests + monotone pressure matrix); checkpoint validity for real scans
+  (typed port assets, owned-evidence anchors, same-ID asset merges,
+  resolvable crawl/content relationships, asymmetric crawl/content contact
+  rule); non-UTF8 CLI panic; silent missing wordlists (fail fast) and
+  unknown config keys (rejected); atomic scan output; broken-pipe-safe
+  machine output with exit codes 0/1/2.
+- Release engineering: `scripts/release-check.sh` full gate;
+  `examples/phase20_release_gate.rs` evidence bench; `tests/phase20_release.rs`
+  (CLI/exit/stdio/SIGINT/schema/E2E/soak coverage); golden schema fixtures;
+  rewritten README; CHANGELOG; SECURITY.md; `docs/RELEASE_CHECKLIST.md`;
+  release-gate benchmark record. CI runs fmt/check/tests/clippy/release
+  build on Linux x86_64 (Rust 1.85 pin); no macOS/Windows claims.
+- Remaining release blocker: no `LICENSE` file ships (manifest declares
+  MIT; copyright-holder confirmation required before distribution).
+- Full suite: 23 targets, 452 debug + 452 release tests passing, 0 failed,
+  0 ignored. Nothing published, pushed, tagged, or uploaded.
+
 ## Phase 19 verification
 
 - Phase 19 hardens P0–P18 under realistic scale with zero new reconnaissance

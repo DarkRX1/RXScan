@@ -33,10 +33,10 @@ The Decision Engine proposes work only. The Scope Guard, policy validation, budg
 - Timed-out tasks free their scheduler slot immediately; orphaned workers are bounded by the task budget and their late results are discarded without double-counting.
 - Queue saturation is backpressure (tasks stay `Pending`), never a fatal abort; retry-delayed tasks never head-of-line block others.
 - Host discovery never shells out to `ping`; raw/privileged failures degrade to structured `Unavailable` (never false Dead); CIDR expansion is bounded by `max_hosts` (default 256) and Level 5 host breadth is bounded (5 TCP ports, 3 ICMP attempts).
-- TCP scanning never shells out and never uses raw SYN; connect success is Open, refused/reset is Closed, timeout is FilteredOrTimedOut (never misclassified as Closed), unreachable/permission failures are Error; one task per target with a bounded internal window (no thread per port, ≤256 concurrent FDs, retries only for filtered ≤1).
+- TCP scanning never shells out and never uses raw SYN; connect success is Open, refused/reset is Closed, timeout is FilteredOrTimedOut (never misclassified as Closed), unreachable/permission failures are Error; one task per target with a bounded internal window (no thread per port, ≤256 concurrent FDs, retries only for filtered ≤1). Detailed non-open observations carry typed port assets; summary evidence anchors to an owned port asset (skipped when asset-less, counts preserved by the completion event).
 - Crawling starts only from confirmed HTTP/HTTPS endpoint evidence. Every discovered URL is canonicalized, scope-checked, and budget-checked before contact; out-of-scope discoveries may be recorded but never fetched. Forms are observation only; JavaScript is never executed; crawler modules never self-schedule recursive work.
 - Baseline intelligence starts only from confirmed or crawled endpoint evidence. Synthetic missing-path probes stay same-origin and inert (`/__rxscan_baseline_<token>__`), are remembered in compact scan-lifetime origin state keyed by scheme + canonical host + effective port, and remain scope/redirect checked before contact. Baseline code signs and classifies observed responses only; it never mutates parameters, submits forms, guesses paths, fuzzes, executes JavaScript, or reports vulnerabilities.
-- Managed content discovery consumes bounded candidate sources only. Candidates cannot change scheme/authority, cannot traverse with `.`/`..`, and cannot trigger POST/PUT/PATCH/DELETE, form submission, method fuzzing, header fuzzing, or recursive directory explosions. Content candidate contacts consult the scan-lifetime contacted-request registry so crawler/content duplicate URLs such as `/login`, `login`, and `/login#fragment` do not create redundant requests.
+- Managed content discovery consumes bounded candidate sources only. Candidates cannot change scheme/authority, cannot traverse with `.`/`..`, and cannot trigger POST/PUT/PATCH/DELETE, form submission, method fuzzing, header fuzzing, or recursive directory explosions. Crawler-fetched URLs are skipped by content discovery (scan-lifetime contacted-URL dedup); content-fetched URLs never block crawler fetches, because only the crawler extracts links and skipping would silently drop crawl subtrees depending on task order (Phase 20 asymmetric rule).
 - Contextual fuzzing starts only from existing evidence: a baseline signature for an endpoint with an observed non-sensitive GET query parameter. It mutates one parameter per request with inert values, reuses Phase 8 fetch and Phase 10 signatures, and emits behavior deltas/reflection observations only. It never submits forms, fuzzes POST bodies/cookies/headers, uses exploit payloads, or creates vulnerability findings.
 - Reporting is presentation only. It loads validated semantic state, optional Phase 15 diff records, and optional Phase 16 analysis signals; it never starts the Scheduler, contacts the network, changes scope, rescoring signals, upgrades certainty, creates findings, or writes back to checkpoints. Human output sanitizes control characters; machine JSON/JSONL preserve data through JSON encoding.
 - Project mode is organization only. It imports validated checkpoints into a compact `ProjectState`, separates entities from observations, deduplicates repeated semantic assets/relationships/findings, and serves bounded graph queries. It never starts the Scheduler, contacts the network, creates authorization, rescans assets, or runs background indexing.
@@ -140,6 +140,21 @@ running — fast through efficiency, never by monopolizing the machine.
   stays breadth/depth, `speed` stays pressure (task IDs embed pressure fields
   by design; semantic params are speed-invariant, proven by test).
 - No performance dependency bloat: 10 production / 1 dev, unchanged.
+
+## Phase 20 production / release boundaries
+
+Speed pressure derives exactly once from the speed setting and the tighter
+of caller/scheduler budgets (idempotent; the explicit budget is an upper
+bound; `available_parallelism` never sizes pools). Scan file output is
+atomic (temp + file-sync + rename; prior valid files are never replaced by
+partial runs). Machine stdout never carries diagnostics and never panics on
+closed pipes; exit codes are 0/2/1 (success/usage/runtime). Checkpoints merge
+same-ID asset re-observations deterministically (first-wins attributes,
+timestamp span) and reject cross-kind collisions; every event asset ID and
+relationship endpoint must resolve to a persisted asset, which modules
+guarantee locally. Unknown config keys and unreadable wordlists fail fast at
+plan compile. The binary needs only the OS C library at runtime and shells
+out to nothing.
 
 ## Repository ownership
 

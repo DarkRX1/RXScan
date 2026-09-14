@@ -413,7 +413,7 @@ fn validate_task(
 fn collect_global_assets(
     outputs: &[PersistedModuleOutput],
 ) -> Result<BTreeMap<AssetId, Asset>, PersistenceError> {
-    let mut assets = BTreeMap::new();
+    let mut assets: BTreeMap<AssetId, Asset> = BTreeMap::new();
     for persisted in outputs {
         for asset in &persisted.output.assets {
             validate_id(&asset.id.0, "asset id")?;
@@ -423,11 +423,29 @@ fn collect_global_assets(
                 ));
             }
             if let Some(existing) = assets.get(&asset.id) {
-                if existing != asset {
+                // Phase 20: same stable ID re-observed (overlapping port
+                // tasks, same URL seen by http/baseline/content modules) is
+                // the engine's normal follow-up behavior, not spoofing.
+                // Merge deterministically: first record wins for
+                // kind/identity/attributes/provenance (outputs iterate in
+                // task-ID order), timestamps span the observations. A
+                // different KIND under one ID is still rejected: asset IDs
+                // embed their kind, so that shape cannot arise legitimately.
+                if existing.kind != asset.kind {
                     return Err(PersistenceError::Invalid(
                         "conflicting duplicate asset id".to_owned(),
                     ));
                 }
+                let mut merged = existing.clone();
+                merged.first_seen = merged.first_seen.min(asset.first_seen);
+                merged.last_seen = merged.last_seen.max(asset.last_seen);
+                for (key, value) in &asset.attributes {
+                    merged
+                        .attributes
+                        .entry(key.clone())
+                        .or_insert_with(|| value.clone());
+                }
+                assets.insert(asset.id.clone(), merged);
             } else {
                 assets.insert(asset.id.clone(), asset.clone());
             }

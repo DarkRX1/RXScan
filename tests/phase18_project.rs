@@ -2194,6 +2194,30 @@ fn results_total_is_lower_bound_when_work_capped() {
 
 #[test]
 fn large_project_open_memory_is_reasonable() {
+    // Phase 20: VmRSS is process-wide, so sibling tests sharing this test
+    // binary's allocator can inflate current-RSS deltas under parallel load
+    // (one such failure was observed during a full-workspace run; never in
+    // isolation). Run the measurement in an isolated child process running
+    // only this test: thresholds below are unchanged, the noise source is
+    // removed instead of the protection being weakened.
+    if std::env::var("RXSCAN_P18_MEM_CHILD").is_err() {
+        let exe = std::env::current_exe().expect("test binary path");
+        let out = Command::new(exe)
+            .args([
+                "--exact",
+                "large_project_open_memory_is_reasonable",
+                "--nocapture",
+            ])
+            .env("RXSCAN_P18_MEM_CHILD", "1")
+            .output()
+            .expect("spawn isolated memory-measurement child");
+        assert!(
+            out.status.success(),
+            "isolated memory measurement failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        return;
+    }
     // Larger deterministic fixture (several thousand entities).
     let scan = large_scan_state(1500);
     let mut project = ProjectState::new(None);

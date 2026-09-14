@@ -1,0 +1,45 @@
+{
+  "project_schema_version": 1,
+  "project_id": "project_671bc366926bc369",
+  "revision": 1,
+  "fingerprint": "36183dff7cae3830",
+  "scans": {
+    "scan_36ad966454bea328": {
+      "scan_id": "plan_c4d7089e5de142f3",
+      "plan_id": "plan_c4d7089e5de142f3",
+      "import_sequence": 1,
+      "semantic_fingerprint": "ca5876ef400d5629",
+      "checkpoint_schema_version": 1,
+      "entity_count": 1,
+      "relationship_count": 0,
+      "finding_count": 0
+    }
+  },
+  "entities": {
+    "entity_ip_ffd74263f16bcde6": {
+      "id": "entity_ip_ffd74263f16bcde6",
+      "kind": "ip",
+      "identity": "127.0.0.1",
+      "attributes": {},
+      "first_scan_id": "plan_c4d7089e5de142f3",
+      "last_scan_id": "plan_c4d7089e5de142f3",
+      "observation_count": 1,
+      "external": false,
+      "observations": [
+        "obs_0f1b1c2de11e2bc1"
+      ]
+    }
+  },
+  "relationships": {},
+  "observations": {
+    "obs_0f1b1c2de11e2bc1": {
+      "id": "obs_0f1b1c2de11e2bc1",
+      "scan_id": "plan_c4d7089e5de142f3",
+      "entity_id": "entity_ip_ffd74263f16bcde6",
+      "fingerprint": "628c794aa691b034"
+    }
+  },
+  "findings": {},
+  "changes": {},
+  "analysis_refs": {}
+}

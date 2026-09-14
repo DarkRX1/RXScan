@@ -678,6 +678,12 @@ impl SpeedGovernor {
     pub fn setting(&self) -> SpeedSetting {
         self.setting
     }
+    /// Explicit concurrency budget this governor was built with. Exposed so
+    /// [`Scheduler::new`] can combine caller and scheduler budgets by taking
+    /// the minimum *before* deriving pressure (Phase 20 governor fix).
+    pub fn budget(&self) -> usize {
+        self.max_concurrency
+    }
     /// Phase 4 auto is intentionally non-adaptive.
     pub fn is_adaptive(&self) -> bool {
         false
@@ -923,6 +929,14 @@ pub struct Scheduler {
     budgets: BudgetLimits,
     ledger: BudgetLedger,
     governor: SpeedGovernor,
+    /// Phase 20: effective worker-slot concurrency, derived EXACTLY ONCE in
+    /// [`Scheduler::new`] from the speed setting and the tighter of the
+    /// caller and scheduler concurrency budgets. Previously the *derived*
+    /// value was fed back as the new maximum, applying the pressure formula
+    /// a second time and collapsing e.g. `Numeric(50)` + budget 4 from 2
+    /// slots to 1. Budget combination is idempotent now: rebuilding changes
+    /// nothing. Dispatch uses only this field.
+    effective_concurrency: usize,
     started_at: Instant,
     /// Phase 5: completed module outputs retained for JSONL output.
     /// Keyed by task ID; only `Succeeded` tasks populate this map.
@@ -941,8 +955,15 @@ impl Scheduler {
                 "concurrency and execution time must be positive",
             ));
         }
-        let max_concurrency = governor.concurrency().min(budgets.max_concurrency);
-        let governor = SpeedGovernor::new(governor.setting(), max_concurrency)?;
+        // Phase 20: derive pressure exactly once. Combine the caller and
+        // scheduler budgets by taking the minimum FIRST, then derive once
+        // with that budget. Feeding the derived value back as a maximum
+        // re-applies the pressure formula and collapses concurrency (P19
+        // finding: Numeric(50)+4 collapsed 2 -> 1); budget combination is
+        // idempotent and keeps the explicit budget an upper bound.
+        let budget = governor.budget().min(budgets.max_concurrency).max(1);
+        let governor = SpeedGovernor::new(governor.setting(), budget)?;
+        let effective_concurrency = governor.concurrency();
         Ok(Self {
             queue: TaskQueue::new(queue_capacity)?,
             tasks: BTreeMap::new(),
@@ -953,6 +974,7 @@ impl Scheduler {
             budgets,
             ledger: BudgetLedger::default(),
             governor,
+            effective_concurrency,
             started_at: Instant::now(),
             completed_outputs: BTreeMap::new(),
         })
@@ -1092,7 +1114,7 @@ impl Scheduler {
             // block other ready tasks. Not-ready pops are stashed aside and
             // requeued after the dispatch window.
             let mut deferred: Vec<(TaskId, u8)> = Vec::new();
-            while active < self.governor.concurrency() {
+            while active < self.effective_concurrency {
                 let Some(task_id) = self.queue.pop() else {
                     break;
                 };
@@ -1511,8 +1533,10 @@ impl Scheduler {
         }
     }
     /// Effective concurrency after capping the governor by budgets.
+    /// Derived exactly once at construction; the explicit budget is an upper
+    /// bound and never triggers re-derivation (Phase 20 governor fix).
     pub fn effective_concurrency(&self) -> usize {
-        self.governor.concurrency()
+        self.effective_concurrency
     }
     pub fn governor(&self) -> &SpeedGovernor {
         &self.governor
