@@ -175,6 +175,14 @@ pub struct ScanOutcome {
     pub cancelled: bool,
     /// Ports never attempted due to deadline/cancel (for evidence counts).
     pub unscanned: usize,
+    /// Peak simultaneously held in-flight sockets during the scan.
+    ///
+    /// Phase 19 observability: always `<= ScanConfig::max_concurrent <=
+    /// MAX_TCP_CONCURRENCY_HARD` (256). Immediate-refused connects hold
+    /// their descriptor only transiently and are not counted here; the
+    /// sustained descriptor pressure that matters for EMFILE bounding is
+    /// exactly `pending.len()`.
+    pub fd_peak: usize,
 }
 
 /// Trait for port scanning (real non-blocking + fakes for tests).
@@ -278,6 +286,8 @@ fn scan_ports_nonblocking(ip: IpAddr, ports: &[u16], config: &ScanConfig) -> Sca
     let mut pending: BTreeMap<c_int, Pending> = BTreeMap::new();
     let mut truncated = false;
     let mut cancelled = false;
+    // Phase 19: peak in-flight socket observability (O(1) counter).
+    let mut fd_peak = 0usize;
     let mut backoff_until = Instant::now();
 
     let overall_deadline = config.deadline;
@@ -385,6 +395,7 @@ fn scan_ports_nonblocking(ip: IpAddr, ports: &[u16], config: &ScanConfig) -> Sca
                             attempts,
                         },
                     );
+                    fd_peak = fd_peak.max(pending.len());
                 }
                 e if e == EINTR => {
                     // Single immediate retry for interrupted connects.
@@ -411,6 +422,7 @@ fn scan_ports_nonblocking(ip: IpAddr, ports: &[u16], config: &ScanConfig) -> Sca
                                     attempts,
                                 },
                             );
+                            fd_peak = fd_peak.max(pending.len());
                         } else {
                             probes.push(classify_immediate(ip, port, errno2, started, attempts));
                         }
@@ -573,6 +585,7 @@ fn scan_ports_nonblocking(ip: IpAddr, ports: &[u16], config: &ScanConfig) -> Sca
         truncated,
         cancelled,
         unscanned,
+        fd_peak,
     }
 }
 

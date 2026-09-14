@@ -167,3 +167,40 @@ Verified locally on 2026-09-12 (see validation results in the Phase 4 completion
 - Fingerprinting streams a borrowed view directly into SHA-256 with zero whole-state clones and zero serialization buffer; saves stream pretty JSON to temp with size enforced during the write (8 KiB buffer, no stacked full copies). Both the 16 MiB file cap and collection caps apply, whichever first rejects.
 - Local tests (40) cover create/import, semantic fingerprint invariance, duplicate and repeated duplicate import, incremental import, entity/relationship/finding dedup, severity preservation, target separation, IPv6 service/endpoint survival, external entity marking without authorization, change certainty, attention preservation, depth/cycle/result caps, query ordering, corrupt/unsupported/dangling rejection, relocation/path invariance, determinism, import-order semantics, atomic save, save-failure preservation, conflict detection, collection-limit boundaries, human conciseness, JSON determinism, streaming JSONL, terminal safety, raw-marker/credential exclusion, path-leak exclusion, CLI paths, zero-network counters, lazy isolation, thread bounds, memory bounds, large bounded growth, fingerprint no-clone audit, high-degree/adversarial bounded queries, capped determinism, lower-bound totals, large open memory, oversized-save preservation, and cap/streaming audits.
 - `cargo run --example phase18_bench` — controlled offline project benchmark recorded in `docs/benchmark-results/phase18-project-graph.md`.
+
+## Phase 19 verification
+
+- Phase 19 hardens P0–P18 under realistic scale with zero new reconnaissance
+  capability, zero new production dependencies (10 prod / 1 dev, unchanged),
+  and zero new tuning knobs. All optimizations preserve semantic truth
+  (level = breadth/depth, speed = pressure).
+- Production changes: scheduler peak observability (`queue_peak`,
+  `active_peak`) plus a linear final sweep; TCP `fd_peak` observability;
+  cached sort keys in open-port extraction and crawl follow-up planning;
+  interval port-coverage in diff normalization (no 65k-String expansion);
+  streaming checkpoint saves (byte-identical output); borrow-based output
+  sorting. Before/after behavior is covered by the unchanged P0–P18 suites
+  plus 43 new structural tests.
+- `cargo run --example phase19_bench` — six-section controlled benchmark
+  (scheduler/TCP/web/persistence/project/fairness) recorded in
+  `docs/benchmark-results/phase19-performance-hardening.md`. Release on the
+  reference box: 1500 scheduler tasks in 459ms (queue 64/64, 4 of 12 CPUs),
+  65,535 ports resolved in 0ms with `fd_peak=32`, 4.6 MiB checkpoint
+  save/load in 21/23ms, 11.7 MiB project open/fingerprint/query in
+  72/21/450ms with all graph caps hit exactly, peak RSS 104 MiB composite,
+  CPU/wall ratio 0.7. Release binary `8,305,344` bytes (+94,576 over P18).
+- Local tests (43) cover large scheduler accounting, fairness under bounded
+  sustained load, mass cancellation, deadline/timeout under load, retry and
+  failure storms, all-ports structure and diff coverage, real-socket FD
+  bounds, FD exhaustion in a 64-FD child process, saturation backpressure,
+  level/speed invariance, CIDR caps, service plan bounds, crawl/content/fuzz/
+  DNS scale and dedup, slow/oversized HTTP peers, checkpoint/resume/diff/
+  analysis/report scale, large project bounds with P18 invariants, duplicate
+  storms, determinism, multitasking bounds, IPv6, malformed inputs,
+  zero-contact rejections, startup laziness, output backpressure, and offline
+  counters. Full workspace suite (22 targets) green; `cargo fmt --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`, and
+  `git diff --check` clean.
+- Known limitation documented: external mid-run `cancel_all` is unreachable
+  while `run()` holds `&mut`; in-run cancellation via tokens, per-task
+  timeouts, and the global budget is stressed instead.

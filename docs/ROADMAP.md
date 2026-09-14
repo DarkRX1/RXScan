@@ -23,8 +23,8 @@ Each phase requires tests, benchmark/regression evidence where applicable, docum
 | 16 | Analysis / Prioritization: offline deterministic attention ranking | Complete (current) |
 | 17 | Reporting: offline deterministic human/JSON/JSONL/raw semantic renderers | Complete (current) |
 | 18 | Project / Graph Mode: offline compact multi-scan semantic graph with bounded queries | Complete (current) |
-| 19 | Decision engine workflows, API workflows, checks | Not implemented |
-| 20–24 | Outputs, packs, benchmark lab, releases | Not implemented |
+| 19 | Performance / Large-Scale Hardening: bounded queues/memory/descriptors/concurrency, fairness, prompt cancellation, no truth change, no new recon, no new deps | Complete |
+| 20–24 | Outputs, packs, benchmark lab, releases (packaging, installers, release automation, man pages, distribution packages, plugin ecosystem, release signing, public release workflow) | Not implemented |
 
 Phase 6 is the first real port-scanning engine (TCP connect only). No UDP scanning, SSH protocol enumeration, HTTP crawling, fuzzing, DNS enumeration, vulnerability checks, exploitation, or broad service fingerprinting exist yet (open means open; versions belong to Phase 7). Deeper network tasks still run as `Skipped` (`module unavailable`).
 

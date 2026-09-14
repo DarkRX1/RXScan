@@ -105,6 +105,42 @@ indexer, pool, or persistent workers; `background_cpu_percent=0` and
 information, not repeated work. Membership never grants scan authorization;
 external (`scope=out_of_scope`) edges stay observational.
 
+## Phase 19 performance / bounded-work model
+
+Phase 19 proves the architecture stays correct, bounded, responsive, fast,
+light, and multitasking-friendly as workload grows. The permanent invariant:
+broad like a toolchain, fast like a native CLI, light enough to forget it is
+running — fast through efficiency, never by monopolizing the machine.
+
+- Bounded work: every grow-with-work container derives from an explicit
+  budget or hard constant (scheduler queue from concurrency/tasks caps,
+  TCP window 16..128 by speed with a 256 hard cap, per-module admit/request/
+  event caps, registry caps, 8 MiB checkpoint / 16 MiB project file caps).
+  Queue saturation is backpressure, never abort; retries never dominate fresh
+  work; priorities never starve eligible tasks under bounded arrivals.
+- Streaming boundaries: checkpoint saves stream to disk (8 KiB buffer, no
+  whole-state serialization buffer); JSONL renders record-by-record; wordlists
+  stream line-by-line with reuse buffers; raw HTTP/DNS/TLS bytes are parsed
+  into compact semantics and released per fetch — never accumulated.
+- Memory lifetime scales with bounded active work, not total theoretical
+  workload: per-scan port vectors are freed per task, bodies are function
+  locals, query temporaries are freed per tick, and peak RSS is observed via
+  `/proc/self/status` VmHWM (peak) vs VmRSS (current).
+- Descriptor bounds: sustained per-scan sockets equal TCP `max_concurrent`;
+  `ScanOutcome::fd_peak` and `SchedulerReport::{queue_peak, active_peak}`
+  make active/peak use observable. EMFILE degrades to bounded Error/backoff
+  outcomes, never panic/spin/misclassification.
+- Cancellation: per-task tokens (polled every few ms), per-task timeouts
+  (slots freed immediately, orphans discarded without double-count), and the
+  global execution budget (stops backoff queues promptly). Slow sinks never
+  cause unbounded output buffering.
+- Multitasking: worker/concurrency policy derives deterministically from
+  speed+budget only (`available_parallelism` is informational); the benchmark
+  uses 4 threads of 12 with CPU/wall ratio 0.7. No new tuning knobs: `level`
+  stays breadth/depth, `speed` stays pressure (task IDs embed pressure fields
+  by design; semantic params are speed-invariant, proven by test).
+- No performance dependency bloat: 10 production / 1 dev, unchanged.
+
 ## Repository ownership
 
 - Foundation: `cli`, `config`, `target`, `scope`, `plan`

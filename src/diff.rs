@@ -156,7 +156,16 @@ struct SemanticSnapshot {
 struct Coverage {
     succeeded: BTreeSet<TaskKind>,
     terminal_errors: BTreeSet<TaskKind>,
+    /// Verbatim single-port tokens (e.g. `"443"`). Exact strings are kept so
+    /// membership truth is identical to the pre-Phase-19 expansion.
     ports: BTreeSet<String>,
+    /// Merged closed intervals from `start-end` tokens (e.g. `"1-65535"`).
+    ///
+    /// Phase 19: a full-range scan previously materialized up to 65,535 heap
+    /// `String`s plus one `BTreeSet` node per port. One interval covers the
+    /// same membership truth with O(1) memory; `port_covered` binary-searches
+    /// the merged list.
+    port_ranges: Vec<(u16, u16)>,
     dns_types: BTreeSet<String>,
     crawl_depth: Option<u8>,
     content: bool,
@@ -164,6 +173,58 @@ struct Coverage {
 }
 
 impl Coverage {
+    /// Membership test for a canonical port token. Exact single-port tokens
+    /// match verbatim; otherwise a decimal `u16` token matches when covered
+    /// by a recorded range interval.
+    fn port_covered(&self, port: &str) -> bool {
+        if self.ports.contains(port) {
+            return true;
+        }
+        let Ok(number) = port.parse::<u16>() else {
+            return false;
+        };
+        // `port_ranges` is kept sorted and merged; binary search on starts.
+        let mut low = 0usize;
+        let mut high = self.port_ranges.len();
+        while low < high {
+            let mid = low + (high - low) / 2;
+            let (start, end) = self.port_ranges[mid];
+            if number < start {
+                high = mid;
+            } else if number > end {
+                low = mid + 1;
+            } else {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Insert a closed range and re-merge the interval list so it stays
+    /// sorted, disjoint, and minimal.
+    fn insert_port_range(&mut self, start: u16, end: u16) {
+        if start > end {
+            // Matches the old `start..=end` expansion, which yields nothing
+            // for a reversed range.
+            return;
+        }
+        self.port_ranges.push((start, end));
+        self.port_ranges.sort_unstable();
+        let mut merged: Vec<(u16, u16)> = Vec::with_capacity(self.port_ranges.len());
+        for (start, end) in self.port_ranges.drain(..) {
+            if let Some(last) = merged.last_mut() {
+                // Adjacent intervals merge too: coverage is identical and the
+                // list stays minimal.
+                if start <= last.1.saturating_add(1) {
+                    last.1 = last.1.max(end);
+                    continue;
+                }
+            }
+            merged.push((start, end));
+        }
+        self.port_ranges = merged;
+    }
+
     fn record_task(&mut self, kind: &TaskKind, params: &BTreeMap<String, String>) {
         match kind {
             TaskKind::PortDiscovery => {
@@ -175,9 +236,7 @@ impl Coverage {
                                 if let (Ok(start), Ok(end)) =
                                     (start.trim().parse::<u16>(), end.trim().parse::<u16>())
                                 {
-                                    for port in start..=end {
-                                        self.ports.insert(port.to_string());
-                                    }
+                                    self.insert_port_range(start, end);
                                 }
                             } else if part.parse::<u16>().is_ok() {
                                 self.ports.insert(part.to_owned());
@@ -229,7 +288,7 @@ impl Coverage {
                     .cloned()
                     .or_else(|| asset.identity.rsplit(':').next().map(str::to_owned));
                 if let Some(port) = port {
-                    if !other.ports.contains(&port) {
+                    if !other.port_covered(&port) {
                         return Err(ReasonCode::MissingWithoutComparableCoverage);
                     }
                 }

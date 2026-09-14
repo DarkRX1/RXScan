@@ -274,19 +274,27 @@ pub struct FollowupProposal {
 /// allowance. Returns proposals plus counts of depth/pages skips so budget
 /// stops stay observable.
 pub fn plan_followups(
-    mut candidates: Vec<(WebTarget, String, CandidateSource)>,
+    candidates: Vec<(WebTarget, String, CandidateSource)>,
     parent_depth: u8,
     parent_pages_left: u32,
     max_proposals: usize,
 ) -> FollowupPlan {
-    candidates.sort_by(|left, right| {
-        left.0
-            .canonical()
-            .cmp(&right.0.canonical())
-            .then_with(|| left.1.cmp(&right.1))
-    });
-    candidates
-        .dedup_by(|right, left| right.0.canonical() == left.0.canonical() && right.1 == left.1);
+    // Phase 19: canonicalize once per candidate (Schwartzian transform).
+    // Ordering and dedup truth are unchanged; the previous comparator
+    // re-ran URL canonicalization on every comparison.
+    let mut keyed: Vec<(String, WebTarget, String, CandidateSource)> = candidates
+        .into_iter()
+        .map(|(url, parent_asset_id, source)| {
+            let key = url.canonical();
+            (key, url, parent_asset_id, source)
+        })
+        .collect();
+    keyed.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.2.cmp(&right.2)));
+    keyed.dedup_by(|right, left| right.0 == left.0 && right.2 == left.2);
+    let candidates: Vec<(WebTarget, String, CandidateSource)> = keyed
+        .into_iter()
+        .map(|(_, url, parent_asset_id, source)| (url, parent_asset_id, source))
+        .collect();
     let mut plan = FollowupPlan {
         proposals: Vec::new(),
         skipped_depth: 0,

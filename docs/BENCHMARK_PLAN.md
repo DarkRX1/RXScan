@@ -27,3 +27,14 @@ The first executable network benchmark is Phase 5. It uses only controlled fixtu
 - Phase 16: `docs/benchmark-results/phase16-analysis-prioritization.md` (controlled offline attention-ranking fixture: assets/relationships/findings/diff records analyzed, generated/emitted signals, attention-band/category counts, `/proc/self/status` peak RSS, release binary size). Reproduce with `cargo run --example phase16_bench` and `cargo build --release && stat -c '%s' target/release/rxscan`. Offline only; `network_requests=0`; attention is not severity.
 - Phase 17: `docs/benchmark-results/phase17-reporting.md` (controlled offline reporting fixture: rendered human/JSON/JSONL/raw bytes, render latency, summary-only latency, diff/analysis integration, `/proc/self/status` peak RSS, release binary size). Reproduce with `cargo run --example phase17_bench` and `cargo build --release && stat -c '%s' target/release/rxscan`. Offline only; `network_requests=0`; raw export is semantic data, not network payloads.
 - Phase 18: `docs/benchmark-results/phase18-project-graph.md` (controlled offline project-graph fixture: multiple scans, 1000+ entities/relationships/observations, findings/change/analysis refs, initial/incremental/duplicate import timing, project open/summary/lookup/neighbor timing, duplicate-avoidance and disk-growth accounting, `/proc/self/status` peak RSS, release binary size, `threads_used=1`). Reproduce with `cargo run --example phase18_bench` and `cargo build --release && stat -c '%s' target/release/rxscan`. Offline only; `network_requests=0`; single-threaded; no daemon/watcher/indexer.
+- Phase 19: `docs/benchmark-results/phase19-performance-hardening.md` (large-scale hardening across scheduler/TCP/web/persistence/diff/analysis/report/project: bounded queues, fairness, cancellation/deadline under load, 65,535-port structure, FD bounds and exhaustion, duplicate storms, level/speed invariance, IPv6, malformed/failure storms, backpressure, startup laziness, multitasking bounds, `/proc` CPU/RSS methodology, release binary delta). Reproduce with `cargo run --example phase19_bench`, `cargo test --test phase19_performance`, and `cargo build --release && stat -c '%s' target/release/rxscan`. Loopback/synthetic fixtures only; no public targets; no competitor claims.
+
+## Catching regressions without brittle timing
+
+Timing assertions are structural, never absolute: assert `queue_peak <=
+capacity`, `active_peak <= concurrency`, `fd_peak <= max_concurrent`,
+`requests == expected`, `duplicates == 0`, and bounded-stop with generous
+thresholds (seconds, not milliseconds). CI machines vary; debug builds run
+5–20x slower than release. Report wall/CPU/RSS as observations, compare only
+same-machine same-fixture runs, and treat extreme structural regressions
+(cap violations, task loss, unbounded growth) as hard failures.

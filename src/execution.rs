@@ -26,7 +26,7 @@
 
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, BinaryHeap},
+    collections::{BTreeMap, BinaryHeap, HashSet},
     future::Future,
     net::IpAddr,
     pin::Pin,
@@ -847,6 +847,15 @@ pub struct SchedulerReport {
     pub cancelled: Vec<TaskId>,
     pub timed_out: Vec<TaskId>,
     pub skipped: Vec<TaskId>,
+    /// Peak scheduler-queue occupancy observed during the run.
+    ///
+    /// Phase 19 observability: proves the bounded queue stayed within
+    /// `queue_capacity()` without changing admission or ordering truth.
+    pub queue_peak: usize,
+    /// Peak simultaneously active worker slots observed during the run.
+    ///
+    /// Always `<= effective_concurrency() <= MAX_CONCURRENCY_HARD_LIMIT`.
+    pub active_peak: usize,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -1073,8 +1082,12 @@ impl Scheduler {
         // and its late result is discarded without touching `active`.
         let mut active = 0usize;
         let mut report = SchedulerReport::default();
+        // Phase 19 peak observability: O(1) counters, no semantic effect.
+        let mut queue_peak = 0usize;
+        let mut active_peak = 0usize;
         loop {
             self.promote_ready_tasks()?;
+            queue_peak = queue_peak.max(self.queue.len());
             // Dispatch loop: never let a retry-delayed task head-of-line
             // block other ready tasks. Not-ready pops are stashed aside and
             // requeued after the dispatch window.
@@ -1137,7 +1150,9 @@ impl Scheduler {
                 self.emit_task(&task_id, SchedulerEventKind::TaskStarted, None);
                 spawn_worker(module, context, sender.clone(), task_id_for_worker, attempt);
                 active += 1;
+                active_peak = active_peak.max(active);
             }
+            queue_peak = queue_peak.max(self.queue.len());
             // Requeue deferred (not-yet-ready) tasks without blocking others.
             // Queue has free slots (we just popped), so push should succeed;
             // if saturated anyway, leave them Pending for the next loop.
@@ -1247,26 +1262,38 @@ impl Scheduler {
                 }
             }
         }
+        // Final sweep: reconcile tasks that reached a terminal state without
+        // passing through the incremental report paths (e.g. tasks restored
+        // as already-terminal). Phase 19: HashSet membership keeps this
+        // linear instead of quadratic in task count; emission order is
+        // unchanged (BTreeMap task order, missing entries appended).
+        let completed: HashSet<TaskId> = report.completed.iter().cloned().collect();
+        let failed: HashSet<TaskId> = report.failed.iter().cloned().collect();
+        let cancelled: HashSet<TaskId> = report.cancelled.iter().cloned().collect();
+        let timed_out: HashSet<TaskId> = report.timed_out.iter().cloned().collect();
+        let skipped: HashSet<TaskId> = report.skipped.iter().cloned().collect();
         for (task_id, record) in &self.tasks {
             match record.task.state {
-                TaskState::Failed if !report.failed.contains(task_id) => {
+                TaskState::Failed if !failed.contains(task_id) => {
                     report.failed.push(task_id.clone())
                 }
-                TaskState::Cancelled if !report.cancelled.contains(task_id) => {
+                TaskState::Cancelled if !cancelled.contains(task_id) => {
                     report.cancelled.push(task_id.clone())
                 }
-                TaskState::TimedOut if !report.timed_out.contains(task_id) => {
+                TaskState::TimedOut if !timed_out.contains(task_id) => {
                     report.timed_out.push(task_id.clone())
                 }
-                TaskState::Skipped if !report.skipped.contains(task_id) => {
+                TaskState::Skipped if !skipped.contains(task_id) => {
                     report.skipped.push(task_id.clone())
                 }
-                TaskState::Succeeded if !report.completed.contains(task_id) => {
+                TaskState::Succeeded if !completed.contains(task_id) => {
                     report.completed.push(task_id.clone())
                 }
                 _ => {}
             }
         }
+        report.queue_peak = queue_peak;
+        report.active_peak = active_peak;
         Ok(report)
     }
     fn promote_ready_tasks(&mut self) -> Result<(), SchedulerError> {

@@ -293,22 +293,37 @@ pub fn save_checkpoint(
 ) -> Result<CheckpointMetrics, PersistenceError> {
     state.validate()?;
     let started = Instant::now();
-    let bytes = serde_json::to_vec_pretty(state)?;
-    if bytes.len() as u64 > MAX_CHECKPOINT_BYTES {
-        return Err(PersistenceError::SizeLimit);
-    }
+    // Phase 19: stream serialization straight to the temp file instead of
+    // materializing the whole checkpoint as an in-RAM `Vec<u8>` first.
+    // `to_writer_pretty` uses the same pretty formatter as `to_vec_pretty`,
+    // so on-disk bytes are unchanged; peak save memory drops from
+    // O(checkpoint) buffer + file write to an 8 KiB stream buffer.
+    // The size cap is enforced from the finished temp file (removed on
+    // overflow) instead of from the former intermediate buffer.
     let tmp = temp_path(path);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     {
-        let mut file = File::create(&tmp)?;
-        file.write_all(&bytes)?;
-        file.flush()?;
-        file.sync_all()?;
+        let file = File::create(&tmp)?;
+        let mut writer = std::io::BufWriter::with_capacity(8192, file);
+        if let Err(error) = serde_json::to_writer_pretty(&mut writer, state) {
+            drop(writer);
+            let _ = fs::remove_file(&tmp);
+            return Err(PersistenceError::Json(error));
+        }
+        if let Err(error) = writer.flush().and_then(|()| writer.get_ref().sync_all()) {
+            drop(writer);
+            let _ = fs::remove_file(&tmp);
+            return Err(PersistenceError::Io(error));
+        }
+    }
+    let size = fs::metadata(&tmp).map(|meta| meta.len()).unwrap_or(0);
+    if size > MAX_CHECKPOINT_BYTES {
+        let _ = fs::remove_file(&tmp);
+        return Err(PersistenceError::SizeLimit);
     }
     fs::rename(&tmp, path)?;
-    let size = bytes.len() as u64;
     Ok(state.metrics(size, started.elapsed().as_millis()))
 }
 

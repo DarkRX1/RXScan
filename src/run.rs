@@ -371,9 +371,12 @@ fn write_outputs<W: std::io::Write>(
         writer.write_scheduler_event(event)?;
     }
     // Deterministic order: sort module outputs by task ID.
-    let mut ordered = module_outputs.to_vec();
+    // Phase 19: sort borrowed references instead of cloning every output
+    // (each carries four Vecs) into a temporary owned Vec first.
+    let mut ordered: Vec<&(crate::execution::TaskId, crate::execution::ModuleOutput)> =
+        module_outputs.iter().collect();
     ordered.sort_by(|left, right| left.0.0.cmp(&right.0.0));
-    for (_, output) in &ordered {
+    for (_, output) in ordered {
         for asset in &output.assets {
             writer.write_asset(asset)?;
         }

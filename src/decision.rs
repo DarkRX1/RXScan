@@ -327,12 +327,11 @@ pub fn open_ports_from_output(output: &ModuleOutput) -> Vec<OpenPortFact> {
             });
         }
     }
-    facts.sort_by(|left, right| {
-        left.address
-            .to_string()
-            .cmp(&right.address.to_string())
-            .then(left.port.cmp(&right.port))
-    });
+    // Phase 19: cache the string key once per fact. Ordering is unchanged
+    // (address rendered as text, then port); the previous comparator
+    // re-rendered both addresses on every comparison (O(n log n) heap
+    // allocations for large open sets).
+    facts.sort_by_cached_key(|fact| (fact.address.to_string(), fact.port));
     facts.dedup();
     facts
 }

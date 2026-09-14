@@ -195,3 +195,15 @@ Invalid values fail fast (exit 2): zero/negative-equivalent, values exceeding ha
 - `rxscan project summary|show|neighbors|scans|findings|changes|attention` are offline bounded queries. `neighbors` defaults to depth 1 (hard max 3) and limit 100 (hard max 1000); over-max values are clamped explicitly. `findings|changes|attention` accept an optional entity filter and `--limit` (hard max 1000). Human output is concise and sanitized; `--json` prints deterministic pretty JSON; `--jsonl` streams one object per line.
 - Importing the same semantic scan twice is a duplicate no-op. Repeated identical imports keep storage stable; small-delta imports grow with the delta only.
 - Project mode keeps options minimal by design: no graph tuning knobs, no TOML configuration, no daemon/watcher/indexer flags. It never rescans, never widens scope, and never grants authorization. Hard caps: 16 MiB file, 10k scans, 200k entities, 300k relationships, 500k observations, 50k findings, 100k changes, 100k analysis refs, 256 observations per entity.
+
+## Phase 19 performance policy
+
+- Phase 19 adds no tuning knob. `level` still controls breadth/depth and
+  `speed` still controls pressure (concurrency/timeout/retry); the existing
+  budgets (`max_tasks`, `max_retries`, `max_concurrency`,
+  `max_execution_time`, `max_evidence_bytes`, `max_hosts`) remain the only
+  resource controls.
+- Worker/concurrency policy derives deterministically from speed+budget with
+  hard maxima (scheduler 64, TCP 256); `available_parallelism` is
+  informational only and never sizes worker pools. No expert-only flags were
+  added; simple UX is preserved.

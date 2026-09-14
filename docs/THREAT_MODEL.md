@@ -152,3 +152,33 @@ Modules never receive authority to bypass policy. Discovery may be recorded with
 - Human output sanitizes control characters and bounds field length; machine JSON/JSONL preserve data via JSON encoding. Oversized ids, NUL bytes, path tricks, and forbidden credential/raw markers are rejected on import and validated on load.
 - Concurrent writers are detected via monotonic revision plus fingerprint mismatch (atomic temp/flush/sync/rename, no silent last-write-wins). Parent-directory fsync and power-loss durability are NOT IMPLEMENTED; the race window is documented.
 - Project membership is observational only: external (`scope=out_of_scope`) entities stay marked and never authorize scanning, widen scope, or trigger active work. P15 owns change certainty (`InconclusiveMissing` never becomes removed); P16 owns scoring (project never rescores).
+
+## Phase 19 resource-exhaustion safety notes
+
+- Every grow-with-work container derives from an explicit budget or hard
+  constant (scheduler queue/tasks, TCP window 16..128 with 256 hard cap,
+  per-module admit/request/event caps, registry caps, 8 MiB checkpoint and
+  16 MiB project file caps). There is no hidden unbounded queue; saturation
+  is backpressure, never abort or task loss.
+- Target/URL/DNS/project-import explosions collapse early: deterministic IDs
+  dedup before admission, registries enforce exact caps (contact 4096
+  fail-open documented, DNS/fuzz fail-closed), and duplicate storms cause no
+  proportional duplicate work or contact.
+- Malformed persisted/web/DNS/project inputs (tested up to 5 MiB garbage)
+  fail bounded and panic-free; invalid checkpoints/projects are rejected
+  before mutation with zero network.
+- Slow peers cannot accumulate unbounded state: read slices, body/header
+  caps, and truncation flags bound every fetch; slow output sinks complete
+  with exact bytes and no output queue growth.
+- Descriptor exhaustion degrades cleanly: `fd_peak` observability proves the
+  `<= max_concurrent` bound, and a 64-FD child-process scan accounts every
+  port with no panic, spin, or misclassification.
+- Out-of-scope work is rejected before expensive initialization or contact
+  (zero executions observed); offline commands (`diff`, `analyze`, `report`,
+  `project`) hold `network_requests=0` in code and measurement.
+- Known gap: no external handle can cancel a running scheduler from another
+  thread while `run()` holds `&mut`; runaway runs are still bounded by
+  per-task timeouts and the global execution budget. Process kill remains the
+  only out-of-band abort.
+- Phase 19 adds no new attack surface: no new protocols, payloads, parsers,
+  dependencies, daemons, or network paths.

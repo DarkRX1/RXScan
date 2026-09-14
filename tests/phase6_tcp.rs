@@ -92,6 +92,8 @@ impl PortScanner for FakeScanner {
                     truncated: true,
                     cancelled: true,
                     unscanned,
+                    // Fake holds no real sockets; sustained FD pressure is zero.
+                    fd_peak: 0,
                 };
             }
             if let Some(deadline) = config.deadline {
@@ -102,6 +104,7 @@ impl PortScanner for FakeScanner {
                         truncated: true,
                         cancelled: false,
                         unscanned,
+                        fd_peak: 0,
                     };
                 }
             }
@@ -123,6 +126,8 @@ impl PortScanner for FakeScanner {
                     truncated: true,
                     cancelled: true,
                     unscanned,
+                    // Fake holds no real sockets; sustained FD pressure is zero.
+                    fd_peak: 0,
                 };
             }
             let state = if self.open.contains(port) {
@@ -154,6 +159,7 @@ impl PortScanner for FakeScanner {
             truncated: false,
             cancelled: false,
             unscanned: 0,
+            fd_peak: 0,
         }
     }
 }
