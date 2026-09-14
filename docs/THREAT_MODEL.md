@@ -29,6 +29,7 @@ RXScan is for authorized, scoped, non-destructive reconnaissance. Its central ri
 | Contextual fuzzing becoming exploit fuzzing | observed GET query context required, inert one-parameter mutations, sensitive-name skip list, no POST/forms/cookies/headers/path traversal/payload banks, neutral behavior-delta output only | 12 |
 | DNS intelligence expanding scope or becoming enumeration | explicit/observed scoped hostnames only, bounded query/record/domain caps, DNS observations do not authorize third-party active follow-up, no brute-force subdomain enumeration, no zone transfer automation | 13 |
 | Checkpoint resume widening authority or replaying unsafe state | checkpoint file treated as untrusted input, schema/size/count validation before execution, persisted scope is authoritative maximum, resume goes through Scheduler, completed work stays completed, raw bodies/packets/secrets excluded | 14 |
+| Diffing corrupt checkpoints or producing false removals | both inputs pass Phase 14 validation first, diff is offline, stable semantic keys ignore timestamps/paths/speed, missing entities require comparable coverage for confirmed removal, network-error states downgrade certainty | 15 |
 | Candidate path escape | same-origin URL construction, traversal/authority/control/backslash rejection, canonical dedup, scope check before every contact | 11 |
 
 Modules never receive authority to bypass policy. Discovery may be recorded without authorizing active work against a new asset.
@@ -115,4 +116,11 @@ Modules never receive authority to bypass policy. Discovery may be recorded with
 - Checkpoints are untrusted JSON input. RXScan validates schema version, file size, counts, task scope, graph references, and registry bounds before any resume execution.
 - Checkpoints persist semantic state only. They do not contain sockets, thread handles, raw HTTP bodies, raw DNS packets, TLS sessions, credentials, cookies, or wordlists.
 - Resume cannot widen persisted scope. Running/ready tasks are restored as pending/interrupted rather than falsely completed.
-- Phase 14 does not implement encrypted checkpoints, tamper-proof signatures, automatic crash recovery, or Phase 15 scan diff/change detection.
+- Phase 14 does not implement encrypted checkpoints, tamper-proof signatures, automatic crash recovery, or checkpoint history storage.
+
+## Phase 15 diff safety notes
+
+- Diff inputs are untrusted checkpoints and must pass Phase 14 validation before normalization.
+- Diff never contacts checkpoint-provided targets, starts Scheduler work, executes commands, mutates checkpoints, or widens scope.
+- Diff records are capped at 10000 detailed entries. Aggregate counts continue and truncation is explicit.
+- Phase 15 reports semantic change only. It does not assign severity, risk, regression status, or Phase 16 prioritization.

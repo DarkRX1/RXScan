@@ -6,6 +6,7 @@ pub mod contact;
 pub mod content;
 pub mod crawl;
 pub mod decision;
+pub mod diff;
 pub mod discovery;
 pub mod dns;
 pub mod execution;

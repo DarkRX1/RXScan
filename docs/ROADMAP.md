@@ -19,7 +19,7 @@ Each phase requires tests, benchmark/regression evidence where applicable, docum
 | 12 | Contextual Fuzzing: bounded safe GET query-parameter mutations from observed inputs, response delta intelligence, no exploit payloads | Complete |
 | 13 | DNS / Asset Intelligence: bounded native DNS A/AAAA/CNAME/MX/NS/TXT/PTR observations, DNS asset graph, scoped follow-up proposals | Complete (current) |
 | 14 | Persistence / Resume: bounded versioned checkpoints, atomic save, validated resume through Scheduler, no scan diffing | Complete (current) |
-| 15 | Scan Diff / Change Detection | Not implemented |
+| 15 | Scan Diff / Change Detection: offline semantic checkpoint comparison with coverage-aware certainty | Complete (current) |
 | 16–19 | Decision engine workflows, API workflows, checks, graph/correlation | Not implemented |
 | 20–24 | Outputs, resume/diff/projects, packs, benchmark lab, releases | Not implemented |
 
@@ -40,6 +40,8 @@ Phase 12 adds contextual behavioral fuzzing for already-observed safe GET query 
 Phase 13 adds bounded DNS / asset intelligence. `DnsProbe` tasks run a native UDP DNS client with defensive packet parsing and support A, AAAA, CNAME, MX, NS, TXT, and PTR observations. DNS records become compact typed events/evidence/assets/relationships; A/AAAA results may propose existing HostDiscovery follow-ups only through the Decision Engine and only when the resulting IP is independently in scope. DNS observations do not authorize third-party infrastructure. Wildcard DNS, SRV, custom CLI resolver UX, TCP fallback, DoH/DoT, brute-force subdomain enumeration, and AXFR/IXFR automation are NOT IMPLEMENTED.
 
 Phase 14 adds lightweight checkpoint/resume for one scan. `--checkpoint` writes a schema-versioned JSON checkpoint with semantic `ScanPlan`, task snapshots, compact outputs, and bounded registry state. `--resume` validates the checkpoint before reconstructing tasks through the Scheduler. Completed tasks are not re-run; running/ready tasks become pending/interrupted. Scope cannot be widened. Phase 15 scan comparison, history analytics, migration, encryption, and automatic crash recovery are NOT IMPLEMENTED.
+
+Phase 15 adds on-demand offline scan diffing: `rxscan diff <old.rxscan> <new.rxscan>` loads two validated Phase 14 checkpoints, normalizes assets/relationships/findings plus task coverage, and emits deterministic change records. Missing entities are only confirmed removed when comparable coverage exists; reduced coverage, partial tasks, or network-error task states produce `InconclusiveMissing`. Speed, scan IDs, timestamps, checkpoint paths, and ordering are not semantic. Phase 16 prioritization/severity/risk analysis is NOT IMPLEMENTED.
 
 ## Phase 9 exit criteria
 

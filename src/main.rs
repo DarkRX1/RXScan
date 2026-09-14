@@ -1,7 +1,12 @@
 use clap::Parser;
-use rxscan::{cli::Cli, plan::ScanPlan, run};
+use rxscan::{cli::Cli, diff, plan::ScanPlan, run};
 
 fn main() {
+    let args = std::env::args().collect::<Vec<_>>();
+    if args.get(1).is_some_and(|arg| arg == "diff") {
+        run_diff(&args);
+        return;
+    }
     let cli = Cli::parse();
     let explain_only = cli.explain;
     if explain_only {
@@ -36,6 +41,48 @@ fn main() {
         Err(error) => {
             eprintln!("rxscan: {error}");
             std::process::exit(error.exit_code());
+        }
+    }
+}
+
+fn run_diff(args: &[String]) {
+    let mut json = false;
+    let mut summary_only = false;
+    let mut paths = Vec::new();
+    for arg in &args[2..] {
+        match arg.as_str() {
+            "--json" => json = true,
+            "--summary-only" => summary_only = true,
+            "--jsonl" => json = true,
+            value => paths.push(value.to_owned()),
+        }
+    }
+    if paths.len() != 2 {
+        eprintln!(
+            "rxscan diff: usage: rxscan diff [--json|--jsonl] [--summary-only] <old.rxscan> <new.rxscan>"
+        );
+        std::process::exit(2);
+    }
+    let options = diff::DiffOptions {
+        summary_only,
+        max_records: diff::MAX_DIFF_RECORDS,
+    };
+    match diff::diff_checkpoints(
+        std::path::Path::new(&paths[0]),
+        std::path::Path::new(&paths[1]),
+        options,
+    ) {
+        Ok((report, _, _, _)) if json => match diff::to_json(&report) {
+            Ok(text) => println!("{text}"),
+            Err(error) => {
+                eprintln!("rxscan diff: {error}");
+                std::process::exit(1);
+            }
+        },
+        Ok((report, _, _, _)) => println!("{}", diff::human_summary(&report)),
+        Err(error) => {
+            eprintln!("rxscan diff: {error}");
+            std::process::exit(1);
         }
     }
 }

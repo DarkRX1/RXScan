@@ -151,4 +151,13 @@ Invalid values fail fast (exit 2): zero/negative-equivalent, values exceeding ha
 - Resume uses the persisted `ScanPlan` as the semantic authority. `--speed` may be overridden because speed is pressure only; target, scope, level, and goal are not widened by resume.
 - Running/ready tasks are restored as pending/interrupted work. Succeeded tasks remain completed and are not re-run.
 - Persisted registries include compact ContactRegistry entries, origin baseline hashes, fuzz origin-budget consumption, DNS query keys, and DNS per-domain task consumption. Raw HTTP bodies, DNS packets, sockets, TLS sessions, cookies, credentials, and wordlists are not persisted.
-- Automatic crash recovery, checkpoint migration, encrypted checkpoints, output-history diffing, and Phase 15 scan comparison are NOT IMPLEMENTED.
+- Automatic crash recovery, checkpoint migration, encrypted checkpoints, and output-history storage are NOT IMPLEMENTED.
+
+## Phase 15 diff policy
+
+- `rxscan diff <old.rxscan> <new.rxscan>` compares two Phase 14 checkpoints offline. It does not compile targets, start the Scheduler, or contact DNS/TCP/HTTP services.
+- `--json`/`--jsonl` prints deterministic structured diff output; default output is a compact human summary. `--summary-only` suppresses detailed records while preserving aggregate counts.
+- Diff schema version is `1`. Detailed records are capped at 10000; extra records are counted and marked truncated.
+- Speed, scan IDs, timestamps, checkpoint paths, and insertion order are not semantic differences.
+- Missing assets/relationships/findings are confirmed removed only with comparable completed coverage. Reduced level/module coverage, incomplete tasks, and timeout/error/cancelled task states produce inconclusive missing records.
+- Phase 15 does not assign severity, risk, regression labels, alerts, history storage, or Phase 16 prioritization.
