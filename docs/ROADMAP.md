@@ -177,3 +177,11 @@ TargetSpec, Scope Guard, ScanPlan, stable IDs/events, scheduler, speed/budgets, 
 - Signals have stable IDs, typed categories/reasons, bounded evidence references, bounded related assets, deterministic ordering, duplicate collapse, and output truncation metadata.
 - Analysis works with and without diff; diff-backed new/changed/corroborated signals rank above equivalent persistent observations, while inconclusive records retain uncertainty penalties.
 - CLI exposure is minimal (`rxscan analyze`) and does not implement Phase 17 report templates, HTML/Markdown/PDF exports, dashboards, or alerting.
+
+## Phase 17 exit criteria
+
+- Deterministic offline reporting consumes a validated Phase 14 checkpoint plus optional Phase 15 diff and Phase 16 analysis. No Scheduler/module/network execution occurs.
+- One normalized report model feeds human, JSON, JSONL, and raw semantic renderers; renderers do not independently recompute or reinterpret scan/diff/analysis semantics.
+- Human output is concise, terminal-safe, bounded, and preserves wording distinctions: attention is not severity, finding confidence is separate from attention score, and inconclusive missing is not removed.
+- JSON output is one deterministic report model; JSONL emits independently parseable records; raw export is typed semantic persisted data, not raw HTTP/DNS/TLS payloads.
+- CLI exposure is minimal (`rxscan report`) with format, diff, analysis, summary-only, top-N, and output-path controls. HTML, PDF, template engines, project history, graph mode, dashboards, and Phase 18 storage are NOT IMPLEMENTED.

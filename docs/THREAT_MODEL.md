@@ -132,3 +132,12 @@ Modules never receive authority to bypass policy. Discovery may be recorded with
 - Attention score is not severity, exploitability, CVSS, or vulnerability likelihood. Inconclusive Phase 15 certainty remains inconclusive and receives an uncertainty penalty rather than an upgraded conclusion.
 - Generated labels are bounded and control characters are stripped. Signals keep evidence/asset references rather than copying raw HTTP bodies, DNS packets, banners, credentials, cookies, or large evidence bodies.
 - Output is capped and sorted deterministically. Phase 16 does not implement report templates, alerts, dashboards, or historical project storage.
+
+## Phase 17 reporting safety notes
+
+- Reporting inputs are untrusted checkpoints and optional offline diff/analysis products. Checkpoint loading reuses Phase 14 validation before any report model is built.
+- Reporting is offline: it never starts the Scheduler and never contacts host discovery, TCP, service probing, DNS, HTTP/TLS, crawler, content discovery, or fuzz modules.
+- Human-visible persisted strings are sanitized for control characters and bounded in length to prevent terminal escape injection and multiline spoofing. JSON/JSONL preserve semantic strings through JSON encoding rather than destructive display sanitization.
+- Output paths are treated as filesystem IO only, never shell commands. Report output refuses to overwrite the current or baseline checkpoint path.
+- Raw export is typed semantic data: assets, relationships, evidence metadata, findings, task snapshots, registries, diff, and analysis. It does not reintroduce raw HTTP bodies, DNS packets, TLS records, sockets, credentials, cookies, or project history.
+- Phase 17 does not implement HTML/PDF/template engines, project history, graph mode, scan databases, trend analysis, severity scoring, or vulnerability inference.

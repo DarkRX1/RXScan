@@ -178,3 +178,12 @@ Invalid values fail fast (exit 2): zero/negative-equivalent, values exceeding ha
 - Attention bands are `HighAttention` 80–100, `MediumAttention` 50–79, `LowAttention` 20–49, and `Informational` 0–19. These are not vulnerability severity labels.
 - Per-signal evidence references and related asset references are each capped at 16.
 - Phase 16 does not expose scoring weights as configuration knobs and does not implement Phase 17 reporting/export templates.
+
+## Phase 17 reporting policy
+
+- `rxscan report <scan.rxscan>` loads a validated Phase 14 checkpoint and writes a compact human summary to stdout.
+- `--format human|json|jsonl|raw` selects the renderer. JSON is one full report model. JSONL emits one typed JSON object per line. Raw is versioned semantic JSON containing persisted typed tasks/outputs/registries plus optional diff/analysis; it is not a debug dump and does not contain HTTP bodies or DNS packets.
+- `--diff <old.rxscan>` computes a Phase 15 offline diff and renders it without changing `InconclusiveMissing` into removed. `--analysis` computes Phase 16 offline analysis and renders attention bands/scores without changing finding confidence or severity.
+- `--summary-only` suppresses detailed human sections while preserving aggregate counts. `--top N` controls human attention rows and is capped at 100.
+- `--output <path>` writes atomically via temp file, flush, file sync, and rename. It rejects output paths that are the same as the current or baseline checkpoint. Parent-directory fsync and power-loss durability guarantees are NOT IMPLEMENTED.
+- Reporting has no TOML configuration and adds no production dependencies. It never starts the Scheduler or contacts host discovery, TCP, service, DNS, HTTP/TLS, crawler, content discovery, or fuzz modules.
