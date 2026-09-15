@@ -399,8 +399,7 @@ fn main() {
         }
     });
     let content_plan = plan_for("127.0.0.1");
-    let content_policy =
-        ContentDiscoveryPolicy::new(5, ScanGoal::Content, SpeedSetting::Numeric(50));
+    let content_policy = ContentDiscoveryPolicy::new(5, ScanGoal::Web, SpeedSetting::Numeric(50));
     let content_module = ContentDiscoveryModule::new(content_policy, Arc::new(AllowAll));
     let origin = WebTarget::parse(&format!("http://127.0.0.1:{fixture_port}/")).unwrap();
     let content_params = content_task_params(&origin, "seed", Some(&wordlist_path));

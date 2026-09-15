@@ -6,6 +6,7 @@
 use std::{
     collections::BTreeMap,
     fs,
+    io::{Read, Write},
     net::{IpAddr, TcpListener},
     sync::{
         Arc,
@@ -239,6 +240,50 @@ fn open_ports_in(output: &ModuleOutput) -> Vec<u16> {
                 .map(|port| port as u16)
         })
         .collect()
+}
+
+fn bind_default_scan_listener() -> (TcpListener, u16) {
+    for port in automatic_ports_for_level(3)
+        .into_iter()
+        .filter(|port| *port >= 1024)
+    {
+        if let Ok(listener) = TcpListener::bind(("127.0.0.1", port)) {
+            return (listener, port);
+        }
+    }
+    panic!("no bindable high port in the default scan set");
+}
+
+fn closed_default_port(except: u16) -> u16 {
+    automatic_ports_for_level(3)
+        .into_iter()
+        .filter(|port| *port >= 1024 && *port != except)
+        .find(|port| !std::net::TcpStream::connect(("127.0.0.1", *port)).is_ok())
+        .expect("no closed high port in the default scan set")
+}
+
+fn read_jsonl_payloads(path: &std::path::Path) -> Vec<serde_json::Value> {
+    fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect()
+}
+
+/// Serializes the full-default-scan tests in this binary.
+///
+/// Each binds real loopback listeners on default-set ports while a sibling
+/// thread scans all 100 default ports: without serialization the scans
+/// cross-find each other's fixtures (extra opens) and a "closed" pick can
+/// flip open mid-scan. Ephemeral `:0` listeners elsewhere cannot collide
+/// (OS ephemeral range sits above the default set), so only the three
+/// full-default tests share this lock.
+static DEFAULT_SCAN_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+fn hold_default_scan_lock() -> std::sync::MutexGuard<'static, ()> {
+    DEFAULT_SCAN_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap()
 }
 
 // ---------- port states ----------
@@ -731,7 +776,7 @@ fn level_changes_automatic_breadth_and_explicit_wins() {
     let l1_ports = l1.ports_for_task(Some("common")).ports;
     let l5_ports = l5.ports_for_task(Some("common")).ports;
     assert!(l1_ports.len() < l5_ports.len());
-    assert!(l5_ports.len() <= 32);
+    assert_eq!(l5_ports.len(), 1000);
     // Explicit operator intent is identical at every level.
     let explicit = TcpPortSelection::Explicit(vec![8080]);
     let at_l1 = TcpScanPolicy::new(
@@ -752,6 +797,159 @@ fn level_changes_automatic_breadth_and_explicit_wins() {
     // Eligibility helper matches lowering intent.
     assert!(port_eligible_for_plan(ScanGoal::Recon, 3, false));
     assert!(port_eligible_for_plan(ScanGoal::Recon, 1, true));
+}
+
+#[test]
+fn explicit_range_policy_is_lossless_through_task_params() {
+    let plan = compile(&["127.0.0.1", "--ports", "1-1024", "--level", "1"]);
+    let tasks = rxscan::lowering::lower_plan_to_tasks(&plan).unwrap();
+    let port_task = tasks
+        .iter()
+        .find(|task| task.kind == TaskKind::PortDiscovery)
+        .expect("explicit ports produce a port task");
+    assert_eq!(
+        port_task.params.get("ports").map(String::as_str),
+        Some("explicit:1-1024")
+    );
+    let policy = TcpScanPolicy::new(plan.level, plan.goal, plan.tcp_ports.clone(), plan.speed);
+    let resolved = policy.ports_for_task(port_task.params.get("ports").map(String::as_str));
+    assert_eq!(resolved.ports.len(), 1024);
+    assert_eq!(resolved.ports.first(), Some(&1));
+    assert_eq!(resolved.ports.last(), Some(&1024));
+}
+
+#[test]
+fn default_scan_lowers_tcp_discovery() {
+    let plan = compile(&["127.0.0.1"]);
+    assert_eq!(plan.level, 3);
+    let tasks = rxscan::lowering::lower_plan_to_tasks(&plan).unwrap();
+    assert!(
+        tasks
+            .iter()
+            .any(|task| task.kind == TaskKind::PortDiscovery),
+        "rxscan TARGET must include real TCP discovery by default"
+    );
+}
+
+#[test]
+fn default_recon_executes_tcp_and_reports_default_open_service() {
+    let _lock = hold_default_scan_lock();
+    let (listener, open_port) = bind_default_scan_listener();
+    let closed_port = closed_default_port(open_port);
+    let connections = Arc::new(AtomicUsize::new(0));
+    let connections_thread = connections.clone();
+    listener.set_nonblocking(true).unwrap();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_thread = stop.clone();
+    let handle = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !stop_thread.load(Ordering::SeqCst) && Instant::now() < deadline {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    connections_thread.fetch_add(1, Ordering::SeqCst);
+                    let _ = stream.write_all(b"SSH-2.0-DefaultProof_1.0\r\n");
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+                    let mut buf = [0u8; 256];
+                    let _ = stream.read(&mut buf);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("rxscan-default-ledger-{stamp}.jsonl"));
+    let cli = Cli::try_parse_from([
+        "rxscan",
+        "127.0.0.1",
+        "--scope",
+        "127.0.0.1",
+        "--speed",
+        "100",
+        "--output",
+        path.to_str().unwrap(),
+    ])
+    .unwrap();
+    let report = rxscan::run::execute(cli).unwrap();
+    stop.store(true, Ordering::SeqCst);
+    handle.join().unwrap();
+
+    let default_ports = automatic_ports_for_level(3);
+    assert!(default_ports.contains(&open_port));
+    assert!(default_ports.contains(&closed_port));
+    assert!(connections.load(Ordering::SeqCst) >= 2);
+
+    let human = rxscan::run::human_summary(&report);
+    assert!(human.contains(&format!("{open_port}/tcp")));
+    assert!(human.contains("ssh"));
+
+    let payloads = read_jsonl_payloads(&path);
+    let port_completed = payloads
+        .iter()
+        .find(|value| {
+            value["record_type"] == "event" && value["payload"]["kind"] == "port_scan_completed"
+        })
+        .expect("port_scan_completed event");
+    let details = &port_completed["payload"]["details"]["data"];
+    assert_eq!(
+        details["ports_requested"].as_u64(),
+        Some(default_ports.len() as u64)
+    );
+    assert_eq!(details["unscanned"].as_u64(), Some(0));
+    assert_eq!(details["truncated"].as_bool(), Some(false));
+    let requested: Vec<u16> = details["requested_ports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_u64().unwrap() as u16)
+        .collect();
+    let attempted: Vec<u16> = details["attempted_ports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_u64().unwrap() as u16)
+        .collect();
+    assert_eq!(requested, default_ports);
+    assert_eq!(attempted, default_ports);
+    assert!(
+        details["open_ports"]
+            .as_array()
+            .unwrap()
+            .contains(&open_port.into())
+    );
+    assert_eq!(details["counts"]["open"].as_u64(), Some(1));
+    assert_eq!(
+        details["counts"]
+            .as_object()
+            .unwrap()
+            .values()
+            .map(|value| value.as_u64().unwrap())
+            .sum::<u64>(),
+        default_ports.len() as u64
+    );
+    assert!(payloads.iter().any(|value| {
+        value["record_type"] == "event"
+            && value["payload"]["kind"] == "port_closed"
+            && value["payload"]["details"]["data"]["port"].as_u64() == Some(u64::from(closed_port))
+    }));
+    assert!(payloads.iter().any(|value| {
+        value["record_type"] == "event"
+            && value["payload"]["kind"] == "service_identified"
+            && value["payload"]["details"]["data"]["port"].as_u64() == Some(u64::from(open_port))
+            && value["payload"]["details"]["data"]["protocol"] == "ssh"
+    }));
+    assert!(
+        report
+            .open_ports_summary
+            .contains(&format!("{open_port}/tcp"))
+    );
+    fs::remove_file(path).ok();
 }
 
 // ---------- scope ----------
@@ -1292,4 +1490,442 @@ fn ipv6_target_with_explicit_scope_scans_permitted_only() {
             .any(|event| { format!("{:?}", event.kind) == "PortScanCompleted" })
     );
     let _: IpAddr = "::1".parse().unwrap();
+}
+
+#[test]
+fn default_recon_known_closed_port_is_proven_scanned_not_open() {
+    // A known-closed default port must still appear in the execution ledger
+    // (requested + attempted) with unscanned == 0, and the human summary
+    // "No open TCP ports observed." is only valid because PortScanCompleted
+    // proves the scan actually ran.
+    let _lock = hold_default_scan_lock();
+    let default_ports = automatic_ports_for_level(3);
+    let closed_port = closed_default_port(0);
+    assert!(default_ports.contains(&closed_port));
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("rxscan-default-closed-{stamp}.jsonl"));
+    let cli = Cli::try_parse_from([
+        "rxscan",
+        "127.0.0.1",
+        "--scope",
+        "127.0.0.1",
+        "--speed",
+        "100",
+        "--output",
+        path.to_str().unwrap(),
+    ])
+    .unwrap();
+    let report = rxscan::run::execute(cli).unwrap();
+    let payloads = read_jsonl_payloads(&path);
+    let completed = payloads
+        .iter()
+        .find(|value| {
+            value["record_type"] == "event" && value["payload"]["kind"] == "port_scan_completed"
+        })
+        .expect("port_scan_completed event");
+    let details = &completed["payload"]["details"]["data"];
+    assert_eq!(details["unscanned"].as_u64(), Some(0));
+    assert_eq!(details["truncated"].as_bool(), Some(false));
+    // Ledger completeness holds regardless of environment opens elsewhere
+    // on loopback: every requested port was attempted exactly once.
+    let counts = details["counts"].as_object().unwrap();
+    let total: u64 = counts.values().map(|value| value.as_u64().unwrap()).sum();
+    assert_eq!(total, default_ports.len() as u64);
+    let requested: Vec<u16> = details["requested_ports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_u64().unwrap() as u16)
+        .collect();
+    let attempted: Vec<u16> = details["attempted_ports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_u64().unwrap() as u16)
+        .collect();
+    assert_eq!(requested, default_ports);
+    assert_eq!(attempted, default_ports);
+    assert!(requested.contains(&closed_port));
+    assert!(attempted.contains(&closed_port));
+    // Closed port has a port_closed event and is never reported open.
+    assert!(payloads.iter().any(|value| {
+        value["record_type"] == "event"
+            && value["payload"]["kind"] == "port_closed"
+            && value["payload"]["details"]["data"]["port"].as_u64() == Some(u64::from(closed_port))
+    }));
+    let open_ports: Vec<u64> = details["open_ports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_u64().unwrap())
+        .collect();
+    assert!(!open_ports.contains(&u64::from(closed_port)));
+    // Human and machine agree: the closed port is not listed as open, and
+    // the summary is truthful about whether a scan completed.
+    let human = rxscan::run::human_summary(&report);
+    assert!(!human.contains(&format!("{closed_port}/tcp")));
+    assert!(!human.contains("no ports were scanned"));
+    if open_ports.is_empty() {
+        assert!(human.contains("No open TCP ports observed."));
+    } else {
+        for port in &open_ports {
+            assert!(human.contains(&format!("{port}/tcp")));
+        }
+    }
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn no_scan_never_reports_no_open_ports() {
+    // Level 1 runs no TCP discovery at all. The human summary must never
+    // imply ports were scanned and found non-open.
+    let cli = Cli::try_parse_from(["rxscan", "127.0.0.1", "--level", "1"]).unwrap();
+    let report = rxscan::run::execute(cli).unwrap();
+    assert_eq!(report.scheduler_report.completed.len(), 1);
+    let human = rxscan::run::human_summary(&report);
+    assert!(
+        !human.contains("No open TCP ports observed."),
+        "must not imply a scan occurred: {human}"
+    );
+    assert!(
+        human.contains("no ports were scanned"),
+        "must state truthfully that no scan completed: {human}"
+    );
+    // Unit-level: empty outputs without PortScanCompleted use the truthful
+    // message; outputs with a completed (empty) scan keep the valid message.
+    let empty: Vec<(rxscan::execution::TaskId, ModuleOutput)> = Vec::new();
+    assert!(rxscan::service_probe::human_service_table(&empty).contains("no ports were scanned"));
+    assert!(
+        rxscan::tcp_discovery::human_open_ports_summary(&empty).contains("no ports were scanned")
+    );
+}
+
+#[test]
+fn human_counts_equal_port_scan_completed_counts() {
+    // Human summary scanner-work numbers must derive from the same typed
+    // PortScanCompleted state JSONL serializes: requested/attempted/open/
+    // closed/filtered/errors/unscanned and identified services.
+    let _lock = hold_default_scan_lock();
+    let (listener, open_port) = bind_default_scan_listener();
+    let closed_port = closed_default_port(open_port);
+    let connections = Arc::new(AtomicUsize::new(0));
+    let connections_thread = connections.clone();
+    listener.set_nonblocking(true).unwrap();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_thread = stop.clone();
+    let handle = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !stop_thread.load(Ordering::SeqCst) && Instant::now() < deadline {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    connections_thread.fetch_add(1, Ordering::SeqCst);
+                    drop(stream);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("rxscan-human-counts-{stamp}.jsonl"));
+    let cli = Cli::try_parse_from([
+        "rxscan",
+        "127.0.0.1",
+        "--scope",
+        "127.0.0.1",
+        "--speed",
+        "100",
+        "--output",
+        path.to_str().unwrap(),
+    ])
+    .unwrap();
+    let report = rxscan::run::execute(cli).unwrap();
+    stop.store(true, Ordering::SeqCst);
+    handle.join().unwrap();
+
+    let payloads = read_jsonl_payloads(&path);
+    let completed = payloads
+        .iter()
+        .find(|value| {
+            value["record_type"] == "event" && value["payload"]["kind"] == "port_scan_completed"
+        })
+        .expect("port_scan_completed event");
+    let details = &completed["payload"]["details"]["data"];
+    let machine = |key: &str| {
+        if key == "requested" {
+            details["ports_requested"].as_u64().unwrap()
+        } else if key == "attempted" {
+            details["attempted_ports"].as_array().unwrap().len() as u64
+        } else if key == "unscanned" {
+            details["unscanned"].as_u64().unwrap()
+        } else {
+            details["counts"][key].as_u64().unwrap()
+        }
+    };
+    let services_machine = payloads
+        .iter()
+        .filter(|value| {
+            value["record_type"] == "event" && value["payload"]["kind"] == "service_identified"
+        })
+        .count();
+    // Typed report fields match the machine ledger exactly.
+    assert_eq!(report.tcp_totals.ports_requested, machine("requested"));
+    assert_eq!(report.tcp_totals.ports_attempted, machine("attempted"));
+    assert_eq!(report.tcp_totals.open, machine("open"));
+    assert_eq!(report.tcp_totals.closed, machine("closed"));
+    assert_eq!(
+        report.tcp_totals.filtered_or_timed_out,
+        machine("filtered_or_timed_out")
+    );
+    assert_eq!(report.tcp_totals.error, machine("error"));
+    assert_eq!(report.tcp_totals.unscanned, machine("unscanned"));
+    assert_eq!(report.services_identified, services_machine);
+    // Human summary renders those same numbers (not task accounting).
+    let human = rxscan::run::human_summary(&report);
+    assert!(
+        human.contains(&format!("{} requested", machine("requested"))),
+        "human must show requested: {human}"
+    );
+    assert!(
+        human.contains(&format!("{} attempted", machine("attempted"))),
+        "human must show attempted: {human}"
+    );
+    assert!(
+        human.contains(&format!("{} open", machine("open"))),
+        "human must show open: {human}"
+    );
+    assert!(
+        human.contains(&format!("{} closed", machine("closed"))),
+        "human must show closed: {human}"
+    );
+    assert!(
+        human.contains(&format!("Services: {services_machine} identified")),
+        "human must show services: {human}"
+    );
+    assert!(human.contains(&format!("{open_port}/tcp")));
+    assert!(!human.contains(&format!("{closed_port}/tcp")));
+    // Scheduler task accounting is demoted to Diagnostics, never primary.
+    let tcp_pos = human.find("TCP discovery").expect("scanner work first");
+    assert!(
+        human.find("Diagnostics").is_some_and(|pos| pos > tcp_pos),
+        "task accounting must follow scanner work: {human}"
+    );
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn speed_changes_pressure_never_scan_semantics() {
+    // Level changes breadth/depth; speed changes pressure only. The same
+    // requested ports at slow / balanced / 100 resolve to identical port
+    // sets end to end, while timeout/concurrency pressure differs.
+    //
+    // Self-contained: fixtures live on ephemeral ports outside the default
+    // set, so sibling default-scan tests can neither find nor steal them.
+    use rxscan::plan::NamedSpeed;
+    let mut ports = Vec::new();
+    for _ in 0..2 {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral fixture");
+        let port = listener.local_addr().unwrap().port();
+        ports.push(port);
+        // The thread owns the listener: fixtures stay up for the whole test.
+        std::thread::spawn(move || {
+            listener.set_nonblocking(true).ok();
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((stream, _)) => drop(stream),
+                    Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
+        });
+    }
+    ports.sort_unstable();
+    let port_arg = ports
+        .iter()
+        .map(u16::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut ledgers = Vec::new();
+    for speed in ["slow", "balanced", "100"] {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("rxscan-speed-{speed}-{stamp}.jsonl"));
+        let cli = Cli::try_parse_from([
+            "rxscan",
+            "127.0.0.1",
+            "--ports",
+            &port_arg,
+            "--level",
+            "3",
+            "--speed",
+            speed,
+            "--output",
+            path.to_str().unwrap(),
+        ])
+        .unwrap();
+        let report = rxscan::run::execute(cli).unwrap();
+        let payloads = read_jsonl_payloads(&path);
+        let completed = payloads
+            .iter()
+            .find(|value| {
+                value["record_type"] == "event" && value["payload"]["kind"] == "port_scan_completed"
+            })
+            .expect("port_scan_completed event");
+        let details = &completed["payload"]["details"]["data"];
+        ledgers.push((
+            details["requested_ports"].clone(),
+            details["attempted_ports"].clone(),
+            details["counts"].clone(),
+            report.tcp_totals.clone(),
+        ));
+        fs::remove_file(path).ok();
+    }
+    // Identical semantics at every pressure: same requested/attempted
+    // sets and same outcome counts (both fixtures accept every probe).
+    // Timing fields (elapsed) are pressure-dependent and excluded.
+    assert_eq!(ledgers[0].0, ledgers[1].0);
+    assert_eq!(ledgers[1].0, ledgers[2].0);
+    assert_eq!(ledgers[0].1, ledgers[1].1);
+    assert_eq!(ledgers[1].1, ledgers[2].1);
+    assert_eq!(ledgers[0].2, ledgers[1].2);
+    assert_eq!(ledgers[1].2, ledgers[2].2);
+    for ledger in &ledgers {
+        assert_eq!(ledger.3.ports_requested, 2);
+        assert_eq!(ledger.3.ports_attempted, 2);
+        assert_eq!(ledger.3.open, 2);
+        assert_eq!(ledger.3.unscanned, 0);
+    }
+    // Only pressure differs: slow waits longer with a narrower window.
+    let slow_policy = TcpScanPolicy::new(
+        3,
+        ScanGoal::Recon,
+        TcpPortSelection::Common,
+        SpeedSetting::Named(NamedSpeed::Slow),
+    );
+    let fast_policy = TcpScanPolicy::new(
+        3,
+        ScanGoal::Recon,
+        TcpPortSelection::Common,
+        SpeedSetting::Numeric(100),
+    );
+    assert!(slow_policy.per_port_timeout() > fast_policy.per_port_timeout());
+    assert!(slow_policy.concurrency() < fast_policy.concurrency());
+    assert_eq!(
+        slow_policy.ports_for_task(Some("common")).ports,
+        fast_policy.ports_for_task(Some("common")).ports
+    );
+}
+
+#[test]
+fn all_ports_loopback_proves_full_ledger_and_bounds() {
+    // Controlled --all-ports acceptance: SSH fixture on an ephemeral port,
+    // full 65,535-port run at speed 100. Proves the complete ledger
+    // (requested 65535, counts sum, unscanned 0, truncated false), the
+    // fixture found and identified, exactly ONE port task (never 65k
+    // tasks), and bounded FD pressure (fd_peak <= 128 window).
+    // Environment listeners may add extra opens; assertions only require
+    // the fixture plus internal consistency.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral fixture");
+    let port = listener.local_addr().unwrap().port();
+    listener.set_nonblocking(true).unwrap();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_thread = stop.clone();
+    let handle = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while !stop_thread.load(Ordering::SeqCst) && Instant::now() < deadline {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let _ = stream.write_all(b"SSH-2.0-AllPortsTest_1.0\r\n");
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(300)));
+                    let mut buf = [0u8; 256];
+                    let _ = stream.read(&mut buf);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("rxscan-allports-{stamp}.jsonl"));
+    let cli = Cli::try_parse_from([
+        "rxscan",
+        "127.0.0.1",
+        "--scope",
+        "127.0.0.1",
+        "--speed",
+        "100",
+        "--all-ports",
+        "--output",
+        path.to_str().unwrap(),
+    ])
+    .unwrap();
+    let report = rxscan::run::execute(cli).unwrap();
+    stop.store(true, Ordering::SeqCst);
+    handle.join().unwrap();
+
+    let payloads = read_jsonl_payloads(&path);
+    let completed = payloads
+        .iter()
+        .find(|value| {
+            value["record_type"] == "event" && value["payload"]["kind"] == "port_scan_completed"
+        })
+        .expect("port_scan_completed event");
+    let details = &completed["payload"]["details"]["data"];
+    assert_eq!(details["ports_requested"].as_u64(), Some(65_535));
+    assert_eq!(details["unscanned"].as_u64(), Some(0));
+    assert_eq!(details["truncated"].as_bool(), Some(false));
+    let counts = details["counts"].as_object().unwrap();
+    let total: u64 = counts.values().map(|value| value.as_u64().unwrap()).sum();
+    assert_eq!(total, 65_535, "every requested port accounted exactly once");
+    let opens: Vec<u16> = details["open_ports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_u64().unwrap() as u16)
+        .collect();
+    assert!(opens.contains(&port), "fixture port must be found");
+    assert_eq!(counts["open"].as_u64().unwrap() as usize, opens.len());
+    let fd_peak = details["fd_peak"].as_u64().unwrap();
+    assert!(
+        fd_peak <= 128,
+        "FD pressure stays within the speed-100 window: {fd_peak}"
+    );
+    // Exactly one port task carried all 65,535 ports.
+    let port_tasks = payloads
+        .iter()
+        .filter(|value| {
+            value["record_type"] == "scheduler_event"
+                && value["payload"]["kind"] == "task_created"
+                && value["payload"]["provenance"]["module_name"] == "rxscan.port"
+        })
+        .count();
+    assert_eq!(port_tasks, 1, "all-ports is one task, never 65k tasks");
+    // Fixture identified from banner evidence with follow-up completion.
+    assert!(payloads.iter().any(|value| {
+        value["record_type"] == "event"
+            && value["payload"]["kind"] == "service_identified"
+            && value["payload"]["details"]["data"]["port"].as_u64() == Some(u64::from(port))
+            && value["payload"]["details"]["data"]["protocol"] == "ssh"
+    }));
+    // Human counts agree with the typed ledger.
+    let human = rxscan::run::human_summary(&report);
+    assert!(human.contains("65535 requested"));
+    assert!(human.contains("65535 attempted"));
+    assert!(human.contains(&format!("{port}/tcp")));
+    fs::remove_file(path).ok();
 }

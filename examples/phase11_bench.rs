@@ -222,13 +222,13 @@ fn main() {
     .unwrap();
     scheduler.register_module(Arc::new(ConfirmedHttpModule { root: root.clone() }));
     scheduler.register_module(Arc::new(BaselineModule::with_shared_state(
-        BaselinePolicy::new(5, ScanGoal::Content, SpeedSetting::Numeric(100)),
+        BaselinePolicy::new(5, ScanGoal::Web, SpeedSetting::Numeric(100)),
         guard.clone(),
         contact_registry.clone(),
         baseline_similarity,
     )));
     scheduler.register_module(Arc::new(ContentDiscoveryModule::with_contact_registry(
-        ContentDiscoveryPolicy::new(5, ScanGoal::Content, SpeedSetting::Numeric(100)),
+        ContentDiscoveryPolicy::new(5, ScanGoal::Web, SpeedSetting::Numeric(100)),
         guard.clone(),
         contact_registry,
     )));
@@ -236,7 +236,7 @@ fn main() {
         guard.clone(),
         rxscan::model::ScanPlanId("phase11_bench".to_owned()),
         5,
-        ScanGoal::Content,
+        ScanGoal::Web,
         rxscan::plan::TcpPortSelection::Common,
         SpeedSetting::Numeric(100),
         Some(wordlist),

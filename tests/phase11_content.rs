@@ -348,7 +348,7 @@ fn candidate_sources_normalize_stream_and_dedup() {
     let plan = plan_for("5");
     let guard = Arc::new(PolicyScopeGuard::new(plan.scope.clone()));
     let module = ContentDiscoveryModule::new(
-        ContentDiscoveryPolicy::new(5, ScanGoal::Content, SpeedSetting::Numeric(100)),
+        ContentDiscoveryPolicy::new(5, ScanGoal::Web, SpeedSetting::Numeric(100)),
         guard.clone(),
     );
     let origin = WebTarget::parse(&fixture.url("/")).unwrap();
@@ -408,12 +408,12 @@ fn crawl_then_content_discovery_uses_scan_lifetime_contact_dedup() {
     let guard = Arc::new(PolicyScopeGuard::new(plan.scope.clone()));
     let contacts = rxscan::contact::ContactRegistry::new();
     let crawl_module = CrawlModule::with_contact_registry(
-        CrawlPolicy::new(5, ScanGoal::Content, SpeedSetting::Numeric(100)),
+        CrawlPolicy::new(5, ScanGoal::Web, SpeedSetting::Numeric(100)),
         guard.clone(),
         contacts.clone(),
     );
     let content_module = ContentDiscoveryModule::with_contact_registry(
-        ContentDiscoveryPolicy::new(5, ScanGoal::Content, SpeedSetting::Numeric(100)),
+        ContentDiscoveryPolicy::new(5, ScanGoal::Web, SpeedSetting::Numeric(100)),
         guard.clone(),
         contacts,
     );
@@ -435,7 +435,7 @@ fn crawl_then_content_discovery_uses_scan_lifetime_contact_dedup() {
         guard.clone(),
         plan.stable_id(),
         5,
-        ScanGoal::Content,
+        ScanGoal::Web,
         plan.tcp_ports.clone(),
         SpeedSetting::Numeric(100),
     );
@@ -507,7 +507,7 @@ fn baseline_filtering_scope_redirect_canary_and_jsonl_are_observable() {
     let plan = plan_for("5");
     let guard = Arc::new(PolicyScopeGuard::new(plan.scope.clone()));
     let module = ContentDiscoveryModule::new(
-        ContentDiscoveryPolicy::new(5, ScanGoal::Content, SpeedSetting::Numeric(100)),
+        ContentDiscoveryPolicy::new(5, ScanGoal::Web, SpeedSetting::Numeric(100)),
         guard.clone(),
     );
     let origin = WebTarget::parse(&fixture.url("/")).unwrap();
@@ -556,7 +556,7 @@ fn budgets_cancellation_timeout_and_unreadable_files_are_bounded() {
     let plan = plan_for("5");
     let guard = Arc::new(PolicyScopeGuard::new(plan.scope.clone()));
     let module = ContentDiscoveryModule::new(
-        ContentDiscoveryPolicy::new(5, ScanGoal::Content, SpeedSetting::Numeric(100)),
+        ContentDiscoveryPolicy::new(5, ScanGoal::Web, SpeedSetting::Numeric(100)),
         guard.clone(),
     );
     let origin = WebTarget::parse(&fixture.url("/")).unwrap();
@@ -643,18 +643,18 @@ fn decision_engine_and_scheduler_path_admit_content_after_baseline() {
     .unwrap();
     scheduler.register_module(Arc::new(ConfirmedEndpointModule { root: root.clone() }));
     scheduler.register_module(Arc::new(BaselineModule::new(
-        BaselinePolicy::new(5, ScanGoal::Content, SpeedSetting::Numeric(100)),
+        BaselinePolicy::new(5, ScanGoal::Web, SpeedSetting::Numeric(100)),
         guard.clone(),
     )));
     scheduler.register_module(Arc::new(ContentDiscoveryModule::new(
-        ContentDiscoveryPolicy::new(5, ScanGoal::Content, SpeedSetting::Numeric(100)),
+        ContentDiscoveryPolicy::new(5, ScanGoal::Web, SpeedSetting::Numeric(100)),
         guard.clone(),
     )));
     scheduler.set_decision_engine(Arc::new(Phase7Engine::new(
         guard.clone(),
         plan.stable_id(),
         5,
-        ScanGoal::Content,
+        ScanGoal::Web,
         plan.tcp_ports.clone(),
         SpeedSetting::Numeric(100),
     )));
@@ -715,7 +715,7 @@ fn large_wordlist_is_streamed_and_capped_without_loading_whole_file() {
     let plan = plan_for("5");
     let guard = Arc::new(PolicyScopeGuard::new(plan.scope.clone()));
     let module = ContentDiscoveryModule::new(
-        ContentDiscoveryPolicy::new(4, ScanGoal::Content, SpeedSetting::Numeric(100)),
+        ContentDiscoveryPolicy::new(4, ScanGoal::Web, SpeedSetting::Numeric(100)),
         guard.clone(),
     );
     let origin = WebTarget::parse(&fixture.url("/")).unwrap();
@@ -754,7 +754,7 @@ fn ipv6_content_discovery_uses_canonical_bracketed_origin_when_supported() {
     .unwrap();
     let guard = Arc::new(PolicyScopeGuard::new(plan.scope.clone()));
     let module = ContentDiscoveryModule::new(
-        ContentDiscoveryPolicy::new(5, ScanGoal::Content, SpeedSetting::Numeric(100)),
+        ContentDiscoveryPolicy::new(5, ScanGoal::Web, SpeedSetting::Numeric(100)),
         guard.clone(),
     );
     let origin = WebTarget::parse(&fixture.url("/")).unwrap();
@@ -778,10 +778,10 @@ fn ipv6_content_discovery_uses_canonical_bracketed_origin_when_supported() {
 
 #[test]
 fn level_and_speed_preserve_semantics() {
-    let l1 = ContentDiscoveryPolicy::new(1, ScanGoal::Content, SpeedSetting::Numeric(100));
-    let l2 = ContentDiscoveryPolicy::new(2, ScanGoal::Content, SpeedSetting::Numeric(100));
-    let l5_fast = ContentDiscoveryPolicy::new(5, ScanGoal::Content, SpeedSetting::Numeric(100));
-    let l5_slow = ContentDiscoveryPolicy::new(5, ScanGoal::Content, SpeedSetting::Numeric(1));
+    let l1 = ContentDiscoveryPolicy::new(1, ScanGoal::Web, SpeedSetting::Numeric(100));
+    let l2 = ContentDiscoveryPolicy::new(2, ScanGoal::Web, SpeedSetting::Numeric(100));
+    let l5_fast = ContentDiscoveryPolicy::new(5, ScanGoal::Web, SpeedSetting::Numeric(100));
+    let l5_slow = ContentDiscoveryPolicy::new(5, ScanGoal::Web, SpeedSetting::Numeric(1));
     assert!(!l1.enabled());
     assert!(l2.builtin_limit() < l5_fast.builtin_limit());
     assert_eq!(l5_fast.builtin_limit(), l5_slow.builtin_limit());

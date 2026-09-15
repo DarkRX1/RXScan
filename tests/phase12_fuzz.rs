@@ -375,7 +375,7 @@ fn fuzz_disabled_without_observed_safe_query_context() {
     let plan = plan_for("1", "fuzz");
     let guard = Arc::new(PolicyScopeGuard::new(plan.scope.clone()));
     let module = FuzzModule::new(
-        FuzzPolicy::new(1, ScanGoal::Fuzz, SpeedSetting::Numeric(100)),
+        FuzzPolicy::new(1, ScanGoal::Full, SpeedSetting::Numeric(100)),
         guard.clone(),
     );
     let url = WebTarget::parse(&fixture.url("/search?q=alice")).unwrap();
@@ -391,7 +391,7 @@ fn fuzz_disabled_without_observed_safe_query_context() {
     assert!(fixture.paths().is_empty());
 
     let enabled = FuzzModule::new(
-        FuzzPolicy::new(5, ScanGoal::Fuzz, SpeedSetting::Numeric(100)),
+        FuzzPolicy::new(5, ScanGoal::Full, SpeedSetting::Numeric(100)),
         guard.clone(),
     );
     let no_param = block_on(
@@ -427,7 +427,7 @@ fn mutations_are_safe_one_parameter_at_a_time_and_classify_deltas() {
     let plan = plan_for("5", "fuzz");
     let guard = Arc::new(PolicyScopeGuard::new(plan.scope.clone()));
     let module = FuzzModule::new(
-        FuzzPolicy::new(5, ScanGoal::Fuzz, SpeedSetting::Numeric(100)),
+        FuzzPolicy::new(5, ScanGoal::Full, SpeedSetting::Numeric(100)),
         guard.clone(),
     );
     let url = WebTarget::parse(&fixture.url("/items?limit=20&sort=asc")).unwrap();
@@ -488,7 +488,7 @@ fn text_reflection_redirect_content_type_and_sensitive_skip_are_observed_safely(
     let plan = plan_for("5", "fuzz");
     let guard = Arc::new(PolicyScopeGuard::new(plan.scope.clone()));
     let module = FuzzModule::new(
-        FuzzPolicy::new(5, ScanGoal::Fuzz, SpeedSetting::Numeric(100)),
+        FuzzPolicy::new(5, ScanGoal::Full, SpeedSetting::Numeric(100)),
         guard.clone(),
     );
     let echo = WebTarget::parse(&fixture.url("/echo?q=alice")).unwrap();
@@ -562,7 +562,7 @@ fn cancellation_timeout_dedup_jsonl_and_ipv6_are_bounded() {
     let guard = Arc::new(PolicyScopeGuard::new(plan.scope.clone()));
     let contacts = rxscan::contact::ContactRegistry::new();
     let module = FuzzModule::with_contact_registry(
-        FuzzPolicy::new(5, ScanGoal::Fuzz, SpeedSetting::Numeric(100)),
+        FuzzPolicy::new(5, ScanGoal::Full, SpeedSetting::Numeric(100)),
         guard.clone(),
         contacts,
     );
@@ -625,7 +625,7 @@ fn cancellation_timeout_dedup_jsonl_and_ipv6_are_bounded() {
         .unwrap();
         let guard = Arc::new(PolicyScopeGuard::new(plan.scope.clone()));
         let module = FuzzModule::new(
-            FuzzPolicy::new(5, ScanGoal::Fuzz, SpeedSetting::Numeric(100)),
+            FuzzPolicy::new(5, ScanGoal::Full, SpeedSetting::Numeric(100)),
             guard.clone(),
         );
         let target = WebTarget::parse(&ipv6.url("/v?q=1")).unwrap();
@@ -676,18 +676,18 @@ fn production_decision_scheduler_wires_baseline_to_fuzz_tasks() {
     .unwrap();
     scheduler.register_module(Arc::new(ConfirmedEndpointModule { root: root.clone() }));
     scheduler.register_module(Arc::new(BaselineModule::new(
-        BaselinePolicy::new(5, ScanGoal::Fuzz, SpeedSetting::Numeric(100)),
+        BaselinePolicy::new(5, ScanGoal::Full, SpeedSetting::Numeric(100)),
         guard.clone(),
     )));
     scheduler.register_module(Arc::new(FuzzModule::new(
-        FuzzPolicy::new(5, ScanGoal::Fuzz, SpeedSetting::Numeric(100)),
+        FuzzPolicy::new(5, ScanGoal::Full, SpeedSetting::Numeric(100)),
         guard.clone(),
     )));
     scheduler.set_decision_engine(Arc::new(Phase7Engine::new(
         guard.clone(),
         plan.stable_id(),
         5,
-        ScanGoal::Fuzz,
+        ScanGoal::Full,
         plan.tcp_ports.clone(),
         SpeedSetting::Numeric(100),
     )));
@@ -773,7 +773,7 @@ fn advertised_delta_outcomes_are_reachable_or_bounded_errors() {
     let plan = plan_for("5", "fuzz");
     let guard = Arc::new(PolicyScopeGuard::new(plan.scope.clone()));
     let module = FuzzModule::new(
-        FuzzPolicy::new(5, ScanGoal::Fuzz, SpeedSetting::Numeric(100)),
+        FuzzPolicy::new(5, ScanGoal::Full, SpeedSetting::Numeric(100)),
         guard.clone(),
     );
     let cases = [
@@ -834,7 +834,7 @@ fn advertised_delta_outcomes_are_reachable_or_bounded_errors() {
 
     let inconclusive = WebTarget::parse(&fixture.url("/same?q=alice")).unwrap();
     let inconclusive_module = FuzzModule::new(
-        FuzzPolicy::new(5, ScanGoal::Fuzz, SpeedSetting::Numeric(100)),
+        FuzzPolicy::new(5, ScanGoal::Full, SpeedSetting::Numeric(100)),
         guard.clone(),
     );
     let output = block_on(
@@ -849,7 +849,7 @@ fn advertised_delta_outcomes_are_reachable_or_bounded_errors() {
 
     let missing = WebTarget::parse("http://127.0.0.1:9/missing?q=alice").unwrap();
     let bad_module = FuzzModule::new(
-        FuzzPolicy::new(5, ScanGoal::Fuzz, SpeedSetting::Numeric(100)),
+        FuzzPolicy::new(5, ScanGoal::Full, SpeedSetting::Numeric(100)),
         guard.clone(),
     );
     let output = block_on(
@@ -883,7 +883,7 @@ fn baseline_reuse_and_cross_batch_fuzz_dedup_have_counter_proof() {
     let guard = Arc::new(PolicyScopeGuard::new(plan.scope.clone()));
     let contacts = rxscan::contact::ContactRegistry::new();
     let module = FuzzModule::with_contact_registry(
-        FuzzPolicy::new(5, ScanGoal::Fuzz, SpeedSetting::Numeric(100)),
+        FuzzPolicy::new(5, ScanGoal::Full, SpeedSetting::Numeric(100)),
         guard.clone(),
         contacts,
     );
@@ -952,18 +952,18 @@ fn scheduler_budget_bounds_scan_wide_fuzz_growth_across_many_endpoints() {
         roots: roots.clone(),
     }));
     scheduler.register_module(Arc::new(BaselineModule::new(
-        BaselinePolicy::new(5, ScanGoal::Fuzz, SpeedSetting::Numeric(100)),
+        BaselinePolicy::new(5, ScanGoal::Full, SpeedSetting::Numeric(100)),
         guard.clone(),
     )));
     scheduler.register_module(Arc::new(FuzzModule::new(
-        FuzzPolicy::new(5, ScanGoal::Fuzz, SpeedSetting::Numeric(100)),
+        FuzzPolicy::new(5, ScanGoal::Full, SpeedSetting::Numeric(100)),
         guard.clone(),
     )));
     scheduler.set_decision_engine(Arc::new(Phase7Engine::new(
         guard.clone(),
         plan.stable_id(),
         5,
-        ScanGoal::Fuzz,
+        ScanGoal::Full,
         plan.tcp_ports.clone(),
         SpeedSetting::Numeric(100),
     )));
@@ -1008,7 +1008,7 @@ fn level_two_fuzzing_is_disabled_with_zero_mutation_contacts() {
     let plan = plan_for("2", "fuzz");
     let guard = Arc::new(PolicyScopeGuard::new(plan.scope.clone()));
     let module = FuzzModule::new(
-        FuzzPolicy::new(2, ScanGoal::Fuzz, SpeedSetting::Numeric(100)),
+        FuzzPolicy::new(2, ScanGoal::Full, SpeedSetting::Numeric(100)),
         guard.clone(),
     );
     let url = WebTarget::parse(&fixture.url("/search?q=alice")).unwrap();
@@ -1059,7 +1059,7 @@ fn speed_changes_pressure_not_fuzz_semantics() {
     let url = WebTarget::parse(&fixture.url("/search?q=alice")).unwrap();
     let baseline = signature(200, "text/html", "control");
     let run = |speed| {
-        let module = FuzzModule::new(FuzzPolicy::new(5, ScanGoal::Fuzz, speed), guard.clone());
+        let module = FuzzModule::new(FuzzPolicy::new(5, ScanGoal::Full, speed), guard.clone());
         block_on(
             &module,
             ModuleContext::new(
@@ -1079,7 +1079,7 @@ fn speed_changes_pressure_not_fuzz_semantics() {
             guard.clone(),
             plan.stable_id(),
             5,
-            ScanGoal::Fuzz,
+            ScanGoal::Full,
             plan.tcp_ports.clone(),
             speed,
         )
@@ -1147,7 +1147,7 @@ fn per_origin_fuzz_budget_is_scan_lifetime_and_origin_scoped() {
         guard.clone(),
         plan.stable_id(),
         5,
-        ScanGoal::Fuzz,
+        ScanGoal::Full,
         plan.tcp_ports.clone(),
         SpeedSetting::Numeric(100),
     );
@@ -1207,7 +1207,7 @@ fn per_origin_fuzz_budget_is_scan_lifetime_and_origin_scoped() {
             v6_guard.clone(),
             v6_plan.stable_id(),
             5,
-            ScanGoal::Fuzz,
+            ScanGoal::Full,
             v6_plan.tcp_ports.clone(),
             SpeedSetting::Numeric(100),
         );

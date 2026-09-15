@@ -1895,3 +1895,221 @@ fn service_tasks_do_not_chain_further() {
             .is_empty()
     );
 }
+
+// ---------- acceptance gate: service truth on nonstandard ports ----------
+
+#[test]
+fn proofssh_banner_on_nonstandard_port_is_identified_end_to_end() {
+    // Controlled loopback listener on an ephemeral (nonstandard, never 22)
+    // port emitting `SSH-2.0-ProofSSH_1.0`. Full run must prove: exact port
+    // requested + attempted, port open, service identified as SSH from
+    // banner evidence (product/version only to banner precision), evidence
+    // with provenance, and completed service follow-up.
+    let fixture = Fixture::spawn(|mut stream, received| {
+        let _ = stream.write_all(b"SSH-2.0-ProofSSH_1.0\r\n");
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(600)));
+        let mut chunk = [0u8; 512];
+        if let Ok(count) = stream.read(&mut chunk) {
+            received.lock().unwrap().extend_from_slice(&chunk[..count]);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    });
+    assert_ne!(fixture.port, 22, "fixture must be nonstandard");
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!("rxscan-svc-proof-{stamp}"));
+    fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("out.jsonl");
+    let cli = Cli::try_parse_from([
+        "rxscan",
+        "127.0.0.1",
+        "--ports",
+        &fixture.port.to_string(),
+        "--level",
+        "3",
+        "--output",
+        path.to_str().unwrap(),
+    ])
+    .unwrap();
+    let report = rxscan::run::execute(cli).unwrap();
+    // Scan + service probe each opened a real connection.
+    assert!(
+        fixture.connections.load(Ordering::SeqCst) >= 2,
+        "port scan and service follow-up must both contact the listener"
+    );
+    let contents = fs::read_to_string(&path).unwrap();
+    let mut saw_open = false;
+    let mut saw_identified = false;
+    let mut saw_banner = false;
+    let mut saw_evidence = false;
+    let mut saw_completed = false;
+    let mut saw_ssh_finding = false;
+    for line in contents.lines() {
+        let value: serde_json::Value = serde_json::from_str(line).unwrap();
+        let record_type = value["record_type"].as_str().unwrap();
+        let payload = &value["payload"];
+        match record_type {
+            "event" if payload["kind"] == "port_scan_completed" => {
+                let data = &payload["details"]["data"];
+                assert_eq!(data["requested_ports"], serde_json::json!([fixture.port]));
+                assert_eq!(data["attempted_ports"], serde_json::json!([fixture.port]));
+                assert_eq!(data["open_ports"], serde_json::json!([fixture.port]));
+                assert_eq!(data["unscanned"], serde_json::json!(0));
+            }
+            "event" if payload["kind"] == "port_open" => {
+                assert_eq!(
+                    payload["details"]["data"]["port"],
+                    serde_json::json!(fixture.port)
+                );
+                saw_open = true;
+            }
+            "event" if payload["kind"] == "service_identified" => {
+                let data = &payload["details"]["data"];
+                assert_eq!(data["port"], serde_json::json!(fixture.port));
+                assert_eq!(data["protocol"], serde_json::json!("ssh"));
+                // Precision actually supported by the banner: product/version
+                // split from `ProofSSH_1.0`, protocol version from `2.0`.
+                // Nothing more specific is claimed.
+                assert_eq!(data["product_hint"], serde_json::json!("ProofSSH"));
+                assert_eq!(data["version_hint"], serde_json::json!("1.0"));
+                saw_identified = true;
+            }
+            "event" if payload["kind"] == "banner_observed" => {
+                assert_eq!(
+                    payload["details"]["data"]["banner"],
+                    serde_json::json!("SSH-2.0-ProofSSH_1.0")
+                );
+                saw_banner = true;
+            }
+            "evidence" => {
+                let data = &payload["details"]["data"];
+                if data.get("protocol") == Some(&serde_json::json!("ssh"))
+                    && data.get("port") == Some(&serde_json::json!(fixture.port))
+                {
+                    assert_eq!(
+                        payload["provenance"]["module_name"],
+                        serde_json::json!("rxscan.service")
+                    );
+                    saw_evidence = true;
+                }
+            }
+            "event" if payload["kind"] == "service_probe_completed" => {
+                assert_eq!(
+                    payload["details"]["data"]["protocol"],
+                    serde_json::json!("ssh")
+                );
+                saw_completed = true;
+            }
+            "finding"
+                if payload["title"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("ssh service on port") =>
+            {
+                saw_ssh_finding = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_open, "port must be reported open");
+    assert!(saw_identified, "service must be identified as SSH");
+    assert!(saw_banner, "banner evidence must exist");
+    assert!(saw_evidence, "service evidence with provenance must exist");
+    assert!(saw_completed, "service follow-up must complete");
+    assert!(saw_ssh_finding, "SSH finding must exist");
+    let human = rxscan::run::human_summary(&report);
+    assert!(human.contains("ssh"), "human must report SSH: {human}");
+    assert!(
+        human.contains("ProofSSH"),
+        "human must report product: {human}"
+    );
+    assert!(human.contains(&format!("{}/tcp", fixture.port)));
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn malformed_and_silent_nonstandard_ports_stay_unknown_end_to_end() {
+    // Negative control (unrelated banner) + silent listener: ports stay
+    // open, RXScan must NOT classify either as SSH, unknown stays valid,
+    // and the silent port completes in bounded time (no hang).
+    let bad = Fixture::spawn(|mut stream, received| {
+        let _ = stream.write_all(b"HELLO-NOT-SSH\r\n");
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(300)));
+        let mut chunk = [0u8; 512];
+        if let Ok(count) = stream.read(&mut chunk) {
+            received.lock().unwrap().extend_from_slice(&chunk[..count]);
+        }
+    });
+    let silent = silent_fixture();
+    assert_ne!(bad.port, 22);
+    assert_ne!(silent.port, 22);
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!("rxscan-svc-neg-{stamp}"));
+    fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("out.jsonl");
+    let ports = format!("{},{}", bad.port, silent.port);
+    let cli = Cli::try_parse_from([
+        "rxscan",
+        "127.0.0.1",
+        "--ports",
+        &ports,
+        "--level",
+        "3",
+        "--output",
+        path.to_str().unwrap(),
+    ])
+    .unwrap();
+    let started = Instant::now();
+    let report = rxscan::run::execute(cli).unwrap();
+    // Bounded even with a 6s-silent listener: probes time out on their own
+    // budgets, the task never hangs near the 15s scheduler timeout.
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "silent listener must not stall the run"
+    );
+    let contents = fs::read_to_string(&path).unwrap();
+    let mut opens = Vec::new();
+    let mut ssh_identified = Vec::new();
+    let mut unknown_completions = 0;
+    for line in contents.lines() {
+        let value: serde_json::Value = serde_json::from_str(line).unwrap();
+        let record_type = value["record_type"].as_str().unwrap();
+        let payload = &value["payload"];
+        if record_type == "event" && payload["kind"] == "port_open" {
+            opens.push(payload["details"]["data"]["port"].as_u64().unwrap() as u16);
+        }
+        if record_type == "event" && payload["kind"] == "service_identified" {
+            ssh_identified.push(payload["details"]["data"]["port"].as_u64().unwrap() as u16);
+        }
+        if record_type == "event" && payload["kind"] == "service_probe_completed" {
+            assert_eq!(
+                payload["details"]["data"]["protocol"],
+                serde_json::json!("unknown"),
+                "negative/silent ports must stay unknown"
+            );
+            unknown_completions += 1;
+        }
+    }
+    assert!(opens.contains(&bad.port), "malformed port is still open");
+    assert!(opens.contains(&silent.port), "silent port is still open");
+    assert!(
+        !ssh_identified.contains(&bad.port),
+        "malformed banner must NOT classify as SSH"
+    );
+    assert!(
+        !ssh_identified.contains(&silent.port),
+        "silence must NOT classify as SSH"
+    );
+    assert_eq!(
+        unknown_completions, 2,
+        "both follow-ups complete as unknown"
+    );
+    let human = rxscan::run::human_summary(&report);
+    assert!(!human.contains("ssh"), "human must not claim SSH: {human}");
+    fs::remove_dir_all(directory).unwrap();
+}

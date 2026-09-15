@@ -772,7 +772,7 @@ fn speed_changes_pressure_not_port_truth() {
 #[test]
 fn service_probe_plan_is_bounded_and_speed_independent_in_shape() {
     for level in 1..=5u8 {
-        let plan = service::plan_probes(80, level, ScanGoal::Discovery);
+        let plan = service::plan_probes(80, level, ScanGoal::Discover);
         assert!(
             plan.len() <= service::MAX_PROBES_PER_PORT,
             "level {level} probe plan exceeds per-port cap"
@@ -925,7 +925,7 @@ fn large_wordlist_streams_with_candidate_and_request_caps() {
         b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\nContent-Type: text/html\r\n\r\nok".to_vec()
     });
     let plan = plan_for("127.0.0.1");
-    let policy = ContentDiscoveryPolicy::new(5, ScanGoal::Content, SpeedSetting::Numeric(50));
+    let policy = ContentDiscoveryPolicy::new(5, ScanGoal::Web, SpeedSetting::Numeric(50));
     let module = ContentDiscoveryModule::new(policy, Arc::new(AllowAll));
     let origin = WebTarget::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
     let params = rxscan::content::content_task_params(&origin, "seed", Some(&wordlist));
@@ -971,7 +971,7 @@ fn duplicate_wordlist_lines_contact_each_path_once() {
         b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\nContent-Type: text/html\r\n\r\nok".to_vec()
     });
     let plan = plan_for("127.0.0.1");
-    let policy = ContentDiscoveryPolicy::new(5, ScanGoal::Content, SpeedSetting::Numeric(50));
+    let policy = ContentDiscoveryPolicy::new(5, ScanGoal::Web, SpeedSetting::Numeric(50));
     let module = ContentDiscoveryModule::new(policy, Arc::new(AllowAll));
     let origin = WebTarget::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
     let params = rxscan::content::content_task_params(&origin, "seed", Some(&wordlist));
@@ -1779,7 +1779,7 @@ fn slow_and_oversized_http_responses_stay_bounded() {
         }
     });
     let plan = plan_for("127.0.0.1");
-    let policy = ContentDiscoveryPolicy::new(5, ScanGoal::Content, SpeedSetting::Numeric(50));
+    let policy = ContentDiscoveryPolicy::new(5, ScanGoal::Web, SpeedSetting::Numeric(50));
     let module = ContentDiscoveryModule::new(policy, Arc::new(AllowAll));
     let origin = WebTarget::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
     let params = rxscan::content::content_task_params(&origin, "seed", Some(&wordlist));
@@ -2053,7 +2053,7 @@ fn tcp_closed_heavy_outcome_stays_compact_in_reporting() {
     let guard = Arc::new(AllowAll);
     let policy = rxscan::tcp_discovery::TcpScanPolicy::new(
         3,
-        ScanGoal::Discovery,
+        ScanGoal::Discover,
         TcpPortSelection::Explicit((1..=2000).collect()),
         SpeedSetting::Numeric(50),
     );

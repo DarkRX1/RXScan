@@ -2035,8 +2035,8 @@ fn unprivileged_host_discovery_completes_without_root() {
     );
     assert_eq!(code, 0, "unprivileged scan must complete: {stderr:?}");
     assert!(
-        stdout.contains("task(s)"),
-        "expected human summary: {stdout:?}"
+        stdout.contains("Diagnostics"),
+        "expected human diagnostics footer: {stdout:?}"
     );
     assert!(!stderr.contains("root"), "must not demand root: {stderr:?}");
     std::fs::remove_dir_all(&dir).ok();

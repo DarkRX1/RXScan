@@ -177,9 +177,14 @@ fn different_goals_yield_different_task_graphs() {
     // Web includes HTTP intent, recon does not.
     assert!(web.iter().any(|task| task.kind == TaskKind::HttpProbe));
     assert!(!recon.iter().any(|task| task.kind == TaskKind::HttpProbe));
-    // Fuzz includes fuzz intent, web does not.
-    assert!(fuzz.iter().any(|task| task.kind == TaskKind::Fuzz));
+    // Fuzz intent is evidence-triggered only (follow-up, never a seed task):
+    // Full and Web initial graphs differ, and Full advertises the fuzz rule.
+    let full_followups = rxscan::level::describe_followups(rxscan::plan::ScanGoal::Full, 5);
+    let web_followups = rxscan::level::describe_followups(rxscan::plan::ScanGoal::Web, 5);
+    assert!(full_followups.contains("fuzzing"));
+    assert!(!web_followups.contains("fuzzing"));
     assert!(!web.iter().any(|task| task.kind == TaskKind::Fuzz));
+    assert!(!fuzz.iter().any(|task| task.kind == TaskKind::Fuzz));
 }
 
 #[test]
@@ -283,7 +288,7 @@ fn explicit_ports_propagate_via_params() {
 #[test]
 fn level_policy_is_centralized_and_documented() {
     // L1 minimal for every goal; higher levels expand.
-    for goal in [ScanGoal::Recon, ScanGoal::Web, ScanGoal::Fuzz] {
+    for goal in [ScanGoal::Recon, ScanGoal::Web, ScanGoal::Full] {
         assert_eq!(
             eligible_task_kinds(goal, 1, false, false, false),
             vec![validate_kind()]
@@ -863,11 +868,13 @@ fn scheduler_is_reachable_from_bootstrap_with_no_network() {
         report.task_count,
         report.scheduler_report.completed.len() + report.scheduler_report.skipped.len()
     );
-    // Level 2 recon has no skips (only scaffold tasks); level 5 web has skips.
+    // Every planned task is executable: no task may predictably become
+    // `Skipped` for a missing module (tls/fingerprint planners were removed;
+    // content/crawl/fuzz are follow-up-only). Level 5 web runs clean.
     let cli =
         Cli::try_parse_from(["rxscan", "example.test", "--level", "5", "--goal", "web"]).unwrap();
     let report = rxscan::run::execute(cli).unwrap();
-    assert!(!report.scheduler_report.skipped.is_empty());
+    assert!(report.scheduler_report.skipped.is_empty());
 }
 
 #[test]

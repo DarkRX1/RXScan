@@ -214,13 +214,13 @@ fn main() {
         endpoints: endpoints.clone(),
     }));
     scheduler.register_module(Arc::new(BaselineModule::with_shared_state(
-        BaselinePolicy::new(5, ScanGoal::Fuzz, SpeedSetting::Numeric(100)),
+        BaselinePolicy::new(5, ScanGoal::Full, SpeedSetting::Numeric(100)),
         guard.clone(),
         contact_registry.clone(),
         rxscan::baseline::BaselineSimilarityRegistry::new(),
     )));
     scheduler.register_module(Arc::new(FuzzModule::with_contact_registry(
-        FuzzPolicy::new(5, ScanGoal::Fuzz, SpeedSetting::Numeric(100)),
+        FuzzPolicy::new(5, ScanGoal::Full, SpeedSetting::Numeric(100)),
         guard.clone(),
         contact_registry,
     )));
@@ -228,7 +228,7 @@ fn main() {
         guard.clone(),
         rxscan::model::ScanPlanId("phase12_bench".to_owned()),
         5,
-        ScanGoal::Fuzz,
+        ScanGoal::Full,
         rxscan::plan::TcpPortSelection::Common,
         SpeedSetting::Numeric(100),
     )));
