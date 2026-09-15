@@ -118,6 +118,7 @@ fn main() {
             timeout: Duration::from_millis(2000),
             deadline,
             cancel: &cancel,
+            connections: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
         let started = Instant::now();
         let attempt = match probe {
@@ -169,6 +170,7 @@ fn main() {
         timeout: Duration::from_millis(800),
         deadline,
         cancel: &cancel,
+        connections: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
     let attempt = rxscan::probes::probe_generic(&ctx);
     println!(
@@ -190,6 +192,7 @@ fn main() {
             timeout: Duration::from_secs(8),
             deadline,
             cancel: &config_token,
+            connections: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
         rxscan::probes::probe_generic(&ctx)
     });

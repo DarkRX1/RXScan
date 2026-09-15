@@ -22,8 +22,10 @@
 //!
 //! Port, transport, level, goal, and budgets select a small ordered probe set
 //! (deterministic by priority then probe id). `--level` controls breadth,
-//! `--speed` controls pressure only. Unknown high ports get a conservative
-//! generic set; web/API goals try HTTP one level earlier on unknown ports.
+//! `--speed` controls pressure only. Unknown high ports get a level-graded
+//! speculative set (passive always; L2 +HTTP, L3 +Redis, L4 +TLS, L5
+//! +PostgreSQL and 220-gated mail disambiguation); known ports add pivots
+//! at L4/L5 so hints prioritize without permanently excluding protocols.
 //!
 //! # Boundaries
 //!
@@ -128,12 +130,96 @@ pub static PROBE_REGISTRY: &[ProbeSpec] = &[
 /// because classification stops the sequence early).
 pub const MAX_PROBES_PER_PORT: usize = 6;
 
+// ---------------- confidence classes ----------------
+
+/// Named service-identification confidence classes.
+///
+/// Protocol identity must come from observed evidence; port numbers
+/// contribute zero identity confidence by themselves, and agreement
+/// between matchers over the SAME observation never inflates the class.
+/// The 0–100 representation is preserved for typed output compatibility.
+pub mod confidence {
+    /// Complete protocol grammar plus identifying token fully valid
+    /// (e.g. strict SSH identification string with software token,
+    /// exact `+PONG` to PING, valid HTTP response with Server header).
+    pub const CONFIRMED: u8 = 90;
+    /// Valid handshake/framing plus characteristic details (e.g. FTP/SMTP
+    /// greeting disambiguated by command exchange, MySQL packet framing
+    /// with version, HTTP without Server header).
+    pub const STRONG: u8 = 85;
+    /// Characteristic grammar without full details (e.g. valid SSH
+    /// identification string with no usable software token, bare TLS
+    /// handshake without certificate facts).
+    pub const CHARACTERISTIC: u8 = 80;
+    /// Useful but incomplete evidence (e.g. single-byte PostgreSQL
+    /// SSLRequest reply, auth-gated Redis error, SMTP without EHLO caps).
+    pub const PROBABLE: u8 = 70;
+    /// Unknown service with a preserved banner (correlation evidence only,
+    /// never identity).
+    pub const BANNER: u8 = 50;
+    /// Unknown service, silent or timed out (nothing observed).
+    pub const SILENT: u8 = 20;
+}
+
 /// Response/request byte budgets (neither side may grow without bound).
 pub const MAX_BANNER_BYTES: usize = 2048;
 pub const MAX_HTTP_HEADER_BYTES: usize = 16 * 1024;
 pub const MAX_HTTP_BODY_BYTES: usize = 16 * 1024;
 pub const MAX_CERT_CHAIN_BYTES: usize = 32 * 1024;
 pub const MAX_SMTP_REPLY_BYTES: usize = 4096;
+
+/// Bounded deterministic fingerprint of an unidentified service, for later
+/// correlation — never an identity claim.
+///
+/// Computed over the same bounded observation bytes the generic classifier
+/// preserved. The hash is FNV-1a 64-bit (as used for asset IDs elsewhere in
+/// RXScan): deterministic and compact, explicitly NON-cryptographic.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UnknownFingerprint {
+    /// Observed byte count (capped by the reader budget).
+    pub len: usize,
+    /// FNV-1a 64 hex over the observed bytes (non-cryptographic).
+    pub hash16: String,
+    /// Percentage of printable ASCII bytes (0–100).
+    pub printable_pct: u8,
+    /// Whether the server spoke first (vs silence / client-first).
+    pub spoke_first: bool,
+    /// Probe that produced the observation (e.g. `generic`, `passive`).
+    pub probe: String,
+    /// Whether the observation hit the reader byte budget.
+    pub truncated: bool,
+}
+
+impl UnknownFingerprint {
+    /// Build from bounded observation bytes. Returns `None` for empty
+    /// input: silence fingerprints nothing (absence of bytes is not
+    /// correlation evidence).
+    pub fn compute(bytes: &[u8], spoke_first: bool, probe: &str, truncated: bool) -> Option<Self> {
+        if bytes.is_empty() {
+            return None;
+        }
+        let mut hash: u64 = 0xcbf29ce484222325;
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        let printable = bytes
+            .iter()
+            .filter(|byte| {
+                let byte = **byte;
+                (0x20..0x7f).contains(&byte) || matches!(byte, b'\t' | b'\n' | b'\r')
+            })
+            .count();
+        Some(Self {
+            len: bytes.len(),
+            hash16: format!("{hash:016x}"),
+            printable_pct: ((printable * 100) / bytes.len().max(1)).min(100) as u8,
+            spoke_first,
+            probe: probe.to_owned(),
+            truncated,
+        })
+    }
+}
 
 /// Normalized service observation: one open port, one conclusion, evidence.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -165,6 +251,14 @@ pub struct ServiceObservation {
     pub confidence: u8,
     pub evidence_lines: Vec<String>,
     pub timestamp: u64,
+    /// Registry probe (or `passive` fan-out step) whose evidence classified
+    /// this service. `None` for unclassified observations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_by: Option<String>,
+    /// Bounded correlation fingerprint, present only for unidentified
+    /// services with a non-empty observation. Never an identity claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unknown_fingerprint: Option<UnknownFingerprint>,
 }
 
 impl ServiceObservation {
@@ -207,11 +301,19 @@ pub fn service_asset_identity(parent_port_asset_id: &str, protocol: &str, tls: b
 
 /// Deterministic probe plan for one open port.
 ///
-/// * Known ports: primary probe first, alternates per level, generic last.
-/// * Unknown ports: generic first (passive), HTTP at L3+ (L2+ for web/API
-///   goals), nothing else — conservative by design.
+/// * Known ports: primary probe first, alternates per level, generic last,
+///   plus pivots at deep levels (L4 +HTTP; L5 +Redis/+TLS) so a port hint
+///   prioritizes without permanently excluding other protocols.
+///   (`generic` is covered by the shared passive observation — it never
+///   reconnects; the module evaluates it on passive bytes.)
+/// * Unknown ports: passive observation plus level-graded speculative
+///   actives. Level sets the cap (existing 1/2/3/4/6 scheme); port hints
+///   order candidacy but never exclude at deep levels:
+///   L1 passive only; L2 +HTTP; L3 +Redis; L4 +TLS; L5 +PostgreSQL and
+///   220-gated mail disambiguation. SSH/MySQL/FTP/SMTP greetings classify
+///   (or gate disambiguation) from passive bytes at every level ≥1.
 /// * L1 caps at 1 probe; L2 at 2; L3 at 3; L4 at 4; L5 at [`MAX_PROBES_PER_PORT`].
-pub fn plan_probes(port: u16, level: u8, goal: ScanGoal) -> Vec<&'static str> {
+pub fn plan_probes(port: u16, level: u8, _goal: ScanGoal) -> Vec<&'static str> {
     let level = level.clamp(1, 5);
     let mut ordered: Vec<&'static str> = Vec::new();
     let mut seen: BTreeSet<&'static str> = BTreeSet::new();
@@ -245,12 +347,44 @@ pub fn plan_probes(port: u16, level: u8, goal: ScanGoal) -> Vec<&'static str> {
             if level >= 2 {
                 push(PROBE_GENERIC);
             }
+            // Deep levels append pivots to known ports too: a hint may
+            // prioritize, but at L4+ it must not permanently exclude other
+            // protocols from a port (cap still bounds the list).
+            if level >= 4 {
+                push(PROBE_HTTP);
+            }
+            if level >= 5 {
+                push(PROBE_REDIS);
+                push(PROBE_TLS);
+            }
         }
         None => {
             push(PROBE_GENERIC);
-            let http_early = matches!(goal, ScanGoal::Web | ScanGoal::Full);
-            if (level >= 3 || (http_early && level >= 2)) && port != 0 {
-                push(PROBE_HTTP);
+            // Speculative actives by level (each its own bounded
+            // connection). HTTP is the universal pivot; Redis is a 7-byte
+            // definitive check; TLS handshakes fail fast off-port; the
+            // 1-byte PostgreSQL check and mail disambiguation ride last at
+            // L5 (mail runs earlier whenever passive shows a 220 greeting,
+            // regardless of level, via module gating).
+            match level {
+                0 | 1 => {}
+                2 => push(PROBE_HTTP),
+                3 => {
+                    push(PROBE_HTTP);
+                    push(PROBE_REDIS);
+                }
+                4 => {
+                    push(PROBE_HTTP);
+                    push(PROBE_REDIS);
+                    push(PROBE_TLS);
+                }
+                _ => {
+                    push(PROBE_HTTP);
+                    push(PROBE_REDIS);
+                    push(PROBE_TLS);
+                    push(PROBE_POSTGRES);
+                    push(PROBE_SMTP);
+                }
             }
         }
     }
@@ -299,6 +433,10 @@ pub fn split_product_token(value: &str) -> (String, Option<String>) {
 /// a product hint and optional version hint. Handles `Product/Version`,
 /// `Product_Version`, and bare `Product Version` word order (common in
 /// FTP/SMTP greetings). Raw observed text only — never inferred from ports.
+///
+/// NOTE: prefer [`product_from_greeting`] for greeting lines: it skips
+/// hostname/chatter tokens and sanitizes, while this helper parses a single
+/// token pair verbatim (kept for unit-level compatibility).
 pub fn product_and_version(remainder: &str) -> (String, Option<String>) {
     let mut words = remainder.split_whitespace();
     let first = words.next().unwrap_or("");
@@ -324,6 +462,189 @@ pub fn product_and_version(remainder: &str) -> (String, Option<String>) {
     (product, None)
 }
 
+/// Bare tokens that are protocol chatter or generic words, never product
+/// names. The sanitizer drops these instead of inventing precision.
+const NON_PRODUCT_TOKENS: &[&str] = &[
+    "server",
+    "servers",
+    "service",
+    "services",
+    "ready",
+    "welcome",
+    "hello",
+    "hi",
+    "ok",
+    "hey",
+    "banner",
+    "test",
+    "unknown",
+    "localhost",
+    "mail",
+    "ftp",
+    "smtp",
+    "esmtp",
+    "ssh",
+    "http",
+    "https",
+    "tls",
+    "ssl",
+    "version",
+    "protocol",
+    "greeting",
+    "connection",
+    "connected",
+];
+
+/// Clean one raw token into a plausible product name, or `None` when the
+/// token cannot justify a product claim. Strips wrapping punctuation,
+/// requires an ASCII-letter-led token of bounded length over a safe
+/// alphabet, and rejects chatter words. Never invents precision.
+pub fn sanitize_product_token(raw: &str) -> Option<String> {
+    let mut token = raw.trim();
+    // Strip wrapping punctuation such as `(vsFTPd` / `"nginx"` / `[test]`.
+    token = token.trim_matches(|c: char| {
+        matches!(
+            c,
+            '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | '"' | '\'' | ',' | ';' | ':'
+        )
+    });
+    token = token.trim();
+    if token.is_empty() || token.len() > 64 {
+        return None;
+    }
+    let mut chars = token.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphanumeric() => {}
+        _ => return None,
+    }
+    if !token
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+' | '/' | '~'))
+    {
+        return None;
+    }
+    if token.starts_with(|c: char| c.is_ascii_digit()) {
+        // Digit-led tokens are versions, never products.
+        return None;
+    }
+    if !token.chars().any(|c| c.is_ascii_alphabetic()) {
+        // Pure numbers/dots are versions, never products (handled separately).
+        return None;
+    }
+    if NON_PRODUCT_TOKENS.contains(&token.to_ascii_lowercase().as_str()) {
+        return None;
+    }
+    Some(token.to_owned())
+}
+
+/// Whether `token` looks like a version string (digit-led, dotted,
+/// bounded). Undotted numerics (`3com`, bare `7`) never qualify alone.
+fn looks_like_version(token: &str) -> bool {
+    let token = token.trim().trim_matches(['(', ')', '"', '\'']);
+    match token.chars().next() {
+        Some(first) if first.is_ascii_digit() => {}
+        _ => return false,
+    }
+    token.contains('.')
+        && token.len() <= 32
+        && token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+'))
+}
+
+/// Extract a justified (product, version) pair from a greeting remainder.
+///
+/// Scans whitespace-separated words for the first token that justifies a
+/// product claim: a structured `Product/version` token, or a clean token
+/// followed by a version-like token. Hostnames, chatter words, and bare
+/// protocol words are skipped. Returns `(None, None)` rather than guessing.
+///
+/// Examples: `"FixtureFTP 1.0 ready"` → `("FixtureFTP", "1.0")`;
+/// `"mx.example.com ESMTP Postfix 3.7"` → `("Postfix", "3.7")`;
+/// `"server ESMTP"` → `(None, None)`; `"(vsFTPd 3.0.3)"` → `("vsFTPd", "3.0.3")`.
+pub fn product_from_greeting(remainder: &str) -> (Option<String>, Option<String>) {
+    let words: Vec<&str> = remainder.split_whitespace().collect();
+    let mut index = 0;
+    while index < words.len() {
+        let word = words[index];
+        // Bare IP literals are addresses, never products or versions.
+        if word
+            .trim_matches(['(', ')', '"', '\''])
+            .parse::<std::net::IpAddr>()
+            .is_ok()
+        {
+            index += 1;
+            continue;
+        }
+        // Digit-led tokens with letters (`10.5.22-MariaDB`): split the
+        // leading dotted-numeric version from the trailing product text.
+        if word.starts_with(|c: char| c.is_ascii_digit())
+            && word.chars().any(|c| c.is_ascii_alphabetic())
+        {
+            let prefix_len = word
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '.')
+                .map(char::len_utf8)
+                .sum::<usize>();
+            let (prefix, rest) = word.split_at(prefix_len.min(word.len()));
+            if looks_like_version(prefix) {
+                let rest = rest.trim_start_matches(['-', '_', '/', ' ']);
+                let product = sanitize_product_token(rest);
+                let version = prefix.trim().trim_matches(['(', ')', '"', '\'']).to_owned();
+                return (product, Some(version));
+            }
+            index += 1;
+            continue;
+        }
+        // Hostname-like tokens (letters plus dots, no structured
+        // separator) are addresses, never products — skip them.
+        if word.contains('.')
+            && !word.contains('/')
+            && word.chars().any(|c| c.is_ascii_alphabetic())
+        {
+            index += 1;
+            continue;
+        }
+        // Structured `Product/version` (or _/- separated with version) is
+        // the strongest single-token product evidence.
+        let (structured_product, structured_version) = split_product_token(word);
+        if !structured_product.is_empty()
+            && structured_version.is_some()
+            && sanitize_product_token(&structured_product).is_some()
+        {
+            let product = sanitize_product_token(&structured_product).unwrap_or_default();
+            if !product.is_empty() {
+                return (Some(product), structured_version);
+            }
+        }
+        // Bare token followed by a version-like token (`Postfix 3.7`).
+        if let Some(clean) = sanitize_product_token(word) {
+            if let Some(next) = words.get(index + 1) {
+                if looks_like_version(next) {
+                    let version = next.trim().trim_matches(['(', ')', '"', '\'']).to_owned();
+                    return (Some(clean), Some(version));
+                }
+            }
+            // Bare product-like token with separators but no adjacent
+            // version (`Pure-FTPd`, `dropbear`) is still a justified
+            // product claim, without a version. A lone plain word is
+            // NOT: greeting first words are usually hostnames, and an
+            // unversioned plain word cannot be told apart from chatter,
+            // so it stays unknown (banner preserved separately).
+            if word.contains(['/', '_', '-']) {
+                return (Some(clean), None);
+            }
+        } else if looks_like_version(word) {
+            // A version with no product context (e.g. MySQL `8.0.36`):
+            // version evidence only, never an invented product.
+            let version = word.trim().trim_matches(['(', ')', '"', '\'']).to_owned();
+            return (None, Some(version));
+        }
+        index += 1;
+    }
+    (None, None)
+}
+
 /// Truncate evidence text to a byte budget on a char boundary, reporting
 /// whether truncation happened.
 pub fn truncate_bounded(text: &str, max_bytes: usize) -> (String, bool) {
@@ -340,6 +661,80 @@ pub fn truncate_bounded(text: &str, max_bytes: usize) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use confidence::*;
+
+    #[test]
+    fn confidence_classes_keep_wire_order() {
+        const _: () = {
+            assert!(CONFIRMED > STRONG);
+            assert!(STRONG > CHARACTERISTIC);
+            assert!(CHARACTERISTIC > PROBABLE);
+            assert!(PROBABLE > BANNER);
+            assert!(BANNER > SILENT);
+            assert!(CONFIRMED == 90);
+            assert!(STRONG == 85);
+            assert!(CHARACTERISTIC == 80);
+            assert!(PROBABLE == 70);
+            assert!(BANNER == 50);
+            assert!(SILENT == 20);
+        };
+    }
+
+    #[test]
+    fn greeting_products_require_justification() {
+        // Valid product + version.
+        assert_eq!(
+            product_from_greeting("FixtureFTP 1.0 ready"),
+            (Some("FixtureFTP".to_owned()), Some("1.0".to_owned()))
+        );
+        // Hostname and chatter skipped; real product found later.
+        assert_eq!(
+            product_from_greeting("mx.example.com ESMTP Postfix 3.7"),
+            (Some("Postfix".to_owned()), Some("3.7".to_owned()))
+        );
+        // Chatter alone: unknown beats invented precision.
+        assert_eq!(product_from_greeting("server ESMTP"), (None, None));
+        assert_eq!(product_from_greeting("ready"), (None, None));
+        // Punctuation-wrapped token.
+        assert_eq!(
+            product_from_greeting("(vsFTPd 3.0.3)"),
+            (Some("vsFTPd".to_owned()), Some("3.0.3".to_owned()))
+        );
+        // Structured token.
+        assert_eq!(
+            product_from_greeting("nginx/1.27.2"),
+            (Some("nginx".to_owned()), Some("1.27.2".to_owned()))
+        );
+        // Separated product without version stays a product, no version.
+        assert_eq!(
+            product_from_greeting("Pure-FTPd"),
+            (Some("Pure-FTPd".to_owned()), None)
+        );
+        // Bare IP literal is never a product or version.
+        assert_eq!(product_from_greeting("192.168.1.1"), (None, None));
+        // Version-led mixed token splits version from product.
+        assert_eq!(
+            product_from_greeting("10.5.22-MariaDB"),
+            (Some("MariaDB".to_owned()), Some("10.5.22".to_owned()))
+        );
+        // Version alone: version evidence only, product stays unknown.
+        assert_eq!(
+            product_from_greeting("8.0.36"),
+            (None, Some("8.0.36".to_owned()))
+        );
+        // Non-ASCII tokens cannot justify products.
+        assert_eq!(
+            product_from_greeting("sérver 1.0"),
+            (None, Some("1.0".to_owned()))
+        );
+        // Oversized tokens cannot justify products.
+        assert_eq!(product_from_greeting(&"A".repeat(70)), (None, None));
+        // SSH-shaped text inside a greeting fabricates nothing.
+        assert_eq!(product_from_greeting("SSH-2.0 server"), (None, None));
+        // Malformed/empty input.
+        assert_eq!(product_from_greeting(""), (None, None));
+        assert_eq!(product_from_greeting("   "), (None, None));
+    }
 
     #[test]
     fn planner_prioritizes_likely_probes_first() {
@@ -361,11 +756,39 @@ mod tests {
 
     #[test]
     fn unknown_ports_stay_conservative() {
-        assert_eq!(plan_probes(54321, 2, ScanGoal::Recon), vec![PROBE_GENERIC]);
-        assert_eq!(plan_probes(54321, 3, ScanGoal::Recon)[0], PROBE_GENERIC);
-        assert!(plan_probes(54321, 3, ScanGoal::Recon).contains(&PROBE_HTTP));
-        // Web goals try HTTP one level earlier on unknown ports.
-        assert!(plan_probes(54321, 2, ScanGoal::Web).contains(&PROBE_HTTP));
+        // Level-graded speculative budgets: passive always, then pivots.
+        assert_eq!(plan_probes(54321, 1, ScanGoal::Recon), vec![PROBE_GENERIC]);
+        assert_eq!(
+            plan_probes(54321, 2, ScanGoal::Recon),
+            vec![PROBE_GENERIC, PROBE_HTTP]
+        );
+        assert_eq!(
+            plan_probes(54321, 3, ScanGoal::Recon),
+            vec![PROBE_GENERIC, PROBE_HTTP, PROBE_REDIS]
+        );
+        assert_eq!(
+            plan_probes(54321, 4, ScanGoal::Recon),
+            vec![PROBE_GENERIC, PROBE_HTTP, PROBE_REDIS, PROBE_TLS]
+        );
+        let l5 = plan_probes(54321, 5, ScanGoal::Recon);
+        assert_eq!(
+            l5,
+            vec![
+                PROBE_GENERIC,
+                PROBE_HTTP,
+                PROBE_REDIS,
+                PROBE_TLS,
+                PROBE_POSTGRES,
+                PROBE_SMTP
+            ]
+        );
+        assert!(l5.len() <= MAX_PROBES_PER_PORT);
+        // Goal never changes the unknown-port set (order/candidacy may
+        // consider ports, identity never does).
+        assert_eq!(
+            plan_probes(54321, 3, ScanGoal::Web),
+            plan_probes(54321, 3, ScanGoal::Recon)
+        );
     }
 
     #[test]

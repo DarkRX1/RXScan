@@ -571,6 +571,7 @@ pub fn fetch_plain(
         timeout: connect_timeout,
         deadline,
         cancel,
+        connections: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
     let mut stream = ctx.connect().map_err(|reason| {
         if reason.contains("cancelled") || reason.contains("deadline") {

@@ -34,9 +34,9 @@ use crate::model::{
 };
 use crate::plan::{ScanGoal, SpeedSetting};
 use crate::probes::{
-    CertFacts, ProbeAttempt, ProbeCtx, parse_cert_facts, probe_ftp, probe_generic, probe_http,
-    probe_http_inner, probe_mysql, probe_postgres, probe_redis, probe_smtp, probe_smtp_inner,
-    probe_ssh, probe_tls,
+    CertFacts, ProbeAttempt, ProbeCtx, match_ssh_identification, parse_cert_facts, probe_ftp,
+    probe_generic, probe_http, probe_http_inner, probe_mysql, probe_postgres, probe_redis,
+    probe_smtp, probe_smtp_inner, probe_ssh, probe_tls, split_220_greeting,
 };
 use crate::service::{
     MAX_PROBES_PER_PORT, PROBE_HTTP, PROBE_SMTP, ServiceObservation, plan_probes, service_asset_id,
@@ -73,11 +73,13 @@ impl ServicePolicy {
 
     pub fn describe(&self) -> String {
         format!(
-            "service level {} ({:?}): planner ≤{} probes/port, probe budget {}ms",
+            "service level {} ({}): planner ≤{} probes/port, probe budget {}ms, passive window {}ms, speculative redis/postgres {}ms; unknown-port actives by level: L1 none, L2 http, L3 +redis, L4 +tls, L5 +postgres,smtp(220-gated); known ports append pivots at L4(+http)/L5(+redis,+tls)",
             self.level,
             self.goal,
             MAX_PROBES_PER_PORT,
             self.probe_budget().as_millis(),
+            PASSIVE_WINDOW_MS,
+            SHORT_SPECULATIVE_MS,
         )
     }
 }
@@ -295,6 +297,7 @@ fn execute_service_probe(
 
     let family = AddressFamily::of(&target.address);
     let probe_budget = policy.probe_budget();
+    let connections = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut attempt_log: Vec<String> = Vec::new();
     let mut classified: Option<ProbeAttempt> = None;
     // Best unclassified result: the first attempt carrying a banner becomes
@@ -304,115 +307,352 @@ fn execute_service_probe(
     let mut cert_facts: Option<CertFacts> = None;
     let mut tls_observation: Option<crate::tls::TlsObservation> = None;
     let mut truncated = false;
+    // Every executed probe evaluation (network or passive-covered) lands
+    // here in order: first classification wins, first banner seeds the
+    // unknown fallback, and byte/write sums stay exact.
+    let mut attempts_made: Vec<ProbeAttempt> = Vec::new();
 
-    for probe_id in &plan {
+    // Step 0: shared passive observation (one connection) when the plan
+    // contains the generic consumer. The SAME bytes feed every passive
+    // matcher — no separate passive connection per matcher. Pure-active
+    // plans (e.g. L1 `[tls]`) skip it, preserving minimal behavior.
+    let wants_passive = plan.iter().any(|probe| probe.as_str() == "generic");
+    let passive = if wants_passive {
+        Some(observe_passive(
+            &target,
+            probe_budget,
+            task_deadline,
+            &cancel,
+            connections.clone(),
+        ))
+    } else {
+        None
+    };
+    let mut passive_verdict = passive.as_ref().map(evaluate_passive);
+    // A passive classification stops everything: strong server-first
+    // identity from a single connection.
+    if let Some(PassiveVerdict::Classified(attempt)) = passive_verdict.take() {
+        attempt_log.push(format!(
+            "passive: classified {} (1 connection, {} bytes)",
+            attempt.protocol, attempt.bytes_in
+        ));
+        emit_attempt_event(&mut events, &attempt, &target, &provenance)?;
+        attempts_made.push((*attempt).clone());
+        classified = Some(*attempt);
+    }
+
+    // Deferred speculative actives, in plan order. Declared outside the
+    // sequential phase so Phase B can consume it afterwards.
+    let mut wave: Vec<String> = Vec::new();
+    // Full-budget context shared by sequential inline probes and the TLS
+    // composition step (speculative shorts are derived per wave item).
+    let ctx = ProbeCtx {
+        ip: target.address,
+        port: target.port,
+        host_label: &target.target_label,
+        timeout: probe_budget,
+        deadline: task_deadline,
+        cancel: &cancel,
+        connections: connections.clone(),
+    };
+    if classified.is_none() {
+        // Deferred speculative actives for Phase B, in plan order.
+        for probe_id in &plan {
+            if cancel.is_cancelled() {
+                return Err(ModuleError::Cancelled);
+            }
+            if task_deadline.saturating_duration_since(Instant::now()) < PROBE_PLANNING_FLOOR {
+                truncated = true;
+                attempt_log.push(format!("{probe_id}: skipped (task budget exhausted)"));
+                break;
+            }
+            // Passive-covered probes never reconnect: ssh/mysql/generic
+            // were already evaluated on the shared observation (a miss
+            // there is evidence, not an excuse for another connection).
+            // FTP/SMTP run the disambiguation exchange unless passive
+            // bytes refute mail outright.
+            match probe_id.as_str() {
+                "generic" => {
+                    // Passive-covered: evaluate on shared bytes without
+                    // reconnecting. Without a passive observation (defensive;
+                    // unreachable for planner-built plans) run it fresh.
+                    let attempt = match passive.as_ref() {
+                        Some(_) => passive_generic_attempt(passive.as_ref()),
+                        None => probe_generic(&ctx),
+                    };
+                    attempts_made.push(attempt.clone());
+                    emit_attempt_event(&mut events, &attempt, &target, &provenance)?;
+                    attempt_log.push(format!(
+                        "generic: {}",
+                        attempt
+                            .evidence
+                            .first()
+                            .cloned()
+                            .unwrap_or_else(|| "miss".to_owned())
+                    ));
+                    if attempt.classified() {
+                        classified = Some(attempt);
+                        break;
+                    }
+                    if fallback.is_none() && attempt.banner.is_some() {
+                        fallback = Some(attempt);
+                    }
+                    continue;
+                }
+                "ssh" | "mysql" => {
+                    // Passive-covered when observed (a miss there is
+                    // evidence, not an excuse for another connection);
+                    // dedicated fresh read only without passive (L1 plans).
+                    let attempt = match passive.as_ref() {
+                        Some(_) => passive_refuted_attempt(probe_id, passive.as_ref()),
+                        None => run_plain_probe(probe_id, &ctx),
+                    };
+                    attempts_made.push(attempt.clone());
+                    emit_attempt_event(&mut events, &attempt, &target, &provenance)?;
+                    attempt_log.push(format!(
+                        "{probe_id}: {}",
+                        attempt
+                            .evidence
+                            .first()
+                            .cloned()
+                            .unwrap_or_else(|| "miss".to_owned())
+                    ));
+                    if fallback.is_none() && attempt.banner.is_some() {
+                        fallback = Some(attempt);
+                    }
+                    continue;
+                }
+                "ftp" | "smtp" => {
+                    if !mail_probe_justified(passive.as_ref()) {
+                        let attempt = passive_refuted_attempt(probe_id, passive.as_ref());
+                        attempts_made.push(attempt.clone());
+                        emit_attempt_event(&mut events, &attempt, &target, &provenance)?;
+                        attempt_log.push(format!(
+                            "{probe_id}: skipped (passive observation refutes mail)"
+                        ));
+                        if fallback.is_none() && attempt.banner.is_some() {
+                            fallback = Some(attempt);
+                        }
+                        continue;
+                    }
+                    // Justified: shared disambiguation exchange (own bounded
+                    // connection; identity from grammar, never the port).
+                    let attempt = run_plain_probe(probe_id, &ctx);
+                    if cancel.is_cancelled() {
+                        return Err(ModuleError::Cancelled);
+                    }
+                    attempts_made.push(attempt.clone());
+                    emit_attempt_event(&mut events, &attempt, &target, &provenance)?;
+                    attempt_log.push(format!(
+                        "{probe_id}: {}",
+                        if attempt.classified() {
+                            format!("classified {}", attempt.protocol)
+                        } else {
+                            attempt
+                                .evidence
+                                .first()
+                                .cloned()
+                                .unwrap_or_else(|| "miss".to_owned())
+                        }
+                    ));
+                    if attempt.classified() {
+                        classified = Some(attempt);
+                        break;
+                    }
+                    if fallback.is_none() && attempt.banner.is_some() {
+                        fallback = Some(attempt);
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+            // Remaining kinds are speculative actives (http/tls/redis/
+            // postgres or an unlisted id): defer to the bounded parallel
+            // wave below. Each gets its own bounded connection; results
+            // merge back in plan order so output stays deterministic.
+            wave.push(probe_id.clone());
+            continue;
+        }
+    } // end Phase A: sequential evaluations + evidence-priority probes
+
+    // Phase B: bounded parallel wave over deferred speculative actives.
+    // Independent probes overlap their I/O waits instead of summing
+    // sequential read timeouts on quiet ports. Width is naturally bounded
+    // (at most the plan's active count, ≤5 given MAX_PROBES_PER_PORT).
+    // Replay below is two-step — materialize every result in plan order,
+    // then decide — so a plan-first classification wins exactly as if
+    // sequential, while every executed probe stays counted and logged.
+    if !wave.is_empty() && classified.is_none() {
         if cancel.is_cancelled() {
             return Err(ModuleError::Cancelled);
         }
-        if task_deadline.saturating_duration_since(Instant::now()) < PROBE_PLANNING_FLOOR {
-            truncated = true;
-            attempt_log.push(format!("{probe_id}: skipped (task budget exhausted)"));
-            break;
+        let wave_results = run_wave(
+            &wave,
+            &target,
+            probe_budget,
+            task_deadline,
+            &cancel,
+            connections.clone(),
+        );
+        // Step 1: materialize. TLS sessions stay live for a possible
+        // composition; everything else becomes a plain attempt record.
+        struct Replayed {
+            probe_id: String,
+            attempt: ProbeAttempt,
+            tls_session: Option<(
+                Box<crate::tls::EstablishedTls>,
+                crate::tls::TlsObservation,
+                Option<Vec<u8>>,
+            )>,
         }
-        let ctx = ProbeCtx {
-            ip: target.address,
-            port: target.port,
-            host_label: &target.target_label,
-            timeout: probe_budget,
-            deadline: task_deadline,
-            cancel: &cancel,
-        };
-        match probe_id.as_str() {
-            "tls" => {
-                match probe_tls(&ctx) {
-                    crate::probes::TlsProbeOutcome::Cancelled => {
-                        return Err(ModuleError::Cancelled);
-                    }
-                    crate::probes::TlsProbeOutcome::Miss(attempt) => {
-                        emit_attempt_event(&mut events, &attempt, &target, &provenance)?;
-                        attempt_log.push(format!(
-                            "tls: miss ({})",
-                            attempt.evidence.first().cloned().unwrap_or_default()
-                        ));
-                    }
-                    crate::probes::TlsProbeOutcome::Established(
-                        mut session,
-                        observation,
-                        leaf_der,
-                    ) => {
-                        emit_tls_observed(&mut events, &observation, &target, &provenance)?;
-                        attempt_log.push(format!(
-                            "tls: handshake {} {} ({}ms)",
-                            observation.negotiated_version,
-                            observation.cipher_suite,
-                            observation.latency.as_millis()
-                        ));
-                        let facts = leaf_der
-                            .as_deref()
-                            .and_then(|der| parse_cert_facts(der, &target.target_label));
-                        if let Some(facts) = facts {
-                            emit_cert_records(
-                                &mut assets,
-                                &mut events,
-                                &mut evidence_items,
-                                &facts,
-                                &target,
-                                &provenance,
-                            )?;
-                            cert_facts = Some(facts);
-                        }
-                        // Composition: HTTP or SMTP inside the same session when
-                        // the port is TLS-likely for it or the plan includes
-                        // the probe (planner-driven, never guessed).
-                        let (composed, composition_notes) = compose_over_tls(
-                            &mut session,
-                            &observation,
-                            &target,
-                            &ctx,
-                            &plan,
-                            &mut events,
-                            &provenance,
-                        )?;
-                        attempt_log.extend(composition_notes);
-                        tls_observation = Some(observation);
-                        if let Some(hit) = composed {
-                            classified = Some(hit);
-                            break;
-                        }
-                        // Bare TLS stands as the classification.
-                        classified = Some(bare_tls_attempt(
-                            &tls_observation.clone().unwrap(),
-                            cert_facts.clone(),
-                        ));
-                        break;
+        let mut replay: Vec<Replayed> = Vec::with_capacity(wave_results.len());
+        for (probe_id, out) in wave_results {
+            if cancel.is_cancelled() {
+                return Err(ModuleError::Cancelled);
+            }
+            match out {
+                WaveOut::TlsCancelled => return Err(ModuleError::Cancelled),
+                WaveOut::Attempt(attempt) => replay.push(Replayed {
+                    probe_id,
+                    attempt: *attempt,
+                    tls_session: None,
+                }),
+                WaveOut::TlsEstablished {
+                    session,
+                    observation,
+                    leaf_der,
+                } => {
+                    let facts = leaf_der
+                        .as_deref()
+                        .and_then(|der| parse_cert_facts(der, &target.target_label));
+                    let bare = bare_tls_attempt(&observation, facts.clone());
+                    replay.push(Replayed {
+                        probe_id,
+                        attempt: bare,
+                        tls_session: Some((session, observation, leaf_der)),
+                    });
+                    if cert_facts.is_none() {
+                        cert_facts = facts;
                     }
                 }
             }
-            other => {
-                let attempt = run_plain_probe(other, &ctx);
-                if cancel.is_cancelled() {
-                    return Err(ModuleError::Cancelled);
+        }
+        // Step 2: winner first (plan order, as if sequential), so later
+        // composition/fallback logic sees the same decision point.
+        let winner = replay.iter().position(|item| item.attempt.classified());
+        // Step 3: emit and log every result in plan order. TLS sessions
+        // record their bare conclusion like any other executed probe
+        // (superseded or not, the handshake happened); composition runs
+        // in step 4 only for a TLS winner.
+        let mut tls_record_pos: Option<usize> = None;
+        for item in &replay {
+            // TLS sessions log their handshake line (as sequential code
+            // did); every other result logs the standard one-liner.
+            if item.probe_id == "tls" {
+                if let Some((_, observation, _)) = item.tls_session.as_ref() {
+                    emit_tls_observed(&mut events, observation, &target, &provenance)?;
+                    attempt_log.push(format!(
+                        "tls: handshake {} {} ({}ms)",
+                        observation.negotiated_version,
+                        observation.cipher_suite,
+                        observation.latency.as_millis()
+                    ));
+                    tls_record_pos = Some(attempts_made.len());
+                } else {
+                    attempt_log.push(format!(
+                        "{}: {}",
+                        item.probe_id,
+                        item.attempt
+                            .evidence
+                            .first()
+                            .cloned()
+                            .unwrap_or_else(|| "miss".to_owned())
+                    ));
                 }
-                emit_attempt_event(&mut events, &attempt, &target, &provenance)?;
+            } else {
                 attempt_log.push(format!(
-                    "{other}: {}",
-                    if attempt.classified() {
-                        format!("classified {}", attempt.protocol)
+                    "{}: {}",
+                    item.probe_id,
+                    if item.attempt.classified() {
+                        format!("classified {}", item.attempt.protocol)
                     } else {
-                        attempt
+                        item.attempt
                             .evidence
                             .first()
                             .cloned()
                             .unwrap_or_else(|| "miss".to_owned())
                     }
                 ));
-                if attempt.classified() {
-                    classified = Some(attempt);
-                    break;
+            }
+            attempts_made.push(item.attempt.clone());
+            emit_attempt_event(&mut events, &item.attempt, &target, &provenance)?;
+            attempt_log.push(format!(
+                "{}: {}",
+                item.probe_id,
+                if item.attempt.classified() {
+                    format!("classified {}", item.attempt.protocol)
+                } else {
+                    item.attempt
+                        .evidence
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "miss".to_owned())
                 }
-                if fallback.is_none() && attempt.banner.is_some() {
-                    fallback = Some(attempt);
+            ));
+            if fallback.is_none() && item.attempt.banner.is_some() {
+                fallback = Some(item.attempt.clone());
+            }
+        }
+        // Step 4: TLS composition runs only when the TLS result is the
+        // plan-first winner (sequential-equivalent: composition never runs
+        // for a probe sequential execution would not have reached).
+        // Certificate records attach only in that case too.
+        if let Some(index) = winner {
+            let is_tls_winner =
+                replay[index].probe_id == "tls" && replay[index].tls_session.is_some();
+            if is_tls_winner {
+                let item = &mut replay[index];
+                let (session, observation, _) = item.tls_session.as_mut().unwrap();
+                if let Some(facts) = cert_facts.clone() {
+                    emit_cert_records(
+                        &mut assets,
+                        &mut events,
+                        &mut evidence_items,
+                        &facts,
+                        &target,
+                        &provenance,
+                    )?;
                 }
+                // Composition: HTTP or SMTP inside the same session when
+                // the port is TLS-likely for it or the plan includes
+                // the probe (planner-driven, never guessed).
+                let (composed, composition_notes) = compose_over_tls(
+                    session,
+                    observation,
+                    &target,
+                    &ctx,
+                    &plan,
+                    &mut events,
+                    &provenance,
+                )?;
+                attempt_log.extend(composition_notes);
+                tls_observation = Some(observation.clone());
+                if let Some(hit) = composed {
+                    // The composed application protocol supersedes bare TLS
+                    // (same decision sequential execution reaches): swap the
+                    // bare record for the composed one, keeping counts exact.
+                    if let Some(pos) = tls_record_pos {
+                        if let Some(slot) = attempts_made.get_mut(pos) {
+                            *slot = hit.clone();
+                        }
+                    }
+                    classified = Some(hit);
+                } else {
+                    classified = Some(item.attempt.clone());
+                }
+            } else {
+                let winner_attempt = replay[index].attempt.clone();
+                classified = Some(winner_attempt);
             }
         }
     }
@@ -423,15 +663,66 @@ fn execute_service_probe(
     if task_deadline.saturating_duration_since(Instant::now()) < Duration::from_millis(50) {
         truncated = true;
     }
+    // Hard accounting from the shared connection counter and attempt
+    // records: exact connections, executed probes, probe-level writes,
+    // and byte totals. Surfaced in ServiceProbeCompleted details.
+    let connections_opened = connections.load(std::sync::atomic::Ordering::Relaxed) as u64;
+    let probes_executed = attempts_made.len() as u32;
+    let bytes_read: u64 = attempts_made.iter().map(|a| a.bytes_in as u64).sum();
+    let bytes_written: u64 = attempts_made.iter().map(|a| a.bytes_out as u64).sum();
+    let writes: u64 = attempts_made.iter().map(|a| u64::from(a.writes)).sum();
     // A banner-bearing unknown result still becomes the observation; only a
     // fully silent run falls back to the default below.
     let result = classified.or(fallback);
+    let matched_by = result.as_ref().and_then(|attempt| {
+        if attempt.classified() {
+            Some(attempt.probe_id.to_owned())
+        } else {
+            None
+        }
+    });
+    let unknown_fingerprint = match &result {
+        // Fingerprint the richest bounded observation available: the shared
+        // passive bytes when present, else the preserved banner text.
+        // Silence fingerprints nothing.
+        Some(attempt) if !attempt.classified() => {
+            let banner_bytes;
+            let (bytes, spoke_first, truncated_fp) = match passive
+                .as_ref()
+                .filter(|observation| !observation.bytes.is_empty())
+            {
+                Some(observation) => (
+                    observation.bytes.as_slice(),
+                    observation.spoke_first,
+                    observation.truncated,
+                ),
+                None => {
+                    banner_bytes = attempt.banner.clone().unwrap_or_default().into_bytes();
+                    (banner_bytes.as_slice(), false, attempt.truncated)
+                }
+            };
+            crate::service::UnknownFingerprint::compute(
+                bytes,
+                spoke_first,
+                attempt.probe_id,
+                truncated_fp,
+            )
+        }
+        _ => None,
+    };
     finish_observation(
         result,
         cert_facts,
         tls_observation,
         attempt_log,
         truncated,
+        matched_by,
+        unknown_fingerprint,
+        connections_opened,
+        probes_executed,
+        bytes_written,
+        bytes_read,
+        writes,
         &target,
         family,
         policy,
@@ -465,6 +756,401 @@ fn run_plain_probe(probe_id: &str, ctx: &ProbeCtx) -> ProbeAttempt {
         "postgres" => probe_postgres(ctx),
         _ => probe_generic(ctx),
     }
+}
+
+/// Registry probe identity (static) for runtime plan ids. Unknown ids
+/// fall back to generic (passive read, never classifies blindly).
+fn static_probe_id(name: &str) -> &'static str {
+    match name {
+        "ssh" => "ssh",
+        "http" => "http",
+        "ftp" => "ftp",
+        "smtp" => "smtp",
+        "redis" => "redis",
+        "mysql" => "mysql",
+        "postgres" => "postgres",
+        "tls" => "tls",
+        _ => "generic",
+    }
+}
+
+/// One deferred speculative probe's network result, collected by the
+/// parallel wave and replayed in plan order by the caller.
+enum WaveOut {
+    Attempt(Box<ProbeAttempt>),
+    TlsEstablished {
+        session: Box<crate::tls::EstablishedTls>,
+        observation: crate::tls::TlsObservation,
+        leaf_der: Option<Vec<u8>>,
+    },
+    TlsCancelled,
+}
+
+/// Bounded parallel wave over deferred speculative actives.
+///
+/// Independent probes overlap their I/O waits instead of summing sequential
+/// read timeouts on quiet ports. Results return in plan order with the
+/// probe id attached; the caller replays them sequentially (first
+/// classification wins), so observable output matches sequential
+/// execution. Width is the eligible active count (≤5). A panicking probe
+/// thread becomes a miss with explicit evidence rather than stalling the
+/// task: parsers are bounded, but a scanner must never hang on them.
+#[allow(clippy::too_many_arguments)]
+fn run_wave(
+    wave: &[String],
+    target: &ServiceTarget,
+    probe_budget: Duration,
+    task_deadline: Instant,
+    cancel: &CancellationToken,
+    connections: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) -> Vec<(String, WaveOut)> {
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(wave.len());
+        for probe_id in wave.iter() {
+            let short = matches!(probe_id.as_str(), "redis" | "postgres");
+            // Redis/PostgreSQL grammars need ≤256 bytes: a short sub-budget
+            // keeps silence cheap. Pivots (HTTP/TLS) keep the full budget.
+            let budget = if short {
+                probe_budget.min(Duration::from_millis(SHORT_SPECULATIVE_MS))
+            } else {
+                probe_budget
+            };
+            let owned_id = probe_id.clone();
+            let conns = connections.clone();
+            handles.push((
+                probe_id.clone(),
+                scope.spawn(move || {
+                    let probe_ctx = ProbeCtx {
+                        ip: target.address,
+                        port: target.port,
+                        host_label: &target.target_label,
+                        timeout: budget,
+                        deadline: task_deadline.min(Instant::now() + budget),
+                        cancel,
+                        connections: conns,
+                    };
+                    run_wave_probe(&owned_id, &probe_ctx)
+                }),
+            ));
+        }
+        handles
+            .into_iter()
+            .map(|(probe_id, handle)| {
+                let out = match handle.join() {
+                    Ok(out) => out,
+                    Err(_) => WaveOut::Attempt(Box::new(ProbeAttempt::miss(
+                        static_probe_id(&probe_id),
+                        format!("{probe_id}: probe thread failed"),
+                    ))),
+                };
+                (probe_id, out)
+            })
+            .collect()
+    })
+}
+
+/// Execute one deferred probe inside the wave (own bounded connection).
+fn run_wave_probe(probe_id: &str, ctx: &ProbeCtx) -> WaveOut {
+    if probe_id == "tls" {
+        // probe_tls builds its own socket inside tls::connect_tls (exactly
+        // one TCP connection per call, handshake or not), bypassing
+        // ProbeCtx::connect: count it here so accounting stays exact.
+        ctx.connections
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return match probe_tls(ctx) {
+            crate::probes::TlsProbeOutcome::Cancelled => WaveOut::TlsCancelled,
+            crate::probes::TlsProbeOutcome::Miss(attempt) => WaveOut::Attempt(attempt),
+            crate::probes::TlsProbeOutcome::Established(session, observation, leaf_der) => {
+                WaveOut::TlsEstablished {
+                    session,
+                    observation,
+                    leaf_der,
+                }
+            }
+        };
+    }
+    WaveOut::Attempt(Box::new(run_plain_probe(static_probe_id(probe_id), ctx)))
+}
+
+/// Small bounded server-first observation window (passive reads only).
+/// Shorter than a full probe budget: banners arrive in milliseconds;
+/// silence must fail fast so quiet ports stay cheap.
+pub const PASSIVE_WINDOW_MS: u64 = 1000;
+/// Short sub-budget for speculative grammars that need few bytes
+/// (Redis single line, PostgreSQL single byte). Pivots (HTTP/TLS) keep the
+/// full probe budget.
+pub const SHORT_SPECULATIVE_MS: u64 = 800;
+/// Cap on bytes retained from the shared passive observation.
+pub const PASSIVE_MAX_BYTES: usize = 2048;
+
+/// One shared server-first observation feeding every passive matcher.
+#[derive(Debug, Clone, Default)]
+pub struct PassiveObservation {
+    /// Bounded raw bytes (up to [`PASSIVE_MAX_BYTES`]).
+    pub bytes: Vec<u8>,
+    /// Whether the server spoke first (non-empty before the window ended).
+    pub spoke_first: bool,
+    /// Whether the first line terminated (needed for line grammars).
+    pub saw_newline: bool,
+    /// Whether the reader hit the byte budget.
+    pub truncated: bool,
+    pub elapsed_ms: u64,
+}
+
+/// Collect one bounded server-first observation on a fresh connection.
+/// Sends nothing. Silent servers cost at most the window, never more.
+fn observe_passive(
+    target: &ServiceTarget,
+    probe_budget: Duration,
+    task_deadline: Instant,
+    cancel: &CancellationToken,
+    connections: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) -> PassiveObservation {
+    let started = Instant::now();
+    let window = probe_budget.min(Duration::from_millis(PASSIVE_WINDOW_MS));
+    let ctx = ProbeCtx {
+        ip: target.address,
+        port: target.port,
+        host_label: &target.target_label,
+        timeout: window,
+        deadline: task_deadline.min(started + window),
+        cancel,
+        connections,
+    };
+    // Reuse the bounded TCP prober for a pure read: connect, then read
+    // without writing. Any connect failure yields an empty observation.
+    let mut observation = PassiveObservation::default();
+    let Ok(mut stream) = ctx.connect() else {
+        observation.elapsed_ms = started.elapsed().as_millis() as u64;
+        return observation;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+    use std::io::Read as _;
+    let mut first_newline = false;
+    let deadline = ctx.deadline;
+    while observation.bytes.len() < PASSIVE_MAX_BYTES {
+        if cancel.is_cancelled() || Instant::now() >= deadline || started.elapsed() >= window {
+            break;
+        }
+        let mut chunk = [0u8; 1024];
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(count) => {
+                let room = PASSIVE_MAX_BYTES.saturating_sub(observation.bytes.len());
+                observation
+                    .bytes
+                    .extend_from_slice(&chunk[..count.min(room)]);
+                if !first_newline && observation.bytes.contains(&b'\n') {
+                    first_newline = true;
+                    // One line suffices for line grammars, but keep reading
+                    // briefly: binary framings (MySQL) have no newlines.
+                    // Binary data arrives immediately or not at all; a short
+                    // grace covers segmentation without funding silence.
+                    std::thread::sleep(Duration::from_millis(50));
+                    // Drain whatever arrived during the grace period.
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(60)));
+                    loop {
+                        let mut extra = [0u8; 1024];
+                        match stream.read(&mut extra) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                let room =
+                                    PASSIVE_MAX_BYTES.saturating_sub(observation.bytes.len());
+                                if room == 0 {
+                                    observation.truncated = true;
+                                    break;
+                                }
+                                observation.bytes.extend_from_slice(&extra[..n.min(room)]);
+                                if observation.bytes.len() >= PASSIVE_MAX_BYTES {
+                                    observation.truncated = true;
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    break;
+                }
+                if observation.bytes.len() >= PASSIVE_MAX_BYTES {
+                    observation.truncated = true;
+                    break;
+                }
+                // Binary-first protocols send everything up front: stop
+                // early once a MySQL-shaped framing is complete or 512
+                // bytes arrived with no newline in sight.
+                if !observation.bytes.contains(&b'\n') && observation.bytes.len() >= 512 {
+                    break;
+                }
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                break;
+            }
+            Err(_) => break,
+        }
+    }
+    observation.saw_newline = first_newline;
+    observation.spoke_first = !observation.bytes.is_empty();
+    observation.elapsed_ms = started.elapsed().as_millis() as u64;
+    observation
+}
+
+/// Fan-out verdict over shared passive bytes. Only complete grammars
+/// classify; everything else stays material for later steps.
+enum PassiveVerdict {
+    /// A passive grammar fully proved identity (ssh/mysql). Boxed: the
+    /// other verdicts carry no data and the attempt is large.
+    Classified(Box<ProbeAttempt>),
+    /// A `220`-led greeting: mail disambiguation is justified, nothing more.
+    MailGated,
+    /// No classification; generic material (banner or silence).
+    Open,
+}
+
+/// Evaluate passive matchers over shared bytes (no I/O, no port identity).
+fn evaluate_passive(observation: &PassiveObservation) -> PassiveVerdict {
+    if observation.bytes.is_empty() {
+        return PassiveVerdict::Open;
+    }
+    let text = String::from_utf8_lossy(&observation.bytes);
+    let first_line = text.lines().next().unwrap_or("").trim().to_owned();
+    // SSH: strict line grammar only (same matcher as dedicated probes).
+    if observation.saw_newline && first_line.starts_with("SSH-") {
+        if let Some((proto, product, version)) = match_ssh_identification(&first_line) {
+            let mut attempt = ProbeAttempt::miss("passive", String::new());
+            attempt.bytes_in = observation.bytes.len();
+            attempt.truncated = observation.truncated;
+            attempt.protocol = "ssh".to_owned();
+            attempt.protocol_version = Some(proto);
+            if let Some(product) = product {
+                attempt.product_hint = Some(product);
+            }
+            attempt.version_hint = version;
+            attempt.banner = Some(first_line.chars().take(200).collect());
+            attempt.confidence = if attempt.product_hint.is_some() {
+                crate::service::confidence::CONFIRMED
+            } else {
+                crate::service::confidence::CHARACTERISTIC
+            };
+            attempt.evidence = vec![
+                format!("passive: SSH identification string {first_line:?}"),
+                "passive: banner satisfies the SSH identification-string grammar".to_owned(),
+            ];
+            return PassiveVerdict::Classified(Box::new(attempt));
+        }
+    }
+    // 220-led greeting: gate mail disambiguation, classify nothing yet.
+    // (A lone 220 never identifies; truncated mid-line greetings still
+    // gate, since the mail probe re-reads the greeting directly.)
+    if split_220_greeting(&first_line).is_some() {
+        return PassiveVerdict::MailGated;
+    }
+    // MySQL: complete packet framing required (inconclusive, never a
+    // refutation, when the buffer holds only a prefix).
+    if let Ok((protocol, version, _)) = crate::probes::parse_mysql_handshake(&observation.bytes) {
+        let (product, detected) = crate::service::product_from_greeting(&version);
+        let mut attempt = ProbeAttempt::miss("passive", String::new());
+        attempt.bytes_in = observation.bytes.len();
+        attempt.truncated = observation.truncated;
+        attempt.protocol = "mysql".to_owned();
+        attempt.protocol_version = Some(format!("handshake-{protocol}"));
+        attempt.product_hint = product;
+        attempt.version_hint = detected.or(Some(version.clone()));
+        attempt.banner = Some(version.chars().take(120).collect());
+        attempt.confidence = crate::service::confidence::STRONG;
+        attempt.evidence = vec![format!(
+            "passive: MySQL handshake protocol {protocol} version {version:?}"
+        )];
+        return PassiveVerdict::Classified(Box::new(attempt));
+    }
+    PassiveVerdict::Open
+}
+
+/// Generic material from passive bytes without reconnecting: SSH already
+/// handled by the fan-out; anything else is unknown-banner or silence.
+fn passive_generic_attempt(passive: Option<&PassiveObservation>) -> ProbeAttempt {
+    let Some(observation) = passive else {
+        return ProbeAttempt::miss("generic", "generic: no passive observation".to_owned());
+    };
+    let mut attempt = ProbeAttempt::miss("generic", String::new());
+    attempt.bytes_in = observation.bytes.len();
+    attempt.truncated = observation.truncated;
+    if observation.bytes.is_empty() {
+        attempt.confidence = 0;
+        attempt.evidence = vec!["generic: silent service, no banner received".to_owned()];
+        return attempt;
+    }
+    let text = String::from_utf8_lossy(&observation.bytes);
+    let first_line = text.lines().next().unwrap_or("").trim().to_owned();
+    attempt.protocol = "unknown".to_owned();
+    attempt.confidence = crate::service::confidence::BANNER;
+    attempt.banner = Some(first_line.chars().take(200).collect());
+    let mut lines = vec![format!(
+        "generic: unknown TCP service, banner preserved ({} bytes)",
+        observation.bytes.len()
+    )];
+    if observation.truncated {
+        lines.push("generic: banner truncated at byte budget".to_owned());
+    }
+    attempt.evidence = lines;
+    attempt
+}
+
+/// Refutation material for passive-nature probes (ssh/mysql) already
+/// evaluated on shared bytes: no reconnect, evidence preserved.
+fn passive_refuted_attempt(probe_id: &str, passive: Option<&PassiveObservation>) -> ProbeAttempt {
+    // Registry probe identity (static): passive-covered ids only.
+    let static_id = match probe_id {
+        "ssh" => "ssh",
+        "mysql" => "mysql",
+        "ftp" => "ftp",
+        "smtp" => "smtp",
+        _ => "generic",
+    };
+    let Some(observation) = passive else {
+        return ProbeAttempt::miss(static_id, format!("{static_id}: no passive observation"));
+    };
+    let mut attempt = ProbeAttempt::miss(static_id, String::new());
+    attempt.bytes_in = observation.bytes.len();
+    attempt.truncated = observation.truncated;
+    if observation.bytes.is_empty() {
+        attempt.evidence = vec![format!("{static_id}: silent service (passive observation)")];
+        return attempt;
+    }
+    let text = String::from_utf8_lossy(&observation.bytes);
+    let first_line = text.lines().next().unwrap_or("").trim().to_owned();
+    attempt.banner = Some(first_line.chars().take(120).collect());
+    attempt.evidence = vec![format!(
+        "{static_id}: passive observation does not satisfy {static_id} grammar"
+    )];
+    attempt
+}
+
+/// Whether running FTP/SMTP disambiguation is justified: the passive
+/// observation is absent (dedicated likely-port probe), `220`-led, or
+/// lacks a complete first line — anything a complete non-220 first line
+/// would refute stays skipped. Silence refutes mail outright: unlike
+/// HTTP/Redis/PostgreSQL/TLS (client-first, silent until spoken to),
+/// FTP and SMTP servers greet first by protocol, so a silent socket
+/// cannot be either and earns no extra connection.
+fn mail_probe_justified(passive: Option<&PassiveObservation>) -> bool {
+    let Some(observation) = passive else {
+        return true;
+    };
+    if observation.bytes.is_empty() {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&observation.bytes);
+    let first_line = text.lines().next().unwrap_or("").trim().to_owned();
+    if split_220_greeting(&first_line).is_some() {
+        return true;
+    }
+    // No complete first line: inconclusive (truncated mid-greeting), so the
+    // mail probe re-reads the greeting directly instead of trusting bytes.
+    !observation.saw_newline
 }
 
 /// HTTP-inside-TLS (or SMTP-inside-TLS) composition on an established
@@ -600,7 +1286,11 @@ fn bare_tls_attempt(
     observation: &crate::tls::TlsObservation,
     cert_facts: Option<CertFacts>,
 ) -> ProbeAttempt {
-    let confidence = if cert_facts.is_some() { 90 } else { 75 };
+    let confidence = if cert_facts.is_some() {
+        crate::service::confidence::CONFIRMED
+    } else {
+        crate::service::confidence::CHARACTERISTIC
+    };
     let mut lines = vec![format!(
         "tls: handshake {} {} completed; peer certificate observed ({})",
         observation.negotiated_version,
@@ -626,7 +1316,10 @@ fn bare_tls_attempt(
         confidence,
         evidence: lines,
         bytes_in: 0,
+        // The handshake write happened inside the TLS session; exact
+        // handshake bytes are untracked, the single write is counted.
         bytes_out: 0,
+        writes: 1,
         truncated: false,
     }
 }
@@ -641,6 +1334,13 @@ fn finish_observation(
     tls_observation: Option<crate::tls::TlsObservation>,
     attempt_log: Vec<String>,
     truncated: bool,
+    matched_by: Option<String>,
+    unknown_fingerprint: Option<crate::service::UnknownFingerprint>,
+    connections_opened: u64,
+    probes_executed: u32,
+    bytes_written: u64,
+    bytes_read: u64,
+    writes: u64,
     target: &ServiceTarget,
     family: AddressFamily,
     policy: &ServicePolicy,
@@ -714,6 +1414,8 @@ fn finish_observation(
         confidence,
         evidence_lines: rawevidence.clone(),
         timestamp: started_at.0,
+        matched_by: matched_by.clone(),
+        unknown_fingerprint: unknown_fingerprint.clone(),
     };
     assets.push(Asset {
         schema_version: crate::model::SCHEMA_VERSION,
@@ -762,6 +1464,7 @@ fn finish_observation(
                     "product_hint": product,
                     "version_hint": version,
                     "confidence": confidence,
+                    "matcher": matched_by,
                 }),
                 MAX_EVENT_DETAILS_BYTES,
             )
@@ -870,6 +1573,12 @@ fn finish_observation(
             "address".to_owned(),
             serde_json::Value::String(target.address.to_string()),
         );
+        if let Some(matcher) = matched_by.as_deref() {
+            finding.metadata.insert(
+                "matcher".to_owned(),
+                serde_json::Value::String(matcher.to_owned()),
+            );
+        }
         if let Some(product) = product {
             finding
                 .metadata
@@ -889,8 +1598,14 @@ fn finish_observation(
             "protocol": protocol,
             "service": label,
             "confidence": confidence,
+            "matcher": matched_by,
             "attempts": attempt_log,
             "truncated": truncated,
+            "connections_opened": connections_opened,
+            "probes_attempted": probes_executed,
+            "writes": writes,
+            "bytes_written": bytes_written,
+            "bytes_read": bytes_read,
             "policy": policy.describe(),
             "elapsed_ms": start_instant.elapsed().as_millis() as u64,
         }),

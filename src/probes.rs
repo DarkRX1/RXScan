@@ -52,6 +52,9 @@ pub struct ProbeAttempt {
     pub evidence: Vec<String>,
     pub bytes_in: usize,
     pub bytes_out: usize,
+    /// Probe-level write operations (each active probe writes once or twice;
+    /// passive probes write zero). Used for hard per-service accounting.
+    pub writes: u32,
     pub truncated: bool,
 }
 
@@ -72,7 +75,7 @@ pub struct CertFacts {
 }
 
 impl ProbeAttempt {
-    fn miss(probe_id: &'static str, reason: impl Into<String>) -> Self {
+    pub(crate) fn miss(probe_id: &'static str, reason: impl Into<String>) -> Self {
         Self {
             probe_id,
             protocol: "unknown".to_owned(),
@@ -87,6 +90,7 @@ impl ProbeAttempt {
             evidence: vec![reason.into()],
             bytes_in: 0,
             bytes_out: 0,
+            writes: 0,
             truncated: false,
         }
     }
@@ -106,6 +110,9 @@ pub struct ProbeCtx<'a> {
     /// Task-level deadline (hard stop).
     pub deadline: Instant,
     pub cancel: &'a CancellationToken,
+    /// Hard-counted connections opened through [`ProbeCtx::connect`],
+    /// shared across derived contexts for exact per-service accounting.
+    pub connections: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl ProbeCtx<'_> {
@@ -122,6 +129,8 @@ impl ProbeCtx<'_> {
     }
 
     pub(crate) fn connect(&self) -> Result<TcpStream, String> {
+        use std::sync::atomic::Ordering;
+        self.connections.fetch_add(1, Ordering::Relaxed);
         let remaining = self
             .remaining()
             .ok_or_else(|| "cancelled or task deadline reached".to_owned())?;
@@ -261,6 +270,35 @@ fn lossy_capped(bytes: &[u8], max_bytes: usize) -> (String, bool) {
 
 // ---------------- SSH ----------------
 
+/// Strict SSH identification-string grammar over one text line.
+///
+/// Returns `(protocol-version, product, version)` only for a fully valid
+/// `SSH-<digit>.<…>-<software>` line. Shared by the dedicated SSH probe,
+/// the generic classifier, and the shared passive fan-out so all three
+/// enforce identical grammar.
+pub fn match_ssh_identification(line: &str) -> Option<(String, Option<String>, Option<String>)> {
+    let rest = line.strip_prefix("SSH-")?;
+    let mut parts = rest.splitn(3, '-');
+    let proto = parts.next().unwrap_or("");
+    if !proto
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_ascii_digit())
+        || !proto.contains('.')
+    {
+        return None;
+    }
+    let software = parts.next().unwrap_or("").to_owned();
+    let comment = parts.next().unwrap_or("").to_owned();
+    let (product, version) = parse_ssh_software(&software, &comment)?;
+    let product = if product.is_empty() {
+        None
+    } else {
+        crate::service::sanitize_product_token(&product)
+    };
+    Some((proto.to_owned(), product, version))
+}
+
 /// Passive SSH identification read. Sends nothing, never authenticates.
 pub fn probe_ssh(ctx: &ProbeCtx) -> ProbeAttempt {
     let started = Instant::now();
@@ -290,39 +328,29 @@ pub fn probe_ssh(ctx: &ProbeCtx) -> ProbeAttempt {
     let mut attempt = ProbeAttempt::miss("ssh", String::new());
     attempt.bytes_in = bytes_in;
     attempt.truncated = truncated;
-    let Some(rest) = line.strip_prefix("SSH-") else {
-        attempt.evidence = vec!["ssh: banner is not an SSH identification string".to_owned()];
-        attempt.banner = Some(line.chars().take(120).collect());
+    let line = line.trim_end_matches(['\r', '\n']);
+    let Some((proto, product, version)) = match_ssh_identification(line) else {
+        // Distinguish malformed-SSH from not-SSH for honest evidence.
+        if line.strip_prefix("SSH-").is_some() {
+            attempt.evidence = vec!["ssh: malformed SSH identification string".to_owned()];
+        } else {
+            attempt.evidence = vec!["ssh: banner is not an SSH identification string".to_owned()];
+            attempt.banner = Some(line.chars().take(120).collect());
+        }
         return attempt;
     };
-    let mut parts = rest.splitn(3, '-');
-    let proto = parts.next().unwrap_or("");
-    if !proto
-        .chars()
-        .next()
-        .is_some_and(|character| character.is_ascii_digit())
-        || !proto.contains('.')
-    {
-        attempt.evidence = vec![format!("ssh: malformed protocol version '{proto}'")];
-        return attempt;
-    }
-    let software = parts.next().unwrap_or("").to_owned();
-    let comment = parts.next().unwrap_or("").to_owned();
-    let Some(parsed) = parse_ssh_software(&software, &comment) else {
-        attempt.evidence = vec!["ssh: malformed software string".to_owned()];
-        return attempt;
-    };
+    let rest = line.strip_prefix("SSH-").unwrap_or(line);
     attempt.protocol = "ssh".to_owned();
-    attempt.protocol_version = Some(proto.to_owned());
-    if !parsed.0.is_empty() {
-        attempt.product_hint = Some(parsed.0);
+    attempt.protocol_version = Some(proto);
+    if let Some(product) = product {
+        attempt.product_hint = Some(product);
     }
-    attempt.version_hint = parsed.1;
+    attempt.version_hint = version;
     attempt.banner = Some(format!("SSH-{rest}").chars().take(200).collect());
     attempt.confidence = if attempt.product_hint.is_some() {
-        90
+        crate::service::confidence::CONFIRMED
     } else {
-        75
+        crate::service::confidence::CHARACTERISTIC
     };
     attempt.evidence = vec![format!("ssh: received protocol banner SSH-{rest}")];
     attempt
@@ -439,7 +467,7 @@ pub(crate) fn probe_http_inner(ctx: &ProbeCtx, tls_body: Option<Vec<u8>>) -> Pro
     let started = Instant::now();
     if let Some(body) = tls_body {
         let bytes_in = body.len();
-        return finish_http_body(bytes_in, 0, &body);
+        return finish_http_body(bytes_in, 0, 1, &body);
     }
     let request = format!(
         "GET / HTTP/1.0\r\nHost: {}\r\nConnection: close\r\nUser-Agent: rxscan-phase7\r\n\r\n",
@@ -453,6 +481,7 @@ pub(crate) fn probe_http_inner(ctx: &ProbeCtx, tls_body: Option<Vec<u8>>) -> Pro
     if stream.write_all(request.as_bytes()).is_err() {
         return ProbeAttempt::miss("http", "http: request write failed");
     }
+    let http_writes = 1u32;
     let max_total = MAX_HTTP_HEADER_BYTES + MAX_HTTP_BODY_BYTES;
     let mut stash = Vec::new();
     let (bytes, _) =
@@ -460,10 +489,10 @@ pub(crate) fn probe_http_inner(ctx: &ProbeCtx, tls_body: Option<Vec<u8>>) -> Pro
     if bytes.is_empty() {
         return ProbeAttempt::miss("http", "http: empty response");
     }
-    finish_http_body(bytes.len(), request.len(), &bytes)
+    finish_http_body(bytes.len(), request.len(), http_writes, &bytes)
 }
 
-fn finish_http_body(bytes_in: usize, bytes_out: usize, raw: &[u8]) -> ProbeAttempt {
+fn finish_http_body(bytes_in: usize, bytes_out: usize, writes: u32, raw: &[u8]) -> ProbeAttempt {
     let header_cap = raw.len().min(MAX_HTTP_HEADER_BYTES);
     let Some((mut facts, header_end)) = parse_http_response(&raw[..header_cap]) else {
         let mut attempt = ProbeAttempt::miss("http", "http: response is not valid HTTP");
@@ -476,19 +505,22 @@ fn finish_http_body(bytes_in: usize, bytes_out: usize, raw: &[u8]) -> ProbeAttem
     let mut attempt = ProbeAttempt::miss("http", String::new());
     attempt.bytes_in = bytes_in;
     attempt.bytes_out = bytes_out;
+    attempt.writes = writes;
     attempt.protocol = "http".to_owned();
     attempt.protocol_version = Some(format!("1.{}", facts.version));
     if let Some(server) = &facts.server {
         let (product, version) = split_product_token(server);
         if !product.is_empty() {
-            attempt.product_hint = Some(product);
+            if let Some(clean) = crate::service::sanitize_product_token(&product) {
+                attempt.product_hint = Some(clean);
+            }
         }
         attempt.version_hint = version;
     }
     attempt.confidence = if attempt.product_hint.is_some() {
-        90
+        crate::service::confidence::CONFIRMED
     } else {
-        85
+        crate::service::confidence::STRONG
     };
     let mut lines = vec![format!(
         "http: received HTTP/{} {} {} with valid HTTP headers",
@@ -691,6 +723,7 @@ pub fn probe_tls(ctx: &ProbeCtx) -> TlsProbeOutcome {
             evidence: vec!["tls: handshake timed out".to_owned()],
             bytes_in: 0,
             bytes_out: 0,
+            writes: 0,
             truncated: false,
             probe_id: "tls",
         })),
@@ -707,6 +740,7 @@ pub fn probe_tls(ctx: &ProbeCtx) -> TlsProbeOutcome {
             evidence: vec![format!("tls: handshake failed ({other:?})")],
             bytes_in: 0,
             bytes_out: 0,
+            writes: 0,
             truncated: false,
             probe_id: "tls",
         })),
@@ -723,123 +757,244 @@ pub enum TlsProbeOutcome {
     Cancelled,
 }
 
-// ---------------- FTP ----------------
+// ---------------- FTP / SMTP ----------------
 
-/// Passive FTP greeting read. Sends nothing, never authenticates.
-pub fn probe_ftp(ctx: &ProbeCtx) -> ProbeAttempt {
+/// Split a `220` greeting first line; returns the remainder text.
+///
+/// A `220` prefix alone NEVER classifies: FTP and SMTP share this greeting
+/// code, so identity requires the disambiguation exchange in
+/// [`probe_mail`]. `220X` (no separator) is not a greeting.
+pub fn split_220_greeting(first_line: &str) -> Option<String> {
+    let rest = first_line.strip_prefix("220")?;
+    if rest.is_empty() || rest.starts_with(['-', ' ']) {
+        Some(rest.trim_start_matches(['-', ' ']).trim().to_owned())
+    } else {
+        None
+    }
+}
+
+/// Read an SMTP-style reply: the first line plus a short bounded drain for
+/// `250-` continuation lines (multiline EHLO capabilities typically arrive
+/// in one segment). Single-line replies (`500`, `250 OK`) return after the
+/// first line without funding silence: the drain only runs when the first
+/// line opens a continuation, capped at ~150ms / 16 lines / 4KiB.
+fn read_smtp_reply(stream: &mut TcpStream, ctx: &ProbeCtx, started: Instant) -> Vec<u8> {
+    let (first, _, _) = read_until(stream, b"\n", MAX_SMTP_REPLY_BYTES, ctx, started);
+    let mut buffer = first;
+    if buffer.is_empty() {
+        return buffer;
+    }
+    let first_line = String::from_utf8_lossy(&buffer)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_owned();
+    if !first_line.starts_with("250-") {
+        return buffer;
+    }
+    ProbeCtx::timebox(stream, 150);
+    let drain_started = Instant::now();
+    loop {
+        if ctx.cancel.is_cancelled()
+            || Instant::now() >= ctx.deadline
+            || started.elapsed() >= ctx.timeout
+            || drain_started.elapsed() >= Duration::from_millis(150)
+            || buffer.len() >= MAX_SMTP_REPLY_BYTES
+        {
+            break;
+        }
+        let text = String::from_utf8_lossy(&buffer).to_string();
+        if text.lines().count() >= 16
+            || text
+                .lines()
+                .any(|line| line.starts_with("250 ") || line.starts_with("250\t"))
+        {
+            break;
+        }
+        let mut chunk = [0u8; 1024];
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(count) => {
+                let room = MAX_SMTP_REPLY_BYTES.saturating_sub(buffer.len());
+                if room == 0 {
+                    break;
+                }
+                buffer.extend_from_slice(&chunk[..count.min(room)]);
+            }
+            Err(_) => break,
+        }
+    }
+    buffer
+}
+
+/// Bounded FTP/SMTP disambiguation over one connection.
+///
+/// A `220` greeting is shared evidence, never identity. This routine sends
+/// at most two harmless read-only commands (`EHLO`, then `NOOP` only when
+/// EHLO is rejected) and classifies by grammar, never by port:
+///
+/// * EHLO → `250*` reply structure ⇒ SMTP (capabilities when present).
+/// * EHLO → `500`/`502` then NOOP → `200` ⇒ FTP.
+/// * Anything else ⇒ `unknown` with the greeting and reply preserved.
+///
+/// `probe_id` records which registry probe ran; identity comes from evidence.
+pub fn probe_mail(ctx: &ProbeCtx, probe_id: &'static str) -> ProbeAttempt {
     let started = Instant::now();
     let mut stream = match ctx.connect() {
         Ok(stream) => stream,
-        Err(reason) => return ProbeAttempt::miss("ftp", format!("ftp: {reason}")),
+        Err(reason) => return ProbeAttempt::miss(probe_id, format!("mail: {reason}")),
     };
-    let (bytes, _, truncated) = read_until(&mut stream, b"\n", MAX_BANNER_BYTES, ctx, started);
-    let bytes_in = bytes.len();
-    if bytes.is_empty() {
-        let mut attempt = ProbeAttempt::miss("ftp", "ftp: no greeting received");
-        attempt.bytes_in = bytes_in;
+    let (greeting_bytes, _, _) = read_until(&mut stream, b"\n", MAX_BANNER_BYTES, ctx, started);
+    let mut attempt = ProbeAttempt::miss(probe_id, String::new());
+    attempt.bytes_in = greeting_bytes.len();
+    if greeting_bytes.is_empty() {
+        attempt.evidence = vec!["mail: no greeting received".to_owned()];
         return attempt;
     }
-    let (text, _) = lossy_capped(&bytes, MAX_BANNER_BYTES);
-    let first_line = text.lines().next().unwrap_or("").trim();
-    let mut attempt = ProbeAttempt::miss("ftp", String::new());
-    attempt.bytes_in = bytes_in;
-    attempt.truncated = truncated;
-    let Some(rest) = first_line.strip_prefix("220") else {
-        attempt.evidence = vec!["ftp: greeting is not an FTP 220 banner".to_owned()];
+    let (greeting_text, _) = lossy_capped(&greeting_bytes, MAX_BANNER_BYTES);
+    let first_line = greeting_text.lines().next().unwrap_or("").trim().to_owned();
+    let Some(remainder) = split_220_greeting(&first_line) else {
+        attempt.evidence = vec!["mail: greeting is not a 220 banner".to_owned()];
         attempt.banner = Some(first_line.chars().take(120).collect());
         return attempt;
     };
-    let remainder = rest.trim_start_matches(['-', ' ']).trim().to_owned();
-    let (product, version) = crate::service::product_and_version(&remainder);
-    attempt.protocol = "ftp".to_owned();
-    if !product.is_empty() {
-        attempt.product_hint = Some(product);
+    // One bounded EHLO: SMTP answers `250*`, FTP answers `500`/`502`.
+    let ehlo = b"EHLO rxscan.local\r\n";
+    ProbeCtx::timebox(&stream, 500);
+    if stream.write_all(ehlo).is_err() {
+        attempt.evidence = vec!["mail: EHLO write failed".to_owned()];
+        attempt.banner = Some(first_line.chars().take(120).collect());
+        return attempt;
     }
-    attempt.version_hint = version;
+    attempt.bytes_out = ehlo.len();
+    attempt.writes += 1;
+    let reply_bytes = read_smtp_reply(&mut stream, ctx, started);
+    attempt.bytes_in += reply_bytes.len();
+    let reply_text = String::from_utf8_lossy(&reply_bytes).to_string();
+    let first_reply = reply_text.lines().next().unwrap_or("").trim().to_owned();
+    if first_reply.starts_with("250") {
+        let capabilities = parse_ehlo_capabilities(&reply_bytes);
+        let (product, version) = crate::service::product_from_greeting(&remainder);
+        attempt.protocol = "smtp".to_owned();
+        attempt.product_hint = product;
+        attempt.version_hint = version;
+        attempt.banner = Some(first_line.chars().take(200).collect());
+        attempt.capabilities = capabilities.clone();
+        attempt.confidence = if capabilities.is_empty() {
+            crate::service::confidence::PROBABLE
+        } else {
+            crate::service::confidence::STRONG
+        };
+        let mut lines = vec![format!("smtp: received greeting {first_line:?}")];
+        if !capabilities.is_empty() {
+            lines.push(format!(
+                "smtp: EHLO capabilities {}",
+                capabilities.join(", ")
+            ));
+        }
+        attempt.evidence = lines;
+        return attempt;
+    }
+    if first_reply.starts_with("500") || first_reply.starts_with("502") {
+        // Not SMTP. Confirm FTP with one harmless NOOP on the same socket.
+        let noop = b"NOOP\r\n";
+        ProbeCtx::timebox(&stream, 500);
+        if stream.write_all(noop).is_ok() {
+            attempt.bytes_out += noop.len();
+            attempt.writes += 1;
+            let (noop_reply, _, _) = read_until(&mut stream, b"\n", MAX_BANNER_BYTES, ctx, started);
+            attempt.bytes_in += noop_reply.len();
+            let noop_text = String::from_utf8_lossy(&noop_reply).to_string();
+            let noop_line = noop_text.lines().next().unwrap_or("").trim().to_owned();
+            if noop_line.starts_with("200") {
+                let (product, version) = crate::service::product_from_greeting(&remainder);
+                attempt.protocol = "ftp".to_owned();
+                attempt.product_hint = product;
+                attempt.version_hint = version;
+                attempt.banner = Some(first_line.chars().take(200).collect());
+                attempt.confidence = if attempt.product_hint.is_some() {
+                    crate::service::confidence::STRONG
+                } else {
+                    crate::service::confidence::CHARACTERISTIC
+                };
+                attempt.evidence = vec![
+                    format!("ftp: received greeting {first_line:?}"),
+                    "ftp: EHLO rejected (500/502), NOOP accepted (200)".to_owned(),
+                ];
+                return attempt;
+            }
+        }
+    }
+    // Ambiguous: a 220 greeting with no conclusive command evidence.
+    // Never resolve by port — unknown with everything preserved.
+    attempt.protocol = "unknown".to_owned();
+    attempt.confidence = crate::service::confidence::BANNER;
     attempt.banner = Some(first_line.chars().take(200).collect());
-    attempt.confidence = if attempt.product_hint.is_some() {
-        85
-    } else {
-        80
-    };
-    attempt.evidence = vec![format!("ftp: received greeting {first_line:?}")];
+    attempt.evidence = vec![format!(
+        "mail: ambiguous 220 greeting (EHLO reply {first_reply:?}); protocol unknown",
+    )];
     attempt
 }
 
-// ---------------- SMTP ----------------
-
-/// SMTP identification: greeting + one bounded EHLO. Never sends mail,
-/// credentials, VRFY, or EXPN.
-pub fn probe_smtp(ctx: &ProbeCtx) -> ProbeAttempt {
-    probe_smtp_inner(ctx, None)
+/// Passive FTP greeting probe: now routes through the shared
+/// disambiguation (a lone `220` never classifies). Sends nothing when the
+/// greeting is absent; otherwise one EHLO and at most one NOOP.
+pub fn probe_ftp(ctx: &ProbeCtx) -> ProbeAttempt {
+    probe_mail(ctx, "ftp")
 }
 
+/// SMTP identification probe: greeting plus the shared disambiguation
+/// exchange. Never sends mail, credentials, VRFY, or EXPN.
+pub fn probe_smtp(ctx: &ProbeCtx) -> ProbeAttempt {
+    probe_mail(ctx, "smtp")
+}
+
+/// SMTP inside an established TLS session (smtps composition).
+///
+/// `tls_body` carries the greeting followed by the EHLO reply (see
+/// `EstablishedTls::exchange_lines`). A lone `220` never classifies here
+/// either: SMTP requires the greeting plus a `250*` reply structure.
 pub(crate) fn probe_smtp_inner(ctx: &ProbeCtx, tls_body: Option<Vec<u8>>) -> ProbeAttempt {
-    let started = Instant::now();
-    let via_tls = tls_body.is_some();
-    let raw_greeting;
-    let mut bytes_out = 0usize;
-    let mut capabilities = Vec::new();
-    let mut ehlo_evidence: Vec<String> = Vec::new();
-    if let Some(body) = tls_body {
-        raw_greeting = body;
-    } else {
-        let mut stream = match ctx.connect() {
-            Ok(stream) => stream,
-            Err(reason) => return ProbeAttempt::miss("smtp", format!("smtp: {reason}")),
-        };
-        let (greeting, _, _) = read_until(&mut stream, b"\n", MAX_BANNER_BYTES, ctx, started);
-        if greeting.is_empty() {
-            return ProbeAttempt::miss("smtp", "smtp: no greeting received");
-        }
-        // Bounded EHLO capability enumeration (safe, read-only).
-        let ehlo = b"EHLO rxscan.local\r\n";
-        ProbeCtx::timebox(&stream, 500);
-        if stream.write_all(ehlo).is_ok() {
-            bytes_out = ehlo.len();
-            let (reply, _, _) = read_until(&mut stream, b"\n", MAX_SMTP_REPLY_BYTES, ctx, started);
-            capabilities = parse_ehlo_capabilities(&reply);
-            if !capabilities.is_empty() {
-                ehlo_evidence.push(format!(
-                    "smtp: EHLO capabilities {}",
-                    capabilities.join(", ")
-                ));
-            }
-        }
-        raw_greeting = greeting;
-    }
-    let bytes_in = raw_greeting.len();
-    let (text, _) = lossy_capped(&raw_greeting, MAX_BANNER_BYTES);
+    let Some(body) = tls_body else {
+        // Plaintext path shares the single disambiguation truth.
+        return probe_mail(ctx, "smtp");
+    };
+    let bytes_in = body.len();
+    let (text, _) = lossy_capped(&body, MAX_BANNER_BYTES);
     let first_line = text.lines().next().unwrap_or("").trim();
     let mut attempt = ProbeAttempt::miss("smtp", String::new());
     attempt.bytes_in = bytes_in;
     // The in-TLS path always follows the greeting with exactly one EHLO.
-    attempt.bytes_out = if via_tls {
-        b"EHLO rxscan.local\r\n".len()
-    } else {
-        bytes_out
-    };
-    attempt.capabilities = capabilities;
-    let Some(rest) = first_line.strip_prefix("220") else {
+    attempt.bytes_out = b"EHLO rxscan.local\r\n".len();
+    attempt.writes = 1;
+    let Some(remainder) = split_220_greeting(first_line) else {
         attempt.evidence = vec!["smtp: greeting is not an SMTP 220 banner".to_owned()];
         attempt.banner = Some(first_line.chars().take(120).collect());
         return attempt;
     };
-    let remainder = rest.trim_start_matches(['-', ' ']).trim().to_owned();
-    let (product, version) = crate::service::product_and_version(&remainder);
+    // The combined body holds greeting + EHLO reply: capabilities are real
+    // here (the plaintext single-line read could never see them).
+    let capabilities = parse_ehlo_capabilities(&body);
+    let (product, version) = crate::service::product_from_greeting(&remainder);
     attempt.protocol = "smtp".to_owned();
-    if !product.is_empty() {
-        attempt.product_hint = Some(product);
-    }
+    attempt.product_hint = product;
     attempt.version_hint = version;
     attempt.banner = Some(first_line.chars().take(200).collect());
-    attempt.confidence = if attempt.capabilities.is_empty() {
-        75
+    attempt.capabilities = capabilities.clone();
+    attempt.confidence = if capabilities.is_empty() {
+        crate::service::confidence::PROBABLE
     } else {
-        85
+        crate::service::confidence::STRONG
     };
-    attempt.evidence = vec![format!("smtp: received greeting {first_line:?}")];
-    attempt.evidence.extend(ehlo_evidence);
+    let mut lines = vec![format!("smtp: received greeting {first_line:?} inside TLS")];
+    if !capabilities.is_empty() {
+        lines.push(format!(
+            "smtp: EHLO capabilities {}",
+            capabilities.join(", ")
+        ));
+    }
+    attempt.evidence = lines;
     attempt
 }
 
@@ -889,15 +1044,16 @@ pub fn probe_redis(ctx: &ProbeCtx) -> ProbeAttempt {
     let mut attempt = ProbeAttempt::miss("redis", String::new());
     attempt.bytes_in = bytes.len();
     attempt.bytes_out = ping.len();
+    attempt.writes = 1;
     let line = String::from_utf8_lossy(&bytes);
     let line = line.trim();
     if line == "+PONG" {
         attempt.protocol = "redis".to_owned();
-        attempt.confidence = 90;
+        attempt.confidence = crate::service::confidence::CONFIRMED;
         attempt.evidence = vec!["redis: received +PONG to inline PING".to_owned()];
     } else if line.starts_with("-NOAUTH") || line.starts_with("-WRONGPASS") {
         attempt.protocol = "redis".to_owned();
-        attempt.confidence = 70;
+        attempt.confidence = crate::service::confidence::PROBABLE;
         attempt.evidence =
             vec!["redis: server requires authentication (no credentials sent)".to_owned()];
     } else if line.is_empty() {
@@ -909,6 +1065,42 @@ pub fn probe_redis(ctx: &ProbeCtx) -> ProbeAttempt {
 }
 
 // ---------------- MySQL ----------------
+
+/// Pure MySQL handshake parser over buffered bytes: 4-byte header (3-byte
+/// LE length + sequence) then payload starting with the protocol byte.
+/// Returns `(protocol-byte, server-version, total-consumed)` or a static
+/// reason string. Shared by the dedicated probe and the passive fan-out.
+pub fn parse_mysql_handshake(buffer: &[u8]) -> Result<(u8, String, usize), &'static str> {
+    if buffer.len() < 5 {
+        return Err("incomplete handshake header");
+    }
+    let length = (u32::from(buffer[0]) | (u32::from(buffer[1]) << 8) | (u32::from(buffer[2]) << 16))
+        as usize;
+    if length == 0 || length > 16 * 1024 {
+        return Err("implausible handshake length");
+    }
+    if buffer.len() < 4 + length {
+        return Err("truncated handshake packet");
+    }
+    let payload = &buffer[4..4 + length];
+    if payload.is_empty() {
+        return Err("truncated handshake packet");
+    }
+    let protocol = payload[0];
+    if protocol != 10 && protocol != 9 {
+        return Err("unexpected protocol byte");
+    }
+    let version_end = payload[1..]
+        .iter()
+        .position(|byte| *byte == 0)
+        .map(|position| position + 1)
+        .unwrap_or(payload.len());
+    let version = String::from_utf8_lossy(&payload[1..version_end]).to_string();
+    if version.is_empty() {
+        return Err("empty server version");
+    }
+    Ok((protocol, version, 4 + length))
+}
 
 /// Passive MySQL handshake read. Sends nothing, never authenticates.
 pub fn probe_mysql(ctx: &ProbeCtx) -> ProbeAttempt {
@@ -933,37 +1125,27 @@ pub fn probe_mysql(ctx: &ProbeCtx) -> ProbeAttempt {
     }
     let (payload, complete) =
         read_exact_bounded(&mut stream, length, 16 * 1024, ctx, started, &mut stash);
-    attempt.bytes_in = 4 + payload.len();
-    if !complete || payload.is_empty() {
+    let mut framing = header;
+    framing.extend_from_slice(&payload);
+    attempt.bytes_in = framing.len();
+    if !complete {
         attempt.evidence = vec!["mysql: truncated handshake packet".to_owned()];
         return attempt;
     }
-    let protocol = payload[0];
-    if protocol != 10 && protocol != 9 {
-        attempt.evidence = vec![format!("mysql: unexpected protocol byte {protocol}")];
-        return attempt;
-    }
-    let version_end = payload[1..]
-        .iter()
-        .position(|byte| *byte == 0)
-        .map(|position| position + 1)
-        .unwrap_or(payload.len());
-    let version = String::from_utf8_lossy(&payload[1..version_end]).to_string();
-    if version.is_empty() {
-        attempt.evidence = vec!["mysql: empty server version".to_owned()];
-        return attempt;
-    }
-    let (product, detected) = split_product_token(&version);
+    let (protocol, version) = match parse_mysql_handshake(&framing) {
+        Ok((protocol, version, _)) => (protocol, version),
+        Err(reason) => {
+            attempt.evidence = vec![format!("mysql: {reason}")];
+            return attempt;
+        }
+    };
+    let (product, detected) = crate::service::product_from_greeting(&version);
     attempt.protocol = "mysql".to_owned();
     attempt.protocol_version = Some(format!("handshake-{protocol}"));
-    attempt.product_hint = Some(if product.is_empty() {
-        "MySQL".to_owned()
-    } else {
-        product
-    });
+    attempt.product_hint = product;
     attempt.version_hint = detected.or(Some(version.clone()));
     attempt.banner = Some(version.chars().take(120).collect());
-    attempt.confidence = 85;
+    attempt.confidence = crate::service::confidence::STRONG;
     attempt.evidence = vec![format!(
         "mysql: received handshake protocol {protocol} version {version:?}"
     )];
@@ -991,26 +1173,51 @@ pub fn probe_postgres(ctx: &ProbeCtx) -> ProbeAttempt {
     let mut attempt = ProbeAttempt::miss("postgres", String::new());
     attempt.bytes_in = bytes.len();
     attempt.bytes_out = request.len();
-    match bytes.first() {
-        Some(b'S') => {
-            attempt.protocol = "postgres".to_owned();
-            attempt.confidence = 70;
-            attempt.evidence = vec![
-                "postgres: server accepted SSLRequest ('S'); closing without authentication"
-                    .to_owned(),
-            ];
-        }
-        Some(b'N') => {
-            attempt.protocol = "postgres".to_owned();
-            attempt.confidence = 70;
-            attempt.evidence = vec![
-                "postgres: server refused SSL ('N'); closing without authentication".to_owned(),
-            ];
-        }
+    attempt.writes = 1;
+    let reply = match bytes.first() {
+        Some(b'S') | Some(b'N') => *bytes.first().unwrap(),
         _ => {
             attempt.evidence = vec!["postgres: no SSLRequest reply".to_owned()];
+            return attempt;
         }
+    };
+    // A real server's single-byte reply stands alone: after `S`/`N` it
+    // waits for the client. Trailing bytes already buffered (the exact
+    // reader stashes framing surplus) or arriving within a short grace
+    // window refute PostgreSQL (e.g. a chatterbox whose first byte
+    // happens to be `N`). This keeps the 1-byte check conservative.
+    if !stash.is_empty() {
+        attempt.bytes_in += stash.len();
+        attempt.evidence = vec![format!(
+            "postgres: trailing bytes after {reply:?} reply; not PostgreSQL"
+        )];
+        return attempt;
     }
+    // A real server's single-byte reply stands alone: after `S`/`N` it
+    // waits for the client. A short grace read must find nothing more;
+    // trailing bytes refute PostgreSQL (e.g. a chatterbox whose first
+    // byte happens to be `N`). This keeps the 1-byte check conservative.
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+    let mut extra = [0u8; 32];
+    match stream.read(&mut extra) {
+        Ok(0) => {}
+        Ok(count) if count > 0 => {
+            attempt.bytes_in += count;
+            attempt.evidence = vec![format!(
+                "postgres: trailing bytes after {reply:?} reply; not PostgreSQL"
+            )];
+            return attempt;
+        }
+        _ => {}
+    }
+    let detail = if reply == b'S' {
+        "postgres: server accepted SSLRequest ('S'); closing without authentication"
+    } else {
+        "postgres: server refused SSL ('N'); closing without authentication"
+    };
+    attempt.protocol = "postgres".to_owned();
+    attempt.confidence = crate::service::confidence::PROBABLE;
+    attempt.evidence = vec![detail.to_owned()];
     attempt
 }
 
@@ -1035,6 +1242,7 @@ pub fn probe_generic(ctx: &ProbeCtx) -> ProbeAttempt {
         timeout: budget,
         deadline: ctx.deadline.min(started + budget),
         cancel: ctx.cancel,
+        connections: ctx.connections.clone(),
     };
     let (bytes, saw_newline, truncated) =
         read_until(&mut stream, b"\n", MAX_BANNER_BYTES, &short, started);
@@ -1051,30 +1259,16 @@ pub fn probe_generic(ctx: &ProbeCtx) -> ProbeAttempt {
     attempt.truncated = truncated || text_truncated;
     // Line-terminated SSH identification strings with valid grammar are
     // concrete protocol evidence; fragments and vague prefixes stay Unknown.
+    // Identical grammar to the dedicated SSH probe (shared matcher).
     if saw_newline && first_line.starts_with("SSH-") {
-        // Same strict grammar as the dedicated SSH probe: only a fully
-        // valid identification string (`SSH-<digit>.<dot…>-<software>`)
-        // counts as concrete protocol evidence. A bare `SSH-` prefix or a
-        // malformed version is NOT enough — vague banners stay Unknown.
-        let rest = first_line.strip_prefix("SSH-").unwrap_or("");
-        let mut parts = rest.splitn(3, '-');
-        let proto = parts.next().unwrap_or("");
-        let software = parts.next().unwrap_or("");
-        let comment = parts.next().unwrap_or("");
-        if proto
-            .chars()
-            .next()
-            .is_some_and(|character| character.is_ascii_digit())
-            && proto.contains('.')
-            && let Some((product, version)) = parse_ssh_software(software, comment)
-        {
+        if let Some((proto, product, version)) = match_ssh_identification(&first_line) {
             attempt.protocol = "ssh".to_owned();
-            attempt.protocol_version = Some(proto.to_owned());
-            if !product.is_empty() {
+            attempt.protocol_version = Some(proto);
+            if let Some(product) = product {
                 attempt.product_hint = Some(product);
             }
             attempt.version_hint = version;
-            attempt.confidence = 80;
+            attempt.confidence = crate::service::confidence::CHARACTERISTIC;
             attempt.banner = Some(first_line.chars().take(200).collect());
             attempt.evidence =
                 vec!["generic: banner satisfies the SSH identification-string grammar".to_owned()];
@@ -1082,7 +1276,7 @@ pub fn probe_generic(ctx: &ProbeCtx) -> ProbeAttempt {
         }
     }
     attempt.protocol = "unknown".to_owned();
-    attempt.confidence = 50;
+    attempt.confidence = crate::service::confidence::BANNER;
     attempt.banner = Some(first_line.chars().take(200).collect());
     let mut lines = vec![format!(
         "generic: unknown TCP service, banner preserved ({} bytes)",
@@ -1098,6 +1292,66 @@ pub fn probe_generic(ctx: &ProbeCtx) -> ProbeAttempt {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ssh_identification_grammar_is_shared_and_strict() {
+        // Valid: protocol + software token.
+        let parsed = match_ssh_identification("SSH-2.0-OpenSSH_9.8").unwrap();
+        assert_eq!(parsed.0, "2.0");
+        assert_eq!(parsed.1.as_deref(), Some("OpenSSH"));
+        assert_eq!(parsed.2.as_deref(), Some("9.8"));
+        // Bare software without separator stays classified (no product).
+        let parsed = match_ssh_identification("SSH-2.0-dropbear").unwrap();
+        assert_eq!(parsed.1.as_deref(), Some("dropbear"));
+        // Invalid: bare prefix, malformed version, missing software dash.
+        assert!(match_ssh_identification("SSH-").is_none());
+        assert!(match_ssh_identification("SSH-2-foo").is_none());
+        assert!(match_ssh_identification("SSH-X.Y-foo").is_none());
+        assert!(match_ssh_identification("HELLO").is_none());
+        // Chatter software never becomes a product, grammar still holds.
+        let parsed = match_ssh_identification("SSH-2.0-server").unwrap();
+        assert_eq!(parsed.1, None);
+    }
+
+    #[test]
+    fn greeting_220_split_never_classifies_alone() {
+        assert_eq!(
+            split_220_greeting("220 FixtureFTP 1.0 ready").as_deref(),
+            Some("FixtureFTP 1.0 ready")
+        );
+        assert_eq!(
+            split_220_greeting("220-welcome").as_deref(),
+            Some("welcome")
+        );
+        assert_eq!(split_220_greeting("220").as_deref(), Some(""));
+        assert!(split_220_greeting("220X garbage").is_none());
+        assert!(split_220_greeting("250 OK").is_none());
+        assert!(split_220_greeting("HELLO").is_none());
+    }
+
+    #[test]
+    fn mysql_framing_rejects_garbage() {
+        // Valid minimal handshake: len=7, seq=0, proto=10, "5.7\0".
+        let mut packet = vec![7u8, 0, 0, 0, 10, b'5', b'.', b'7', 0, 0, 0];
+        let parsed = parse_mysql_handshake(&packet).unwrap();
+        assert_eq!(parsed.0, 10);
+        assert_eq!(parsed.1, "5.7");
+        assert_eq!(parsed.2, packet.len());
+        // Short header, zero/gigantic length, wrong proto byte, empty
+        // version, truncated payload: all rejected, never classified.
+        assert!(parse_mysql_handshake(&[1, 2, 3]).is_err());
+        assert!(parse_mysql_handshake(&[0, 0, 0, 0, 10]).is_err());
+        packet[0] = 0;
+        packet[1] = 0;
+        packet[2] = 0;
+        assert!(parse_mysql_handshake(&packet).is_err());
+        let mut bad_proto = vec![7u8, 0, 0, 0, 77, b'5', b'.', b'7', 0, 0, 0];
+        assert!(parse_mysql_handshake(&bad_proto).is_err());
+        bad_proto[4] = 10;
+        bad_proto[5] = 0;
+        assert!(parse_mysql_handshake(&bad_proto).is_err());
+        assert!(parse_mysql_handshake(&[7u8, 0, 0, 0, 10]).is_err());
+    }
 
     #[test]
     fn ssh_parses_product_and_version() {
