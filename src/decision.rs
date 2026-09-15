@@ -85,16 +85,7 @@ impl TcpDecisionEngine {
                 params.insert("ports".to_owned(), "common".to_owned());
             }
             TcpPortSelection::Explicit(ports) => {
-                let rendered = ports
-                    .iter()
-                    .map(u16::to_string)
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let rendered = if rendered.len() > 2048 {
-                    format!("{}...(+{} more)", &rendered[..2048], ports.len())
-                } else {
-                    rendered
-                };
+                let rendered = crate::ports::compress_port_list(ports);
                 params.insert("ports".to_owned(), format!("explicit:{rendered}"));
                 params.insert("port_count".to_owned(), ports.len().to_string());
             }
@@ -417,6 +408,14 @@ impl crate::execution::DecisionEngine for ServiceDecisionEngine {
         if completed.kind != TaskKind::PortDiscovery {
             return Vec::new();
         }
+        // Workflow gating: Discover finds hosts/ports without identifying
+        // services; Ports stops after the port scan itself.
+        if !matches!(
+            self.goal,
+            ScanGoal::Recon | ScanGoal::Services | ScanGoal::Web | ScanGoal::Full
+        ) {
+            return Vec::new();
+        }
         open_ports_from_output(output)
             .into_iter()
             .take(MAX_SERVICE_PROPOSALS_PER_COMPLETION)
@@ -513,7 +512,7 @@ impl Phase7Engine {
                 goal,
                 speed,
             ),
-            web: WebDecisionEngine::new(scope_guard.clone(), plan_id.clone(), speed),
+            web: WebDecisionEngine::new(scope_guard.clone(), plan_id.clone(), goal, speed),
             crawl: CrawlDecisionEngine::new(
                 scope_guard.clone(),
                 plan_id.clone(),
@@ -585,6 +584,7 @@ impl crate::execution::DecisionEngine for Phase7Engine {
 pub struct WebDecisionEngine {
     scope_guard: Arc<dyn ScopeGuard>,
     plan_id: ScanPlanId,
+    goal: ScanGoal,
     speed: crate::plan::SpeedSetting,
 }
 
@@ -596,11 +596,13 @@ impl WebDecisionEngine {
     pub fn new(
         scope_guard: Arc<dyn ScopeGuard>,
         plan_id: ScanPlanId,
+        goal: ScanGoal,
         speed: crate::plan::SpeedSetting,
     ) -> Self {
         Self {
             scope_guard,
             plan_id,
+            goal,
             speed,
         }
     }
@@ -664,6 +666,12 @@ impl WebDecisionEngine {
 impl crate::execution::DecisionEngine for WebDecisionEngine {
     fn follow_up_tasks(&self, completed: &Task, output: &ModuleOutput) -> Vec<Task> {
         if completed.kind != TaskKind::ServiceProbe {
+            return Vec::new();
+        }
+        // Workflow gating: only Recon, Web, and Full derive web work from
+        // identified services. Services stops at identification; Discover
+        // and Ports never identify services at all.
+        if !matches!(self.goal, ScanGoal::Recon | ScanGoal::Web | ScanGoal::Full) {
             return Vec::new();
         }
         let mut proposals = Vec::new();
@@ -805,6 +813,10 @@ impl CrawlDecisionEngine {
 
 impl crate::execution::DecisionEngine for CrawlDecisionEngine {
     fn follow_up_tasks(&self, completed: &Task, output: &ModuleOutput) -> Vec<Task> {
+        // Workflow gating: crawl derivation only for Recon, Web, Full.
+        if !matches!(self.goal, ScanGoal::Recon | ScanGoal::Web | ScanGoal::Full) {
+            return Vec::new();
+        }
         let policy = crate::crawl::CrawlPolicy::new(self.level, self.goal, self.speed);
         if completed.kind == TaskKind::HttpProbe {
             let mut proposals = Vec::new();
@@ -977,6 +989,7 @@ pub struct BaselineDecisionEngine {
     scope_guard: Arc<dyn ScopeGuard>,
     plan_id: ScanPlanId,
     level: u8,
+    goal: ScanGoal,
     speed: crate::plan::SpeedSetting,
     origin_baselines: crate::baseline::OriginBaselineRegistry,
 }
@@ -986,7 +999,7 @@ impl BaselineDecisionEngine {
         scope_guard: Arc<dyn ScopeGuard>,
         plan_id: ScanPlanId,
         level: u8,
-        _goal: ScanGoal,
+        goal: ScanGoal,
         speed: crate::plan::SpeedSetting,
         origin_baselines: crate::baseline::OriginBaselineRegistry,
     ) -> Self {
@@ -994,6 +1007,7 @@ impl BaselineDecisionEngine {
             scope_guard,
             plan_id,
             level: level.clamp(1, 5),
+            goal,
             speed,
             origin_baselines,
         }
@@ -1043,6 +1057,11 @@ impl BaselineDecisionEngine {
 impl crate::execution::DecisionEngine for BaselineDecisionEngine {
     fn follow_up_tasks(&self, completed: &Task, output: &ModuleOutput) -> Vec<Task> {
         if self.level == 0 {
+            return Vec::new();
+        }
+        // Workflow gating: baseline checks feed content/fuzz derivation,
+        // which only Recon, Web, and Full consume.
+        if !matches!(self.goal, ScanGoal::Recon | ScanGoal::Web | ScanGoal::Full) {
             return Vec::new();
         }
         if completed.kind == TaskKind::Baseline {
@@ -1221,6 +1240,10 @@ impl ContentDecisionEngine {
 impl crate::execution::DecisionEngine for ContentDecisionEngine {
     fn follow_up_tasks(&self, completed: &Task, output: &ModuleOutput) -> Vec<Task> {
         if self.level < 2 {
+            return Vec::new();
+        }
+        // Workflow gating: content derivation only for Recon, Web, Full.
+        if !matches!(self.goal, ScanGoal::Recon | ScanGoal::Web | ScanGoal::Full) {
             return Vec::new();
         }
         let mut proposals = Vec::new();
@@ -1468,7 +1491,7 @@ impl crate::execution::DecisionEngine for FuzzDecisionEngine {
     fn follow_up_tasks(&self, completed: &Task, output: &ModuleOutput) -> Vec<Task> {
         if completed.kind != TaskKind::Baseline
             || self.level < 3
-            || !matches!(self.goal, ScanGoal::Fuzz | ScanGoal::Custom)
+            || !matches!(self.goal, ScanGoal::Full)
         {
             return Vec::new();
         }
@@ -1608,13 +1631,15 @@ impl crate::execution::DecisionEngine for DnsDecisionEngine {
         if completed.kind != TaskKind::DnsProbe || self.level == 0 {
             return Vec::new();
         }
+        // Workflow gating: Ports stops after the port scan; every other
+        // workflow may expand DNS observations into host discovery.
         if !matches!(
             self.goal,
             ScanGoal::Recon
-                | ScanGoal::Inventory
-                | ScanGoal::Baseline
-                | ScanGoal::Research
-                | ScanGoal::Custom
+                | ScanGoal::Discover
+                | ScanGoal::Services
+                | ScanGoal::Web
+                | ScanGoal::Full
         ) {
             return Vec::new();
         }

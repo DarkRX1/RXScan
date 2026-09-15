@@ -248,14 +248,7 @@ pub fn plan_probes(port: u16, level: u8, goal: ScanGoal) -> Vec<&'static str> {
         }
         None => {
             push(PROBE_GENERIC);
-            let http_early = matches!(
-                goal,
-                ScanGoal::Web
-                    | ScanGoal::WebDiscovery
-                    | ScanGoal::Api
-                    | ScanGoal::ApiDiscovery
-                    | ScanGoal::Content
-            );
+            let http_early = matches!(goal, ScanGoal::Web | ScanGoal::Full);
             if (level >= 3 || (http_early && level >= 2)) && port != 0 {
                 push(PROBE_HTTP);
             }

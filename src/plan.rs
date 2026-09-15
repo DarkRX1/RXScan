@@ -1,6 +1,5 @@
 use std::{collections::BTreeSet, fmt, str::FromStr};
 
-use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -12,24 +11,135 @@ use crate::{
     target::{TargetError, TargetSpec, read_target_source},
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum, Default)]
+/// Canonical operator workflows.
+///
+/// Six concepts, each with distinct execution semantics (see `level.rs` for
+/// initial-task selection and `decision.rs` for evidence-triggered
+/// follow-up gating):
+///
+/// * `Recon` (default): general reconnaissance — host + port discovery,
+///   service identification, and evidence-driven web/content follow-ups.
+/// * `Discover`: host and network discovery — host + port discovery and DNS
+///   observations, but never service identification or deeper follow-ups.
+/// * `Ports`: port discovery only — host + port discovery, no follow-ups
+///   beyond the port scan itself.
+/// * `Services`: port discovery + service identification — service
+///   follow-ups, but no web/content/crawl derivation.
+/// * `Web`: web-focused reconnaissance — initial HTTP roots plus
+///   evidence-driven web/content follow-ups.
+/// * `Full`: broadest bounded reconnaissance — every executable module plus
+///   fuzz follow-ups where evidence permits.
+///
+/// Historical goal names remain accepted as compatibility aliases and map
+/// to canonical workflows (shown by `--explain`):
+/// `inventory`→`recon`; `service-map`/`service`→`services`;
+/// `discovery`/`baseline`/`monitoring`→`discover`;
+/// `web-discovery`/`api`/`api-discovery`/`content`→`web`;
+/// `custom`/`research`/`fuzz`→`full`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum ScanGoal {
     #[default]
+    #[serde(alias = "inventory")]
     Recon,
-    Discovery,
-    ServiceMap,
+    #[serde(alias = "discovery", alias = "baseline", alias = "monitoring")]
+    Discover,
+    #[serde(alias = "port")]
+    Ports,
+    #[serde(alias = "service-map", alias = "service", alias = "servicemap")]
+    Services,
+    #[serde(
+        alias = "web-discovery",
+        alias = "webdiscovery",
+        alias = "api",
+        alias = "api-discovery",
+        alias = "apidiscovery",
+        alias = "content"
+    )]
     Web,
-    WebDiscovery,
-    Api,
-    ApiDiscovery,
-    Content,
-    Fuzz,
-    Inventory,
-    Baseline,
-    Monitoring,
-    Research,
-    Custom,
+    #[serde(alias = "custom", alias = "research", alias = "fuzz")]
+    Full,
+}
+
+impl ScanGoal {
+    /// Canonical workflow names shown in help and `--explain`.
+    pub const CANONICAL: &'static [&'static str] =
+        &["recon", "discover", "ports", "services", "web", "full"];
+
+    /// Compatibility aliases accepted wherever a goal is parsed.
+    pub const ALIASES: &'static [(&'static str, &'static str)] = &[
+        ("inventory", "recon"),
+        ("discovery", "discover"),
+        ("baseline", "discover"),
+        ("monitoring", "discover"),
+        ("port", "ports"),
+        ("service-map", "services"),
+        ("service", "services"),
+        ("web-discovery", "web"),
+        ("api", "web"),
+        ("api-discovery", "web"),
+        ("content", "web"),
+        ("custom", "full"),
+        ("research", "full"),
+        ("fuzz", "full"),
+    ];
+
+    /// Parse a goal name (canonical or alias) as the CLI/TOML layers accept it.
+    pub fn parse(value: &str) -> Result<Self, String> {
+        let normalized = value.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "recon" | "inventory" => Ok(Self::Recon),
+            "discover" | "discovery" | "baseline" | "monitoring" => Ok(Self::Discover),
+            "ports" | "port" => Ok(Self::Ports),
+            "services" | "service" | "service-map" | "servicemap" => Ok(Self::Services),
+            "web" | "web-discovery" | "webdiscovery" | "api" | "api-discovery" | "apidiscovery"
+            | "content" => Ok(Self::Web),
+            "full" | "custom" | "research" | "fuzz" => Ok(Self::Full),
+            _ => Err(format!(
+                "invalid goal '{value}': expected one of {} (aliases: {})",
+                Self::CANONICAL.join(", "),
+                Self::ALIASES
+                    .iter()
+                    .map(|(alias, _)| *alias)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        }
+    }
+
+    /// Canonical kebab-case name (matches serde serialization).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Recon => "recon",
+            Self::Discover => "discover",
+            Self::Ports => "ports",
+            Self::Services => "services",
+            Self::Web => "web",
+            Self::Full => "full",
+        }
+    }
+
+    /// Whether `raw` was an alias (returns its canonical target).
+    pub fn alias_target(raw: &str) -> Option<&'static str> {
+        let normalized = raw.trim().to_ascii_lowercase();
+        Self::ALIASES
+            .iter()
+            .find(|(alias, _)| *alias == normalized)
+            .map(|(_, canonical)| *canonical)
+    }
+}
+
+impl std::str::FromStr for ScanGoal {
+    type Err = String;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
+    }
+}
+
+impl std::fmt::Display for ScanGoal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,6 +214,13 @@ pub struct ScanPlan {
     pub targets: Vec<TargetSpec>,
     pub scope: ScopePolicy,
     pub goal: ScanGoal,
+    /// Raw `--goal` text when the operator used a compatibility alias
+    /// (e.g. `service-map` for canonical `services`). `None` for canonical
+    /// names, config-supplied goals, and resumed plans. `--explain` shows it.
+    /// Skipped on the wire when absent so pre-alias checkpoints keep the
+    /// exact bytes (and plan IDs) they were saved with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal_alias: Option<String>,
     pub level: u8,
     pub speed: SpeedSetting,
     pub profile: Option<String>,
@@ -139,6 +256,14 @@ pub enum PlanError {
     Config(#[from] ConfigError),
     #[error("invalid --ports value '{0}'")]
     InvalidPorts(String),
+    #[error(
+        "invalid goal '{0}': expected a canonical workflow (recon, discover, ports, services, web, full) or a documented alias"
+    )]
+    InvalidGoal(String),
+    #[error(
+        "--udp requests UDP discovery, which is not implemented in this build (TCP-only scanner); omit --udp"
+    )]
+    UdpNotImplemented,
     #[error("--all-ports conflicts with a configured port selection")]
     AllPortsConflict,
     #[error("invalid budget for '{field}': {reason}")]
@@ -192,8 +317,17 @@ impl ScanPlan {
         } else {
             TcpPortSelection::Common
         };
-        let goal = cli.goal.or(config.goal).unwrap_or_default();
-        let level = cli.level.or(config.level).unwrap_or(2);
+        let (goal, goal_alias) = match (cli.goal.as_deref(), config.goal) {
+            (Some(raw), _) => {
+                let parsed =
+                    ScanGoal::parse(raw).map_err(|_| PlanError::InvalidGoal(raw.to_owned()))?;
+                let alias = ScanGoal::alias_target(raw).map(|_| raw.to_owned());
+                (parsed, alias)
+            }
+            (None, Some(configured)) => (configured, None),
+            (None, None) => (ScanGoal::default(), None),
+        };
+        let level = cli.level.or(config.level).unwrap_or(3);
         let speed = cli.speed.or(config.speed).unwrap_or_default();
         let profile_name = cli.profile.clone().or(config.profile.clone());
         let content_wordlist = cli.wordlist.clone().or(config.wordlist.clone());
@@ -212,6 +346,11 @@ impl ScanPlan {
         }
         let host_requested = cli.ping || cli.discover;
         let udp_requested = cli.udp;
+        if udp_requested {
+            // Fail fast: the scheduler has no UDP executor, so planning a
+            // UDP intent task would only produce a predictable `Skipped`.
+            return Err(PlanError::UdpNotImplemented);
+        }
         let ports_requested = cli.ports.is_some()
             || cli.all_ports
             || config.ports.is_some()
@@ -249,7 +388,12 @@ impl ScanPlan {
             speed,
             discovery_ports.as_deref(),
         );
-        let mut reasons = vec!["Every input is normalized into TargetSpec before planning.".to_owned(), "Scope is deny-by-default: seed targets and explicit --scope rules are the only permitted expansion.".to_owned(), format!("Goal {goal:?}, level {level}, and speed {speed} remain independent policy controls.", )];
+        let mut reasons = vec!["Every input is normalized into TargetSpec before planning.".to_owned(), "Scope is deny-by-default: seed targets and explicit --scope rules are the only permitted expansion.".to_owned(), format!("Workflow {goal} (level {level}) and speed {speed} remain independent policy controls.", )];
+        if let Some(alias) = goal_alias.as_deref() {
+            reasons.push(format!(
+                "Requested goal '{alias}' is a compatibility alias for canonical workflow '{goal}'; execution uses '{goal}'."
+            ));
+        }
         reasons.append(&mut level_reasons);
         if !effective.sources.is_empty() {
             reasons.push(format!(
@@ -262,7 +406,7 @@ impl ScanPlan {
                     .join(" -> ")
             ));
         }
-        reasons.push(match tcp_ports { TcpPortSelection::Common => "No port selection supplied; port tasks use a conservative common-set intent without expanding ports.".to_owned(), TcpPortSelection::Explicit(_) => "An explicit TCP port selection was retained in the plan and propagates to port tasks via params.".to_owned(), TcpPortSelection::All => "--all-ports is represented as ONE port task with params ports=all (65535); it never expands to 65k tasks.".to_owned() });
+        reasons.push(match tcp_ports { TcpPortSelection::Common => "No port selection supplied; TCP discovery uses the conservative level-derived common-port policy.".to_owned(), TcpPortSelection::Explicit(_) => "An explicit TCP port selection is retained exactly and overrides goal/default port policy.".to_owned(), TcpPortSelection::All => "--all-ports is represented as ONE port task with params ports=all (65535); it never expands to 65k tasks.".to_owned() });
         let governor = crate::execution::SpeedGovernor::new(speed, budgets.max_concurrency)
             .map_err(|error| PlanError::InvalidBudget {
                 field: "max_concurrency".to_owned(),
@@ -301,13 +445,14 @@ impl ScanPlan {
         ));
         let mut skipped = level_skipped;
         skipped.push(
-            "Phase 12 runs real bounded host discovery, native TCP connect port scanning, native service probing, bounded HTTP/1.1 web observations, bounded crawling, baseline intelligence, managed content discovery, and safe contextual GET query fuzzing where observed evidence permits; ARP/ND, UDP, POST/form fuzzing, path-variable fuzzing, JavaScript execution, cipher enumeration, DNS execution, vulnerability checks, and the fingerprint engine remain deferred."
+            "Current execution includes bounded host discovery, TCP connect port scanning, service probing, DNS observations, HTTP/1.1 web observations, crawling, baseline checks, managed content discovery, and inert contextual GET query fuzzing where evidence permits. UDP scanning, OS/device fingerprinting, POST workflows, JavaScript execution, browser-assisted inspection, cipher-suite enumeration, and vulnerability assessment are not implemented in this build."
                 .to_owned(),
         );
         Ok(Self {
             targets,
             scope,
             goal,
+            goal_alias,
             level,
             speed,
             profile: profile_name,
@@ -365,9 +510,17 @@ impl ScanPlan {
             crate::execution::SpeedGovernor::new(self.speed, self.budgets.max_concurrency)
                 .map(|governor| governor.retry_limit())
                 .unwrap_or(0);
+        let initial = crate::level::describe_initial_tasks(self.goal, self.level);
+        let followups = crate::level::describe_followups(self.goal, self.level);
+        let unavailable = crate::level::describe_unavailable();
         format!(
-            "RXScan Phase 12 plan\ngoal: {:?}\nlevel: {}\nspeed: {}\nprofile: {}\ndiscovery: {}\nspeed policy: {governor}\neffective concurrency: {effective_concurrency}\nretry limit: {retry_limit}\ntask budget: {}\nretry budget: {}\nevidence budget (bytes): {}\nexecution timeout (ms): {}\nhost budget: {}\nqueue capacity: {}\ntargets:\n{targets}\nmodules:\n{modules}\ntcp ports: {:?}\ndiscovery policy: {}\ntcp policy: {}\nservice policy: {}\nweb policy: {}\ncontent policy: {}\nscope: {} allow rule(s), {} exclusion(s)\nwhy:\n{reasons}\nskipped:\n{skipped}",
+            "RXScan plan\nworkflow: {}{}\nlevel: {}\nspeed: {}\nprofile: {}\ndiscovery: {}\nspeed policy: {governor}\neffective concurrency: {effective_concurrency}\nretry limit: {retry_limit}\ntask budget: {}\nretry budget: {}\nevidence budget (bytes): {}\nexecution timeout (ms): {}\nhost budget: {}\nqueue capacity: {}\ntargets:\n{targets}\nmodules:\n{modules}\ninitial tasks (selected and executable):\n{initial}\nevidence-triggered follow-ups:\n{followups}\nunavailable (not implemented in this build):\n{unavailable}\ntcp ports: {:?}\ndiscovery policy: {}\ntcp policy: {}\nservice policy: {}\nweb policy: {}\ncontent policy: {}\nscope: {} allow rule(s), {} exclusion(s)\nwhy:\n{reasons}\nskipped:\n{skipped}",
             self.goal,
+            self.goal_alias
+                .as_deref()
+                .map_or(String::new(), |alias| format!(
+                    " (requested '{alias}' mapped here)"
+                )),
             self.level,
             self.speed,
             self.profile.as_deref().unwrap_or("default"),

@@ -1,8 +1,8 @@
 use clap::Parser;
 
-use crate::plan::{ScanGoal, SpeedSetting};
+use crate::plan::SpeedSetting;
 
-/// Simple operator-facing controls. M0 compiles these into an inspectable plan.
+/// Operator-facing scanner controls.
 #[derive(Debug, Clone, Parser)]
 #[command(name = "rxscan", version, about = "Reactive Recon Scanner")]
 pub struct Cli {
@@ -22,9 +22,14 @@ pub struct Cli {
     #[arg(long, value_name = "FILE")]
     pub project_config: Option<std::path::PathBuf>,
 
-    /// State the operator's intended workflow.
-    #[arg(long, value_enum)]
-    pub goal: Option<ScanGoal>,
+    /// State the operator's intended workflow: one of
+    /// recon, discover, ports, services, web, full.
+    /// Historical names (discovery, service-map, inventory, baseline,
+    /// monitoring, web-discovery, api, api-discovery, content, fuzz,
+    /// research, custom) remain accepted as aliases and map to the
+    /// canonical workflow shown by --explain.
+    #[arg(long, value_name = "GOAL", value_parser = parse_goal)]
+    pub goal: Option<String>,
 
     /// Investigation breadth and depth, from 1 (minimal) to 5 (deep).
     #[arg(long, value_parser = clap::value_parser!(u8).range(1..=5))]
@@ -34,7 +39,7 @@ pub struct Cli {
     #[arg(long, value_parser = parse_speed)]
     pub speed: Option<SpeedSetting>,
 
-    /// Select a named profile. Profile loading is introduced with the pack system.
+    /// Select a named profile from configuration.
     #[arg(long, value_name = "NAME")]
     pub profile: Option<String>,
 
@@ -50,27 +55,28 @@ pub struct Cli {
     #[arg(long, value_name = "PORTS", conflicts_with = "all_ports")]
     pub ports: Option<String>,
 
-    /// Plan all TCP ports. Execution arrives in M1.
+    /// Scan all TCP ports as one bounded TCP scan task.
     #[arg(long)]
     pub all_ports: bool,
 
-    /// Request ICMP-focused host discovery in the future network stage.
+    /// Request ICMP-focused host discovery.
     #[arg(long)]
     pub ping: bool,
 
-    /// Request multi-probe host discovery in the future network stage.
+    /// Request multi-probe host discovery.
     #[arg(long, conflicts_with = "ping")]
     pub discover: bool,
 
-    /// Include selected UDP discovery in the future network stage.
+    /// Request UDP discovery. Not implemented: rejected fail-fast with a
+    /// clear error instead of planning work that could never execute.
     #[arg(long)]
     pub udp: bool,
 
-    /// Stream a managed content-discovery candidate file (Phase 11, level 4+).
+    /// Stream a managed content-discovery candidate file.
     #[arg(short = 'w', long = "wordlist", value_name = "FILE")]
     pub wordlist: Option<std::path::PathBuf>,
 
-    /// Print the chosen plan, reasons, and M0 limitations.
+    /// Print the chosen plan, reasons, budgets, and excluded capabilities.
     #[arg(long)]
     pub explain: bool,
 
@@ -103,17 +109,24 @@ pub struct Cli {
     #[arg(long, value_name = "PATH")]
     pub output: Option<std::path::PathBuf>,
 
-    /// Save a bounded Phase 14 checkpoint after execution.
+    /// Save a bounded checkpoint after execution.
     #[arg(long, value_name = "PATH")]
     pub checkpoint: Option<std::path::PathBuf>,
 
-    /// Resume from a bounded Phase 14 checkpoint. Target/scope/level/goal come from the checkpoint.
+    /// Resume from a bounded checkpoint. Target/scope/level/goal come from the checkpoint.
     #[arg(long, value_name = "PATH")]
     pub resume: Option<std::path::PathBuf>,
 
-    /// Output format. Only `jsonl` is supported in Phase 4.
+    /// Output format. Only `jsonl` is supported for scan streams.
     #[arg(long, value_name = "FORMAT")]
     pub format: Option<String>,
+}
+
+fn parse_goal(value: &str) -> Result<String, String> {
+    // Validate eagerly so typos fail fast with the canonical list; the
+    // raw text is retained so --explain can show alias mapping.
+    crate::plan::ScanGoal::parse(value)?;
+    Ok(value.to_owned())
 }
 
 fn parse_speed(value: &str) -> Result<SpeedSetting, String> {

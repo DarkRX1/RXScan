@@ -1,25 +1,39 @@
-//! Phase 4 level/goal policy: investigation breadth/depth.
+//! Level/goal policy: investigation breadth/depth.
 //!
 //! `--level` (1-5) is breadth/depth and is independent of `--speed`
 //! (execution pressure). This module centralizes task/module eligibility so
 //! level checks are not scattered across modules.
+//!
+//! # Canonical workflows
+//!
+//! Six workflows with distinct execution semantics (historical goal names
+//! map to these; see `ScanGoal`):
+//! * `Recon` (default): host + port discovery, service identification, and
+//!   evidence-driven web/content follow-ups.
+//! * `Discover`: host + port discovery and DNS observations, but never
+//!   service identification or deeper follow-ups.
+//! * `Ports`: port discovery only — no follow-ups beyond the port scan.
+//! * `Services`: port discovery + service identification — no
+//!   web/content/crawl derivation.
+//! * `Web`: web-focused — initial HTTP roots plus web/content follow-ups.
+//! * `Full`: broadest bounded reconnaissance, including fuzz follow-ups.
 //!
 //! # v1 policy
 //!
 //! * Level 1: target validation only (`rxscan.control.validate`).
 //! * Level 2: + minimal host-discovery intent.
 //! * Level 3: + standard port-discovery intent (+ HTTP intent for web goals).
-//! * Level 4: + expanded service/DNS intent (+ TLS for web goals).
-//! * Level 5: + deepest eligible modules allowed by the selected goal
-//!   (fingerprints, content/fuzz where the goal permits). Crawl is Phase 9
-//!   follow-up work only and is never lowered directly from a seed.
+//! * Level 4: + expanded service/DNS intent (+ HTTP intent for web goals).
+//! * Level 5: + deepest eligible modules allowed by the selected goal.
 //!
-//! Because TLS/DNS network modules do not exist yet, Phase 8 only
-//! determines eligibility for the remaining intents. `ServiceProbe` and
-//! `HttpProbe` tasks execute for real (see `service_probe.rs` and
-//! `web_probe.rs`); other network-intent tasks are
-//! part of the task graph (intended work) but execute as `Skipped`
-//! (`module unavailable`) unless a real module is registered for that kind.
+//! Only task kinds with a registered executor are ever emitted: every
+//! emitted task can run. `TlsProbe` and `Fingerprint` have no executor and
+//! are never planned (see `describe_unavailable`); `--explain` reports them
+//! as unavailable instead of emitting tasks that would predictably `Skip`.
+//! `ServiceProbe` and `HttpProbe` tasks execute for real (see
+//! `service_probe.rs` and `web_probe.rs`); follow-up-only kinds
+//! (`ServiceProbe` per-port context, `Crawl`, `ContentDiscovery`, `Fuzz`)
+//! are proposed by the Decision Engine when evidence justifies them.
 //! No fake discoveries are ever reported.
 //!
 //! Goal filtering ensures different goals produce different task graphs at
@@ -46,6 +60,16 @@ pub fn udp_intent_kind() -> TaskKind {
 }
 
 /// Base kinds per level, in deterministic execution order (highest priority first).
+///
+/// Only executable, seed-meaningful kinds appear here: every kind has a
+/// registered scheduler module AND can run from seed params. Kinds without
+/// an executor (`TlsProbe`, `Fingerprint`) are never planned (see
+/// `describe_unavailable`). Kinds that require evidence context
+/// (`Crawl`, `ContentDiscovery`, `Fuzz` need a discovered endpoint/origin)
+/// are follow-up-only: lowering one from a seed would predictably fail, so
+/// only the Decision Engine proposes them. Level 5 deepens breadth (ports),
+/// policy depths, and follow-up caps — not the initial kind set, which
+/// saturates at Level 4 by design.
 fn base_kinds_for_level(level: u8) -> Vec<TaskKind> {
     let validate = validate_kind();
     let host = TaskKind::HostDiscovery;
@@ -53,31 +77,19 @@ fn base_kinds_for_level(level: u8) -> Vec<TaskKind> {
     let http = TaskKind::HttpProbe;
     let service = TaskKind::ServiceProbe;
     let dns = TaskKind::DnsProbe;
-    let tls = TaskKind::TlsProbe;
-    let fingerprint = TaskKind::Fingerprint;
-    let content = TaskKind::ContentDiscovery;
-    let fuzz = TaskKind::Fuzz;
     match level {
         0 | 1 => vec![validate],
         2 => vec![validate, host],
         3 => vec![validate, host, port, http],
-        4 => vec![validate, host, port, http, service, dns, tls],
-        _ => vec![
-            validate,
-            host,
-            port,
-            http,
-            service,
-            dns,
-            tls,
-            fingerprint,
-            content,
-            fuzz,
-        ],
+        _ => vec![validate, host, port, http, service, dns],
     }
 }
 
 /// Goal-allowed kinds (superset filter). Order is irrelevant; base order wins.
+///
+/// Only executable, seed-meaningful kinds are listed: `TlsProbe` and
+/// `Fingerprint` have no scheduler module and `Crawl`/`ContentDiscovery`/
+/// `Fuzz` need evidence context, so none of them can appear here.
 fn allowed_kinds_for_goal(goal: ScanGoal) -> BTreeSet<String> {
     let key = |kind: &TaskKind| serde_json::to_string(kind).unwrap_or_default();
     let allowed: Vec<TaskKind> = match goal {
@@ -87,118 +99,39 @@ fn allowed_kinds_for_goal(goal: ScanGoal) -> BTreeSet<String> {
             TaskKind::PortDiscovery,
             TaskKind::ServiceProbe,
             TaskKind::DnsProbe,
-            TaskKind::Fingerprint,
         ],
-        ScanGoal::Discovery => vec![
+        ScanGoal::Discover => vec![
+            validate_kind(),
+            TaskKind::HostDiscovery,
+            TaskKind::PortDiscovery,
+            TaskKind::DnsProbe,
+        ],
+        ScanGoal::Ports => vec![
+            validate_kind(),
+            TaskKind::HostDiscovery,
+            TaskKind::PortDiscovery,
+        ],
+        ScanGoal::Services => vec![
             validate_kind(),
             TaskKind::HostDiscovery,
             TaskKind::PortDiscovery,
             TaskKind::ServiceProbe,
             TaskKind::DnsProbe,
-        ],
-        ScanGoal::ServiceMap => vec![
-            validate_kind(),
-            TaskKind::HostDiscovery,
-            TaskKind::PortDiscovery,
-            TaskKind::ServiceProbe,
-            TaskKind::DnsProbe,
-            TaskKind::Fingerprint,
         ],
         ScanGoal::Web => vec![
             validate_kind(),
             TaskKind::HostDiscovery,
             TaskKind::PortDiscovery,
             TaskKind::HttpProbe,
-            TaskKind::TlsProbe,
-            TaskKind::ContentDiscovery,
-            TaskKind::Crawl,
-            TaskKind::Fingerprint,
-        ],
-        ScanGoal::WebDiscovery => vec![
-            validate_kind(),
-            TaskKind::HostDiscovery,
-            TaskKind::PortDiscovery,
-            TaskKind::HttpProbe,
-            TaskKind::ContentDiscovery,
-            TaskKind::Crawl,
             TaskKind::DnsProbe,
         ],
-        ScanGoal::Api => vec![
-            validate_kind(),
-            TaskKind::HostDiscovery,
-            TaskKind::PortDiscovery,
-            TaskKind::HttpProbe,
-            TaskKind::TlsProbe,
-            TaskKind::ContentDiscovery,
-        ],
-        ScanGoal::ApiDiscovery => vec![
-            validate_kind(),
-            TaskKind::HostDiscovery,
-            TaskKind::PortDiscovery,
-            TaskKind::HttpProbe,
-            TaskKind::ContentDiscovery,
-            TaskKind::Crawl,
-        ],
-        ScanGoal::Content => vec![
-            validate_kind(),
-            TaskKind::HostDiscovery,
-            TaskKind::PortDiscovery,
-            TaskKind::HttpProbe,
-            TaskKind::ContentDiscovery,
-            TaskKind::Crawl,
-        ],
-        ScanGoal::Fuzz => vec![
-            validate_kind(),
-            TaskKind::HostDiscovery,
-            TaskKind::PortDiscovery,
-            TaskKind::HttpProbe,
-            TaskKind::ContentDiscovery,
-            TaskKind::Crawl,
-            TaskKind::Fuzz,
-        ],
-        ScanGoal::Inventory => vec![
-            validate_kind(),
-            TaskKind::HostDiscovery,
-            TaskKind::PortDiscovery,
-            TaskKind::ServiceProbe,
-            TaskKind::DnsProbe,
-            TaskKind::Fingerprint,
-        ],
-        ScanGoal::Baseline => vec![
-            validate_kind(),
-            TaskKind::HostDiscovery,
-            TaskKind::PortDiscovery,
-            TaskKind::ServiceProbe,
-            TaskKind::DnsProbe,
-        ],
-        ScanGoal::Monitoring => vec![
-            validate_kind(),
-            TaskKind::HostDiscovery,
-            TaskKind::PortDiscovery,
-            TaskKind::ServiceProbe,
-        ],
-        ScanGoal::Research => vec![
-            validate_kind(),
-            TaskKind::HostDiscovery,
-            TaskKind::PortDiscovery,
-            TaskKind::ServiceProbe,
-            TaskKind::DnsProbe,
-            TaskKind::Fingerprint,
-            TaskKind::HttpProbe,
-            TaskKind::TlsProbe,
-        ],
-        ScanGoal::Custom => vec![
+        ScanGoal::Full => vec![
             validate_kind(),
             TaskKind::HostDiscovery,
             TaskKind::PortDiscovery,
             TaskKind::HttpProbe,
             TaskKind::ServiceProbe,
             TaskKind::DnsProbe,
-            TaskKind::TlsProbe,
-            TaskKind::Fingerprint,
-            TaskKind::ContentDiscovery,
-            TaskKind::Crawl,
-            TaskKind::Fuzz,
         ],
     };
     allowed.into_iter().map(|kind| key(&kind)).collect()
@@ -275,6 +208,65 @@ pub fn planned_module_for_kind(kind: &TaskKind) -> Option<PlannedModule> {
     }
 }
 
+/// Human-readable initial-task list for `--explain`: selected AND
+/// executable kinds for this goal/level (explicit requests included).
+pub fn describe_initial_tasks(goal: ScanGoal, level: u8) -> String {
+    // Recompute with explicit-request flags off; explicit intent is reported
+    // separately by select_planned_modules. Pure function of goal/level.
+    let kinds = eligible_task_kinds(goal, level, false, false, false);
+    if kinds.is_empty() {
+        return "  - (none)".to_owned();
+    }
+    kinds
+        .iter()
+        .map(|kind| format!("  - {}", serde_json::to_string(kind).unwrap_or_default()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Human-readable evidence-triggered follow-up rules for `--explain`.
+/// These never run without justifying evidence; workflow gating decides
+/// which rules are live for the selected goal.
+pub fn describe_followups(goal: ScanGoal, level: u8) -> String {
+    let mut rules = Vec::new();
+    let alive = "host discovery concluded -> TCP port discovery";
+    rules.push(format!("  - {alive}"));
+    if matches!(
+        goal,
+        ScanGoal::Recon | ScanGoal::Services | ScanGoal::Web | ScanGoal::Full
+    ) {
+        rules.push("  - open TCP port -> service identification".to_owned());
+    }
+    if matches!(goal, ScanGoal::Recon | ScanGoal::Web | ScanGoal::Full) {
+        rules.push("  - identified HTTP(S) service -> web observation".to_owned());
+        rules.push("  - confirmed web endpoint -> crawl / baseline / content discovery".to_owned());
+    }
+    if matches!(goal, ScanGoal::Full) && level >= 3 {
+        rules.push("  - baseline response signature -> bounded query fuzzing".to_owned());
+    }
+    if !matches!(goal, ScanGoal::Ports) {
+        rules.push("  - DNS A/AAAA observation -> host discovery".to_owned());
+    }
+    if rules.len() <= 1 {
+        rules.push("  - (no follow-ups: this workflow stops after initial tasks)".to_owned());
+    }
+    rules.join("\n")
+}
+
+/// Capabilities the planner will never emit as tasks in this build.
+///
+/// The scheduler has no executor for these, so planning them would only
+/// produce predictable `Skipped` (or failed) tasks. `--explain` shows this
+/// list instead of advertising them as selected work.
+pub fn describe_unavailable() -> String {
+    [
+        "  - tls-probe tasks (dedicated TLS/cipher enumeration; TLS handshake facts observed via service probing remain available)",
+        "  - fingerprint tasks (OS/device fingerprint engine)",
+        "  - udp port scanning (--udp is rejected fail-fast with a clear error)",
+    ]
+    .join("\n")
+}
+
 /// Select [`PlannedModule`]s for `ScanPlan::compile` from goal/level plus
 /// explicit CLI requests. Returns `(modules, selected_reasons, skipped_reasons)`.
 pub fn select_planned_modules(
@@ -293,7 +285,7 @@ pub fn select_planned_modules(
     let mut selected = vec![
         "Target normalization, Scope Guard, and plan compilation always run.".to_owned(),
         format!(
-            "Level {level} with goal {goal:?} selects: {}.",
+            "Level {level} with workflow {goal} selects: {}.",
             eligible
                 .iter()
                 .map(|kind| serde_json::to_string(kind).unwrap_or_default())
@@ -336,13 +328,12 @@ pub fn select_planned_modules(
     for candidate in all_discovery {
         if !modules.contains(&candidate) {
             skipped.push(format!(
-                "{candidate:?} not selected by level {level} + goal {goal:?} (no explicit request)."
+                "{candidate:?} not selected by level {level} + workflow {goal} (no explicit request)."
             ));
         }
     }
-    // Phase 4 honesty: network execution deferred.
     skipped.push(
-        "Phase 4 executes only control/host/port scaffold tasks; deeper network intents run as Skipped (module unavailable) without fake results."
+        "Unsupported selected intents are skipped only when no real module is registered; skipped work is reported without fake discoveries."
             .to_owned(),
     );
     // Deterministic module order: control first, then discovery in enum order.
@@ -372,7 +363,14 @@ mod tests {
 
     #[test]
     fn level_one_is_minimal_for_all_goals() {
-        for goal in [ScanGoal::Recon, ScanGoal::Web, ScanGoal::Fuzz] {
+        for goal in [
+            ScanGoal::Recon,
+            ScanGoal::Discover,
+            ScanGoal::Ports,
+            ScanGoal::Services,
+            ScanGoal::Web,
+            ScanGoal::Full,
+        ] {
             assert_eq!(
                 eligible_task_kinds(goal, 1, false, false, false),
                 vec![validate_kind()]
@@ -381,11 +379,51 @@ mod tests {
     }
 
     #[test]
-    fn higher_levels_expand_eligibility() {
+    fn higher_levels_expand_eligibility_then_saturate_by_design() {
         let l2 = eligible_task_kinds(ScanGoal::Recon, 2, false, false, false);
         let l3 = eligible_task_kinds(ScanGoal::Recon, 3, false, false, false);
+        let l4 = eligible_task_kinds(ScanGoal::Recon, 4, false, false, false);
         let l5 = eligible_task_kinds(ScanGoal::Recon, 5, false, false, false);
         assert!(l2.len() < l3.len());
-        assert!(l3.len() < l5.len());
+        assert!(l3.len() < l4.len());
+        // Initial kinds saturate at L4 by design: L5 deepens breadth
+        // (ports), policy depths, and follow-up caps — never the seed set.
+        // Follow-up-only kinds (content/crawl/fuzz) and unexecutable kinds
+        // (tls/fingerprint) are never lowered from a seed.
+        assert_eq!(l4, l5);
+        for kind in l5 {
+            assert!(!matches!(
+                kind,
+                TaskKind::TlsProbe
+                    | TaskKind::Fingerprint
+                    | TaskKind::ContentDiscovery
+                    | TaskKind::Crawl
+                    | TaskKind::Fuzz
+            ));
+        }
+    }
+
+    #[test]
+    fn canonical_workflows_differ_where_promised() {
+        use TaskKind::*;
+        // L3: web-family adds HTTP roots; port-family stays host+port.
+        assert!(eligible_task_kinds(ScanGoal::Web, 3, false, false, false).contains(&HttpProbe));
+        assert!(!eligible_task_kinds(ScanGoal::Recon, 3, false, false, false).contains(&HttpProbe));
+        // L4: initial service tasks for Recon/Services/Full. Web identifies
+        // services purely through evidence-triggered follow-ups (its
+        // initial set stays HTTP-roots focused); Discover/Ports never
+        // identify services at all.
+        for goal in [ScanGoal::Recon, ScanGoal::Services, ScanGoal::Full] {
+            assert!(
+                eligible_task_kinds(goal, 4, false, false, false).contains(&ServiceProbe),
+                "{goal} must select service identification"
+            );
+        }
+        for goal in [ScanGoal::Discover, ScanGoal::Ports, ScanGoal::Web] {
+            assert!(
+                !eligible_task_kinds(goal, 4, false, false, false).contains(&ServiceProbe),
+                "{goal} must not select initial service tasks"
+            );
+        }
     }
 }
