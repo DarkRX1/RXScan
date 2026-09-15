@@ -684,7 +684,7 @@ impl SpeedGovernor {
     pub fn budget(&self) -> usize {
         self.max_concurrency
     }
-    /// Phase 4 auto is intentionally non-adaptive.
+    /// Auto is currently a deterministic, non-adaptive baseline.
     pub fn is_adaptive(&self) -> bool {
         false
     }
@@ -692,7 +692,7 @@ impl SpeedGovernor {
         let adaptive = if self.is_adaptive() {
             "adaptive"
         } else {
-            "deterministic baseline (non-adaptive in Phase 4; auto == balanced)"
+            "deterministic baseline (non-adaptive; auto == balanced)"
         };
         format!(
             "speed {} -> concurrency {}, retry_limit {}, default_timeout_ms {}, {}",

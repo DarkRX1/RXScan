@@ -250,24 +250,9 @@ fn params_for_kind(
                 params.insert("ports".to_owned(), "common".to_owned());
             }
             TcpPortSelection::Explicit(ports) => {
-                let rendered = ports
-                    .iter()
-                    .map(u16::to_string)
-                    .collect::<Vec<_>>()
-                    .join(",");
-                // Truncate rendered list deterministically if huge; the full
-                // count plus a hash ride along so distinct giant selections
-                // keep distinct IDs (collision-safe truncation).
-                let rendered = if rendered.len() > 2048 {
-                    format!("{}...(+{} more)", &rendered[..2048], ports.len())
-                } else {
-                    rendered
-                };
+                let rendered = crate::ports::compress_port_list(ports);
                 params.insert("ports".to_owned(), format!("explicit:{rendered}"));
                 params.insert("port_count".to_owned(), ports.len().to_string());
-                if rendered.contains("...(+") {
-                    params.insert("ports_hash".to_owned(), ports_hash(ports));
-                }
             }
             TcpPortSelection::All => {
                 params.insert("ports".to_owned(), "all".to_owned());
@@ -406,22 +391,6 @@ fn module_name_for_kind(kind: &TaskKind) -> String {
         TaskKind::Fuzz => "rxscan.fuzz".to_owned(),
         TaskKind::Custom(name) => format!("rxscan.custom.{name}"),
     }
-}
-
-/// Short collision-safe hash of a full explicit port list (used only when the
-/// rendered `ports` param is truncated, so giant selections keep distinct IDs).
-fn ports_hash(ports: &[u16]) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    for port in ports {
-        hasher.update(port.to_be_bytes());
-    }
-    let digest = hasher.finalize();
-    let mut out = String::with_capacity(16);
-    for byte in digest.iter().take(8) {
-        out.push_str(&format!("{byte:02x}"));
-    }
-    out
 }
 
 /// Distinct task-graph fingerprint (sorted IDs) for determinism tests.

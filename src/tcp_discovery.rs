@@ -34,7 +34,9 @@ use crate::model::{
     MAX_EVENT_DETAILS_BYTES, Provenance, Severity, Timestamp,
 };
 use crate::plan::{ScanGoal, SpeedSetting, TcpPortSelection};
-use crate::ports::{PortSource, ResolvedPorts, resolve_ports, tcp_concurrency_for_speed};
+use crate::ports::{
+    PortSource, ResolvedPorts, parse_port_selection, resolve_ports, tcp_concurrency_for_speed,
+};
 use crate::tcp_scanner::{NativeTcpScanner, PortScanner, PortState, ScanConfig};
 
 pub const TCP_DISCOVERY_MODULE_NAME: &str = "rxscan.port";
@@ -83,17 +85,7 @@ impl TcpScanPolicy {
                 };
             }
             if let Some(rest) = param.strip_prefix("explicit:") {
-                let mut ports: Vec<u16> = rest
-                    .split(',')
-                    .filter_map(|item| item.trim().parse::<u16>().ok())
-                    .filter(|port| *port > 0)
-                    .collect();
-                ports.sort_unstable();
-                ports.dedup();
-                // `port_count` param guards truncation collisions in IDs, but
-                // the module scans the rendered prefix only when the full list
-                // was truncated at lowering (documented limitation for giant
-                // explicit lists; `--all-ports` is the canonical huge scan).
+                let ports = parse_port_selection(rest).unwrap_or_default();
                 return ResolvedPorts {
                     ports,
                     source: PortSource::Explicit,
@@ -414,22 +406,6 @@ fn execute_port_scan(
     // Resolve ports BEFORE candidates so invalid selection fails fast.
     let ports_param = task.params.get("ports").map(String::as_str);
     let resolved = policy.ports_for_task(ports_param);
-    // `explicit:` params only carry a rendered prefix for giant lists; the
-    // full count rides in `port_count`. Scanning the prefix alone would
-    // silently under-scan, so refuse giant explicit renders and direct the
-    // operator to `--all-ports` (canonical huge scan).
-    if task
-        .params
-        .get("ports")
-        .is_some_and(|value| value.contains("...(+"))
-    {
-        return Err(ModuleError::Failed {
-            message: "explicit port list truncated in task params; use --all-ports for huge scans"
-                .to_owned(),
-            retryable: false,
-        });
-    }
-
     let candidates = resolve_scan_candidates(&task.scope_target, &task.params, guard, &cancel)
         .map_err(|_| ModuleError::Failed {
             message: "candidate resolution failed".to_owned(),
@@ -497,6 +473,7 @@ fn execute_port_scan(
     let mut first_open_ms: Option<u64> = None;
     let mut truncated_any = false;
     let mut unscanned_total = 0usize;
+    let mut fd_peak_max = 0usize;
 
     for (ip, parent_id) in ips.iter().zip(parent_ids.iter()) {
         if cancel.is_cancelled() {
@@ -517,6 +494,7 @@ fn execute_port_scan(
         }
         truncated_any |= outcome.truncated;
         unscanned_total += outcome.unscanned;
+        fd_peak_max = fd_peak_max.max(outcome.fd_peak);
         for probe in &outcome.probes {
             match probe.state {
                 PortState::Open => {
@@ -735,6 +713,14 @@ fn execute_port_scan(
 
     open_records.sort_by_key(|record| (record.address.clone(), record.port));
     let elapsed_ms = start_instant.elapsed().as_millis() as u64;
+    let attempted_ports = if detailed {
+        Some(
+            outcome_ports_from_counts(&resolved.ports, &counts)
+                .unwrap_or_else(|| resolved.ports.clone()),
+        )
+    } else {
+        None
+    };
     push_event(
         &mut events,
         EventKind::PortScanCompleted,
@@ -743,10 +729,13 @@ fn execute_port_scan(
             "target": target_label,
             "port_source": resolved.source.to_string(),
             "ports_requested": resolved.ports.len(),
+            "requested_ports": if detailed { Some(resolved.ports.clone()) } else { None },
+            "attempted_ports": attempted_ports,
             "counts": counts,
             "open_ports": open_records.iter().map(|record| record.port).collect::<Vec<_>>(),
             "truncated": truncated_any,
             "unscanned": unscanned_total,
+            "fd_peak": fd_peak_max,
             "elapsed_ms": elapsed_ms,
             "time_to_first_open_ms": first_open_ms,
         }),
@@ -809,6 +798,15 @@ fn execute_port_scan(
     })
 }
 
+fn outcome_ports_from_counts(requested: &[u16], counts: &BTreeMap<&str, u64>) -> Option<Vec<u16>> {
+    let accounted = counts.values().try_fold(0usize, |acc, count| {
+        usize::try_from(*count)
+            .ok()
+            .and_then(|value| acc.checked_add(value))
+    })?;
+    (accounted == requested.len()).then(|| requested.to_vec())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn finish_empty_scan(
     target_label: &str,
@@ -832,6 +830,7 @@ fn finish_empty_scan(
             "open_ports": [],
             "truncated": false,
             "unscanned": 0,
+            "fd_peak": 0,
             "elapsed_ms": start_instant.elapsed().as_millis() as u64,
             "note": reason,
             "policy": policy.describe(),
@@ -910,7 +909,127 @@ fn push_event(
     Ok(())
 }
 
+/// Typed TCP totals aggregated from `PortScanCompleted` events.
+///
+/// This is the SAME typed execution state that JSONL serializes: the human
+/// summary renders these totals instead of re-deriving its own numbers, so
+/// human counts and machine counts cannot disagree.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TcpScanTotals {
+    pub completed_tasks: usize,
+    pub ports_requested: u64,
+    pub ports_attempted: u64,
+    pub open: u64,
+    pub closed: u64,
+    pub filtered_or_timed_out: u64,
+    pub error: u64,
+    pub unscanned: u64,
+    pub truncated: bool,
+    pub port_sources: Vec<String>,
+    pub elapsed_ms_max: u64,
+    /// Peak simultaneously held in-flight sockets across completed scans
+    /// (always `<=` configured concurrency `<= 256`). Same typed state as
+    /// JSONL (`fd_peak` on `PortScanCompleted`).
+    pub fd_peak_max: usize,
+}
+
+/// Aggregate `PortScanCompleted` events across succeeded module outputs.
+///
+/// Per task: `attempted = ports_requested - unscanned` (robust for both
+/// detailed scans, which carry `attempted_ports`, and huge scans, which do
+/// not). Counts come straight from the event's `counts` object.
+pub fn summarize_port_scans(
+    module_outputs: &[(crate::execution::TaskId, ModuleOutput)],
+) -> TcpScanTotals {
+    let mut totals = TcpScanTotals::default();
+    let mut sources: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for (_, output) in module_outputs {
+        for event in &output.events {
+            if !matches!(event.kind, EventKind::PortScanCompleted) {
+                continue;
+            }
+            totals.completed_tasks += 1;
+            let data = &event.details.data;
+            let count = |key: &str| {
+                data.get("counts")
+                    .and_then(|c| c.get(key))
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0)
+            };
+            totals.open += count("open");
+            totals.closed += count("closed");
+            totals.filtered_or_timed_out += count("filtered_or_timed_out");
+            totals.error += count("error");
+            let requested = data
+                .get("ports_requested")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let unscanned = data
+                .get("unscanned")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            totals.ports_requested += requested;
+            totals.unscanned += unscanned;
+            totals.ports_attempted += requested.saturating_sub(unscanned);
+            if data
+                .get("truncated")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                totals.truncated = true;
+            }
+            if let Some(source) = data.get("port_source").and_then(serde_json::Value::as_str) {
+                sources.insert(source.to_owned());
+            }
+            if let Some(elapsed) = data.get("elapsed_ms").and_then(serde_json::Value::as_u64) {
+                totals.elapsed_ms_max = totals.elapsed_ms_max.max(elapsed);
+            }
+            if let Some(peak) = data.get("fd_peak").and_then(serde_json::Value::as_u64) {
+                totals.fd_peak_max = totals.fd_peak_max.max(usize::try_from(peak).unwrap_or(0));
+            }
+        }
+    }
+    totals.port_sources = sources.into_iter().collect();
+    totals
+}
+
+/// One-line scanner-work summary derived from [`summarize_port_scans`].
+/// Empty string when no TCP discovery completed (caller prints the
+/// truthful no-scan message instead).
+pub fn human_tcp_totals_line(totals: &TcpScanTotals) -> String {
+    if totals.completed_tasks == 0 {
+        return String::new();
+    }
+    let sources = if totals.port_sources.is_empty() {
+        "unknown".to_owned()
+    } else {
+        totals.port_sources.join("+")
+    };
+    let mut line = format!(
+        "TCP discovery ({sources}): {} requested, {} attempted, {} open, {} closed, {} filtered/timed out, {} errors, {} unscanned",
+        totals.ports_requested,
+        totals.ports_attempted,
+        totals.open,
+        totals.closed,
+        totals.filtered_or_timed_out,
+        totals.error,
+        totals.unscanned,
+    );
+    if totals.truncated {
+        line.push_str(" (truncated: global deadline cut the scan short)");
+    }
+    line.push_str(&format!(
+        " [TCP scan time: {}ms max per task]",
+        totals.elapsed_ms_max
+    ));
+    line
+}
+
 /// Human open-port summary across module outputs (prioritizes opens).
+///
+/// Same execution-truth contract as `service_probe::human_service_table`:
+/// "No open TCP ports observed." requires a `PortScanCompleted` event;
+/// otherwise the output states that no discovery completed.
 pub fn human_open_ports_summary(
     module_outputs: &[(crate::execution::TaskId, ModuleOutput)],
 ) -> String {
@@ -936,7 +1055,14 @@ pub fn human_open_ports_summary(
         }
     }
     if opens.is_empty() {
-        return "No open TCP ports observed.".to_owned();
+        let completed = module_outputs
+            .iter()
+            .flat_map(|(_, output)| &output.events)
+            .any(|event| matches!(event.kind, EventKind::PortScanCompleted));
+        if completed {
+            return "No open TCP ports observed.".to_owned();
+        }
+        return "No TCP port discovery was completed; no ports were scanned.".to_owned();
     }
     opens.sort();
     opens.dedup();

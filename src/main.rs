@@ -120,7 +120,7 @@ fn main() {
             } else {
                 out_line!("{}", run::human_summary(&report));
                 if report.output_path.is_none() {
-                    out_line!("Run with --explain to inspect the effective Phase 8 plan.");
+                    out_line!("Run with --explain to inspect the effective scan plan.");
                     out_line!(
                         "Service probing uses bounded native handshakes (no auth); use --output <path> for typed JSONL."
                     );

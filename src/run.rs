@@ -1,4 +1,4 @@
-//! Phase 8 runtime bootstrap: Target -> Scope -> ScanPlan -> Tasks ->
+//! Runtime bootstrap: Target -> Scope -> ScanPlan -> Tasks ->
 //! Reactive Scheduler <-> Speed Governor <-> Budgets <-> Backpressure ->
 //! HostDiscovery + TcpDiscovery + ServiceProbe + WebProbe + Crawl Modules -> Typed
 //! Events / Evidence / Assets / Findings -> Decision Engine (host→port,
@@ -78,10 +78,25 @@ pub struct RunReport {
     /// back to port-only rows when no service findings exist yet).
     /// Kept in the report so the binary prints services without re-reading JSONL.
     pub open_ports_summary: String,
+    /// Typed TCP totals from the same `PortScanCompleted` events JSONL
+    /// serializes. The human summary renders these, so human counts and
+    /// machine counts cannot disagree.
+    pub tcp_totals: crate::tcp_discovery::TcpScanTotals,
+    /// Typed count of `ServiceIdentified` events (same state as JSONL).
+    pub services_identified: usize,
+    /// Wall-clock execution time in milliseconds (plan lowering through
+    /// scheduler completion), rendered as `Duration` in human output.
+    pub duration_ms: u64,
 }
 
-/// Execute the full Phase 9 discovery plane from CLI.
+/// Execute the discovery plane from CLI.
 ///
+/// Default contract (`rxscan TARGET` = workflow `recon`, level 3, balanced
+/// speed): normalize target -> enforce scope -> bounded host discovery ->
+/// `common-100` TCP discovery -> service identification per open port ->
+/// evidence-justified Recon/L3 follow-ups (web, crawl, baseline, content;
+/// never fuzz) -> typed JSONL + human summary from the same state.
+/// See README "Default contract" for the operator-facing statement.
 /// Steps: compile plan -> scope guard -> lower tasks (bounded CIDR, one port
 /// task per target) -> speed governor -> budgets -> scheduler -> register
 /// HostDiscovery + TcpDiscovery + ServiceProbe + WebProbe + Crawl + control scaffolds
@@ -119,6 +134,9 @@ pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
             jsonl_bytes: 0,
             output_path: None,
             open_ports_summary: String::new(),
+            tcp_totals: crate::tcp_discovery::TcpScanTotals::default(),
+            services_identified: 0,
+            duration_ms: 0,
         });
     }
     let tasks = if loaded.is_none() {
@@ -257,7 +275,9 @@ pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
             scheduler.add_task(task)?;
         }
     }
+    let started = std::time::Instant::now();
     let scheduler_report = scheduler.run()?;
+    let wall = started.elapsed();
     let events = sink.events();
     let module_outputs = scheduler.module_outputs();
 
@@ -303,6 +323,9 @@ pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
         jsonl_bytes,
         output_path: output_path.map(|path| path.display().to_string()),
         open_ports_summary: crate::service_probe::human_service_table(&module_outputs),
+        tcp_totals: crate::tcp_discovery::summarize_port_scans(&module_outputs),
+        services_identified: crate::service_probe::count_identified_services(&module_outputs),
+        duration_ms: wall.as_millis().min(u128::from(u64::MAX)) as u64,
     })
 }
 
@@ -396,6 +419,12 @@ fn write_outputs<W: std::io::Write>(
 
 /// Human summary for non-JSONL runs (service table prioritizes classified
 /// services with product hints; closed/filtered detail lives in JSONL).
+///
+/// Scanner work comes first: TCP totals and identified services are rendered
+/// from the same typed [`crate::tcp_discovery::TcpScanTotals`] / `ServiceIdentified` state that
+/// JSONL serializes, so human counts always equal machine counts.
+/// Scheduler task accounting is demoted to a trailing `Diagnostics` block
+/// (full task/budget detail remains in `--explain` and JSONL).
 pub fn human_summary(report: &RunReport) -> String {
     human_summary_with_opens(report, None)
 }
@@ -406,9 +435,45 @@ pub fn human_summary_with_opens(
     module_outputs: Option<&[(crate::execution::TaskId, crate::execution::ModuleOutput)]>,
 ) -> String {
     let scheduler = &report.scheduler_report;
+    let summary = match module_outputs {
+        Some(outputs) if !outputs.is_empty() => crate::service_probe::human_service_table(outputs),
+        _ => report.open_ports_summary.clone(),
+    };
+    // Scanner-work section derives from typed execution state. When the
+    // caller supplies fresher outputs (tests), re-aggregate from those so
+    // the numbers still match the table above; otherwise use the report's
+    // stored totals (computed from the same outputs at execution time).
+    let (tcp_totals, services_identified) = match module_outputs {
+        Some(outputs) if !outputs.is_empty() => (
+            crate::tcp_discovery::summarize_port_scans(outputs),
+            crate::service_probe::count_identified_services(outputs),
+        ),
+        _ => (report.tcp_totals.clone(), report.services_identified),
+    };
+    let tcp_line = crate::tcp_discovery::human_tcp_totals_line(&tcp_totals);
+    let scan_section = if tcp_line.is_empty() {
+        "TCP discovery: not attempted; no ports were scanned.".to_owned()
+    } else {
+        tcp_line
+    };
+    let services_line = format!("Services: {services_identified} identified");
+    let duration_line = format!("Duration: {}ms", report.duration_ms);
     let header = format!(
-        "RXScan Phase 9 run: {} task(s) | completed {} | failed {} | cancelled {} | timed out {} | skipped {} | JSONL bytes {}{}",
-        report.task_count,
+        "RXScan\n\nTarget: {}\nWorkflow: {}\nLevel: {}\nSpeed: {}\n\n{}\n\n{scan_section}\n{services_line}\n{duration_line}",
+        report
+            .plan
+            .targets
+            .iter()
+            .map(|target| target.original_input.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+        report.plan.goal,
+        report.plan.level,
+        report.plan.speed,
+        summary
+    );
+    let footer = format!(
+        "\n\nDiagnostics\n  tasks: {} completed, {} failed, {} cancelled, {} timed out, {} skipped\n  jsonl bytes: {}{}",
         scheduler.completed.len(),
         scheduler.failed.len(),
         scheduler.cancelled.len(),
@@ -418,18 +483,7 @@ pub fn human_summary_with_opens(
         report
             .output_path
             .as_deref()
-            .map_or(String::new(), |path| format!(" | output {path}"))
+            .map_or(String::new(), |path| format!("\n  output: {path}"))
     );
-    // Prefer caller-supplied outputs; fall back to the report's own summary
-    // (populated by `execute` from scheduler outputs).
-    match module_outputs {
-        Some(outputs) if !outputs.is_empty() => {
-            let table = crate::service_probe::human_service_table(outputs);
-            format!("{header}\n{table}")
-        }
-        _ if !report.open_ports_summary.is_empty() => {
-            format!("{header}\n{}", report.open_ports_summary)
-        }
-        _ => header,
-    }
+    format!("{header}{footer}")
 }

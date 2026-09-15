@@ -1059,8 +1059,41 @@ fn push_event(
     Ok(())
 }
 
+/// Count `ServiceIdentified` events across succeeded module outputs.
+///
+/// Same typed state JSONL serializes; the human summary renders this count
+/// so it cannot disagree with machine output.
+pub fn count_identified_services(
+    module_outputs: &[(crate::execution::TaskId, crate::execution::ModuleOutput)],
+) -> usize {
+    module_outputs
+        .iter()
+        .flat_map(|(_, output)| &output.events)
+        .filter(|event| matches!(event.kind, crate::model::EventKind::ServiceIdentified))
+        .count()
+}
+
+/// Whether any completed TCP discovery exists in these outputs.
+///
+/// Execution truth: "No open TCP ports observed" is only valid after a
+/// `PortScanCompleted` event proves meaningful port discovery was actually
+/// attempted. Absence of `PortOpen` evidence alone proves nothing (Level 1
+/// runs no port tasks at all; failed/skipped tasks leave no completion).
+pub fn tcp_scan_completed(
+    module_outputs: &[(crate::execution::TaskId, crate::execution::ModuleOutput)],
+) -> bool {
+    module_outputs
+        .iter()
+        .flat_map(|(_, output)| &output.events)
+        .any(|event| matches!(event.kind, crate::model::EventKind::PortScanCompleted))
+}
+
 /// Service-aware human table (ports + service/product columns).
 /// Falls back to port-only rows when no service findings exist yet.
+///
+/// When no open ports exist the message distinguishes a completed scan
+/// ("No open TCP ports observed.") from no scan at all (truthful
+/// no-discovery message that never implies ports were scanned).
 pub fn human_service_table(
     module_outputs: &[(crate::execution::TaskId, crate::execution::ModuleOutput)],
 ) -> String {
@@ -1118,7 +1151,10 @@ pub fn human_service_table(
         }
     }
     if ports.is_empty() {
-        return "No open TCP ports observed.".to_owned();
+        if tcp_scan_completed(module_outputs) {
+            return "No open TCP ports observed.".to_owned();
+        }
+        return "No TCP port discovery was completed; no ports were scanned.".to_owned();
     }
     let mut by_host: BTreeMap<String, Vec<u16>> = BTreeMap::new();
     for (host, port) in ports.keys() {
