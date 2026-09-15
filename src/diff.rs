@@ -166,6 +166,11 @@ struct Coverage {
     /// same membership truth with O(1) memory; `port_covered` binary-searches
     /// the merged list.
     port_ranges: Vec<(u16, u16)>,
+    /// UDP port tokens, partitioned from TCP: `53/tcp` and `53/udp` are
+    /// different observations and must never cover each other.
+    udp_ports: BTreeSet<String>,
+    /// Merged closed intervals for UDP tokens (same encoding as TCP).
+    udp_ranges: Vec<(u16, u16)>,
     dns_types: BTreeSet<String>,
     crawl_depth: Option<u8>,
     content: bool,
@@ -177,52 +182,24 @@ impl Coverage {
     /// match verbatim; otherwise a decimal `u16` token matches when covered
     /// by a recorded range interval.
     fn port_covered(&self, port: &str) -> bool {
-        if self.ports.contains(port) {
-            return true;
-        }
-        let Ok(number) = port.parse::<u16>() else {
-            return false;
-        };
-        // `port_ranges` is kept sorted and merged; binary search on starts.
-        let mut low = 0usize;
-        let mut high = self.port_ranges.len();
-        while low < high {
-            let mid = low + (high - low) / 2;
-            let (start, end) = self.port_ranges[mid];
-            if number < start {
-                high = mid;
-            } else if number > end {
-                low = mid + 1;
-            } else {
-                return true;
-            }
-        }
-        false
+        port_covered_in(&self.ports, &self.port_ranges, port)
     }
 
-    /// Insert a closed range and re-merge the interval list so it stays
+    /// Membership test for a canonical UDP port token (same encoding,
+    /// partitioned sets so transports never cover each other).
+    fn udp_port_covered(&self, port: &str) -> bool {
+        port_covered_in(&self.udp_ports, &self.udp_ranges, port)
+    }
+
+    /// Insert a closed TCP range and re-merge the interval list so it stays
     /// sorted, disjoint, and minimal.
     fn insert_port_range(&mut self, start: u16, end: u16) {
-        if start > end {
-            // Matches the old `start..=end` expansion, which yields nothing
-            // for a reversed range.
-            return;
-        }
-        self.port_ranges.push((start, end));
-        self.port_ranges.sort_unstable();
-        let mut merged: Vec<(u16, u16)> = Vec::with_capacity(self.port_ranges.len());
-        for (start, end) in self.port_ranges.drain(..) {
-            if let Some(last) = merged.last_mut() {
-                // Adjacent intervals merge too: coverage is identical and the
-                // list stays minimal.
-                if start <= last.1.saturating_add(1) {
-                    last.1 = last.1.max(end);
-                    continue;
-                }
-            }
-            merged.push((start, end));
-        }
-        self.port_ranges = merged;
+        insert_merged_range(&mut self.port_ranges, start, end);
+    }
+
+    /// Insert a closed UDP range (same encoding, partitioned storage).
+    fn insert_udp_port_range(&mut self, start: u16, end: u16) {
+        insert_merged_range(&mut self.udp_ranges, start, end);
     }
 
     fn record_task(&mut self, kind: &TaskKind, params: &BTreeMap<String, String>) {
@@ -240,6 +217,26 @@ impl Coverage {
                                 }
                             } else if part.parse::<u16>().is_ok() {
                                 self.ports.insert(part.to_owned());
+                            }
+                        }
+                    }
+                }
+            }
+            TaskKind::UdpDiscovery => {
+                // Same param encoding as TCP, partitioned storage so UDP
+                // coverage never stands in for TCP coverage or vice versa.
+                for key in ["port", "ports", "scanned_ports"] {
+                    if let Some(value) = params.get(key) {
+                        for part in value.split(',') {
+                            let part = part.trim();
+                            if let Some((start, end)) = part.split_once('-') {
+                                if let (Ok(start), Ok(end)) =
+                                    (start.trim().parse::<u16>(), end.trim().parse::<u16>())
+                                {
+                                    self.insert_udp_port_range(start, end);
+                                }
+                            } else if part.parse::<u16>().is_ok() {
+                                self.udp_ports.insert(part.to_owned());
                             }
                         }
                     }
@@ -294,7 +291,31 @@ impl Coverage {
                 }
             }
         }
+        if self.succeeded.contains(&TaskKind::UdpDiscovery) {
+            self.requires_network_safe(TaskKind::UdpDiscovery, other)?;
+            if asset.kind == AssetKind::Port
+                && asset.attributes.get("transport").map(String::as_str) == Some("udp")
+            {
+                let port = asset
+                    .attributes
+                    .get("port")
+                    .cloned()
+                    .or_else(|| asset.identity.rsplit(':').next().map(str::to_owned));
+                if let Some(port) = port {
+                    if !other.udp_port_covered(&port) {
+                        return Err(ReasonCode::MissingWithoutComparableCoverage);
+                    }
+                }
+            }
+        }
         match asset.kind {
+            // Transport-aware: UDP port assets require UDP discovery in the
+            // other scan; TCP (and legacy transport-less) assets require TCP.
+            AssetKind::Port
+                if asset.attributes.get("transport").map(String::as_str) == Some("udp") =>
+            {
+                self.requires_network_safe(TaskKind::UdpDiscovery, other)
+            }
             AssetKind::Port => self.requires_network_safe(TaskKind::PortDiscovery, other),
             AssetKind::Service => self.requires_network_safe(TaskKind::ServiceProbe, other),
             AssetKind::Url | AssetKind::Endpoint => {
@@ -378,6 +399,58 @@ impl Coverage {
         }
         Ok(())
     }
+}
+
+/// Membership test shared by the TCP and UDP partitioned port sets.
+/// Exact single-port tokens match verbatim; otherwise a decimal `u16`
+/// token matches when covered by a recorded range interval.
+fn port_covered_in(ports: &BTreeSet<String>, ranges: &[(u16, u16)], port: &str) -> bool {
+    if ports.contains(port) {
+        return true;
+    }
+    let Ok(number) = port.parse::<u16>() else {
+        return false;
+    };
+    // Ranges stay sorted and merged; binary search on starts.
+    let mut low = 0usize;
+    let mut high = ranges.len();
+    while low < high {
+        let mid = low + (high - low) / 2;
+        let (start, end) = ranges[mid];
+        if number < start {
+            high = mid;
+        } else if number > end {
+            low = mid + 1;
+        } else {
+            return true;
+        }
+    }
+    false
+}
+
+/// Insert a closed range into an interval list and re-merge so it stays
+/// sorted, disjoint, and minimal. Shared by TCP and UDP coverage.
+fn insert_merged_range(ranges: &mut Vec<(u16, u16)>, start: u16, end: u16) {
+    if start > end {
+        // Matches the old `start..=end` expansion, which yields nothing
+        // for a reversed range.
+        return;
+    }
+    ranges.push((start, end));
+    ranges.sort_unstable();
+    let mut merged: Vec<(u16, u16)> = Vec::with_capacity(ranges.len());
+    for (start, end) in ranges.drain(..) {
+        if let Some(last) = merged.last_mut() {
+            // Adjacent intervals merge too: coverage is identical and the
+            // list stays minimal.
+            if start <= last.1.saturating_add(1) {
+                last.1 = last.1.max(end);
+                continue;
+            }
+        }
+        merged.push((start, end));
+    }
+    *ranges = merged;
 }
 
 pub fn diff_checkpoints(
@@ -818,5 +891,43 @@ pub fn tcp_selection_semantic(selection: &TcpPortSelection) -> String {
         TcpPortSelection::Common => "common".to_owned(),
         TcpPortSelection::All => "all".to_owned(),
         TcpPortSelection::Explicit(ports) => format!("explicit:{ports:?}"),
+    }
+}
+
+#[cfg(test)]
+mod udp_coverage_tests {
+    use super::*;
+
+    fn empty_coverage() -> Coverage {
+        Coverage {
+            succeeded: BTreeSet::new(),
+            terminal_errors: BTreeSet::new(),
+            ports: BTreeSet::new(),
+            port_ranges: Vec::new(),
+            udp_ports: BTreeSet::new(),
+            udp_ranges: Vec::new(),
+            dns_types: BTreeSet::new(),
+            crawl_depth: None,
+            content: false,
+            fuzz_params: BTreeSet::new(),
+        }
+    }
+
+    #[test]
+    fn udp_and_tcp_coverage_never_cover_each_other() {
+        let mut coverage = empty_coverage();
+        coverage.insert_port_range(1000, 2000);
+        coverage.insert_udp_port_range(3000, 3010);
+        coverage.ports.insert("443".to_owned());
+        coverage.udp_ports.insert("53".to_owned());
+        // Same lookup in both partitions: each answers only for itself.
+        assert!(coverage.udp_port_covered("53"));
+        assert!(!coverage.port_covered("53"));
+        assert!(coverage.port_covered("443"));
+        assert!(!coverage.udp_port_covered("443"));
+        assert!(coverage.udp_port_covered("3005"));
+        assert!(coverage.port_covered("1500"));
+        assert!(!coverage.udp_port_covered("1500"));
+        assert!(!coverage.port_covered("3005"));
     }
 }

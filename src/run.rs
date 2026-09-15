@@ -84,6 +84,12 @@ pub struct RunReport {
     pub tcp_totals: crate::tcp_discovery::TcpScanTotals,
     /// Typed count of `ServiceIdentified` events (same state as JSONL).
     pub services_identified: usize,
+    /// Human UDP table (open UDP ports with transport-explicit state and
+    /// grammar-matched service, or empty when no UDP opens exist).
+    pub udp_summary: String,
+    /// Typed UDP totals from the same `UdpScanCompleted` events JSONL
+    /// serializes. Human counts and machine counts cannot disagree.
+    pub udp_totals: crate::udp_discovery::UdpScanTotals,
     /// Wall-clock execution time in milliseconds (plan lowering through
     /// scheduler completion), rendered as `Duration` in human output.
     pub duration_ms: u64,
@@ -136,6 +142,8 @@ pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
             open_ports_summary: String::new(),
             tcp_totals: crate::tcp_discovery::TcpScanTotals::default(),
             services_identified: 0,
+            udp_summary: String::new(),
+            udp_totals: crate::udp_discovery::UdpScanTotals::default(),
             duration_ms: 0,
         });
     }
@@ -174,6 +182,16 @@ pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
     let tcp_policy = TcpScanPolicy::new(plan.level, plan.goal, plan.tcp_ports.clone(), plan.speed);
     scheduler.register_module(Arc::new(crate::tcp_discovery::TcpDiscoveryModule::new(
         tcp_policy,
+        guard.clone(),
+    )));
+    let udp_policy = crate::udp_discovery::UdpScanPolicy::new(
+        plan.level,
+        plan.goal,
+        plan.tcp_ports.clone(),
+        plan.speed,
+    );
+    scheduler.register_module(Arc::new(crate::udp_discovery::UdpDiscoveryModule::new(
+        udp_policy,
         guard.clone(),
     )));
     let service_policy = ServicePolicy::new(plan.level, plan.goal, plan.speed);
@@ -325,6 +343,8 @@ pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
         open_ports_summary: crate::service_probe::human_service_table(&module_outputs),
         tcp_totals: crate::tcp_discovery::summarize_port_scans(&module_outputs),
         services_identified: crate::service_probe::count_identified_services(&module_outputs),
+        udp_summary: crate::udp_discovery::human_udp_table(&module_outputs),
+        udp_totals: crate::udp_discovery::summarize_udp_scans(&module_outputs),
         duration_ms: wall.as_millis().min(u128::from(u64::MAX)) as u64,
     })
 }
@@ -457,9 +477,32 @@ pub fn human_summary_with_opens(
         tcp_line
     };
     let services_line = format!("Services: {services_identified} identified");
+    // UDP block appears only when the operator requested UDP discovery.
+    // Like TCP, its lines require a completed scan; a requested-but-empty
+    // ledger states that truthfully instead of implying results.
+    let udp_section = if report.plan.udp_requested {
+        let (udp_totals, udp_table) = match module_outputs {
+            Some(outputs) if !outputs.is_empty() => (
+                crate::udp_discovery::summarize_udp_scans(outputs),
+                crate::udp_discovery::human_udp_table(outputs),
+            ),
+            _ => (report.udp_totals.clone(), report.udp_summary.clone()),
+        };
+        let totals_line = crate::udp_discovery::human_udp_totals_line(&udp_totals);
+        if totals_line.is_empty() {
+            "\n\nUDP discovery: requested but no scan completed; no UDP ports were assessed."
+                .to_owned()
+        } else if udp_table.is_empty() {
+            format!("\n\n{totals_line}\n\nNo open UDP ports observed.")
+        } else {
+            format!("\n\n{totals_line}\n\n{udp_table}")
+        }
+    } else {
+        String::new()
+    };
     let duration_line = format!("Duration: {}ms", report.duration_ms);
     let header = format!(
-        "RXScan\n\nTarget: {}\nWorkflow: {}\nLevel: {}\nSpeed: {}\n\n{}\n\n{scan_section}\n{services_line}\n{duration_line}",
+        "RXScan\n\nTarget: {}\nWorkflow: {}\nLevel: {}\nSpeed: {}\n\n{}\n\n{scan_section}\n{services_line}{udp_section}\n{duration_line}",
         report
             .plan
             .targets

@@ -30,7 +30,7 @@ use crate::{
         PolicyScopeGuard, RetryPolicy, SchedulerError, ScopeGuard, SpeedGovernor, Task, TaskKind,
         TaskScopeTarget,
     },
-    level::{eligible_task_kinds, priority_for_kind, udp_intent_kind, validate_kind},
+    level::{eligible_task_kinds, priority_for_kind, validate_kind},
     model::{Provenance, Timestamp},
     plan::{ScanPlan, TcpPortSelection},
 };
@@ -260,8 +260,25 @@ fn params_for_kind(
             }
         }
     }
-    if *kind == udp_intent_kind() {
-        params.insert("protocol".to_owned(), "udp".to_owned());
+    if *kind == TaskKind::UdpDiscovery {
+        // Transport-explicit params mirror the TCP shape; the shared
+        // operator selection resolves per transport (`common` means
+        // udp-common-v1 here, never the TCP set).
+        params.insert("transport".to_owned(), "udp".to_owned());
+        match &plan.tcp_ports {
+            TcpPortSelection::Common => {
+                params.insert("ports".to_owned(), "common".to_owned());
+            }
+            TcpPortSelection::Explicit(ports) => {
+                let rendered = crate::ports::compress_port_list(ports);
+                params.insert("ports".to_owned(), format!("explicit:{rendered}"));
+                params.insert("port_count".to_owned(), ports.len().to_string());
+            }
+            TcpPortSelection::All => {
+                params.insert("ports".to_owned(), "all".to_owned());
+                params.insert("port_count".to_owned(), 65_535.to_string());
+            }
+        }
     }
     params
 }
@@ -380,6 +397,7 @@ fn module_name_for_kind(kind: &TaskKind) -> String {
     match kind {
         TaskKind::HostDiscovery => "rxscan.host".to_owned(),
         TaskKind::PortDiscovery => "rxscan.port".to_owned(),
+        TaskKind::UdpDiscovery => "rxscan.udp".to_owned(),
         TaskKind::ServiceProbe => "rxscan.service".to_owned(),
         TaskKind::HttpProbe => "rxscan.http".to_owned(),
         TaskKind::TlsProbe => "rxscan.tls".to_owned(),

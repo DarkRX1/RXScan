@@ -67,8 +67,9 @@ pub struct Cli {
     #[arg(long, conflicts_with = "ping")]
     pub discover: bool,
 
-    /// Request UDP discovery. Not implemented: rejected fail-fast with a
-    /// clear error instead of planning work that could never execute.
+    /// Request bounded native UDP discovery in addition to the selected
+    /// workflow (explicit opt-in; default Recon stays TCP-only). Silence is
+    /// reported as uncertainty, never as open or closed.
     #[arg(long)]
     pub udp: bool,
 

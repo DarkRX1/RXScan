@@ -56,6 +56,7 @@ pub type ModuleFuture = Pin<Box<dyn Future<Output = Result<ModuleOutput, ModuleE
 pub enum TaskKind {
     HostDiscovery,
     PortDiscovery,
+    UdpDiscovery,
     ServiceProbe,
     HttpProbe,
     TlsProbe,

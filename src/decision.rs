@@ -558,6 +558,9 @@ impl crate::execution::DecisionEngine for Phase7Engine {
             TaskKind::ServiceProbe => self.web.follow_up_tasks(completed, output),
             TaskKind::HttpProbe | TaskKind::Crawl => self.crawl.follow_up_tasks(completed, output),
             TaskKind::Baseline => Vec::new(),
+            // Wave 1 proposes no UDP follow-ups: an open UDP port is
+            // reported with grammar evidence for a future rule to consume.
+            TaskKind::UdpDiscovery => Vec::new(),
             _ => Vec::new(),
         }
         .into_iter()

@@ -79,11 +79,15 @@ The default scan is workflow `recon`, level `3`, balanced speed. It always:
 - prints a human summary whose counts come from the same typed
   `PortScanCompleted` / `ServiceIdentified` state as JSONL.
 
-It never: scans UDP, enumerates TLS ciphers, fingerprints OS/devices,
+It never: scans UDP unless `--udp` is passed, enumerates TLS ciphers, fingerprints OS/devices,
 authenticates, submits forms, runs JavaScript, assesses vulnerabilities,
 fuzzes (fuzz follow-ups require workflow `full`), or exceeds its budgets.
 Default behavior depends only on this contract, never on accidental planner
 details; `rxscan --explain TARGET` shows the effective plan.
+
+UDP discovery (`--udp`, explicit opt-in) uses connected sockets, a bounded
+socket window, and tiny protocol probes (DNS/NTP/SSDP); silence is reported
+as `open|filtered` uncertainty, never as open or closed.
 
 ## Scan Controls
 
@@ -164,7 +168,7 @@ Partial: adaptive pressure control is deterministic rather than feedback-driven;
 TLS captures handshake and certificate facts but not cipher-suite enumeration;
 DNS has bounded record lookups but no TCP fallback after UDP truncation.
 
-Not implemented: UDP port scanning, SYN scanning, OS/device fingerprinting,
+Not implemented: SYN scanning, OS/device fingerprinting,
 browser-assisted inspection, POST workflows, vulnerability assessment,
 prebuilt release artifacts, Windows/macOS support, GUI, plugins, and updater.
 

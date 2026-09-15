@@ -262,6 +262,100 @@ pub fn port_eligible_for_plan(goal: ScanGoal, level: u8, ports_requested: bool) 
         .contains(&crate::execution::TaskKind::PortDiscovery)
 }
 
+// ---------------- UDP port policy (P23) ----------------
+
+/// Versioned UDP common profile. Deliberately tiny: UDP has different cost
+/// (every silent port burns a full timeout) and different usefulness than
+/// TCP, so the default set covers only ports with a safe protocol-aware
+/// probe. UDP traffic runs ONLY on explicit `--udp` request; default Recon
+/// stays TCP-only.
+pub const UDP_PROFILE_VERSION: &str = "v1";
+
+/// `udp-common-v1`: DNS (safe query → grammar response), NTP (mode-3 →
+/// mode-4), SSDP (unicast M-SEARCH → HTTPU reply). Sorted, unique.
+pub const UDP_COMMON_V1: &[u16] = &[53, 123, 1900];
+
+/// Canonical name for a UDP automatic selection (for `--explain`/evidence).
+pub fn udp_automatic_set_name() -> &'static str {
+    "udp-common-v1"
+}
+
+/// Hard ceiling on simultaneous in-flight UDP sockets in one scan task.
+/// Lower than the TCP ceiling: silent UDP ports hold their socket for the
+/// full per-attempt timeout, so the window bounds FD pressure directly.
+pub const MAX_UDP_IN_FLIGHT_HARD: usize = 64;
+
+/// Maximum UDP retries for unanswered probes (timeout with no response and
+/// no closed evidence). Closed ports and answered probes are never retried.
+pub const MAX_UDP_RETRIES: u32 = 1;
+
+/// Level-derived UDP retry depth: L1/L2 none; L3+ at most one bounded retry
+/// for unresolved silence. Closed evidence and valid responses never retry
+/// at any level.
+pub fn udp_max_retries_for_level(level: u8) -> u32 {
+    if level.clamp(1, 5) >= 3 {
+        MAX_UDP_RETRIES
+    } else {
+        0
+    }
+}
+
+/// Per-attempt UDP timeout derived from speed (pressure only).
+/// Bounded 200..=3000ms. Faster fails faster; slower waits longer.
+pub fn udp_timeout_for_speed(speed: SpeedSetting) -> std::time::Duration {
+    use crate::plan::NamedSpeed;
+    let millis = match speed {
+        SpeedSetting::Named(NamedSpeed::Slow) => 2000,
+        SpeedSetting::Named(NamedSpeed::Balanced) => 1000,
+        SpeedSetting::Named(NamedSpeed::Fast) => 400,
+        SpeedSetting::Named(NamedSpeed::Auto) => 1000,
+        SpeedSetting::Numeric(value) => 2000u64.saturating_sub((1600u64 * u64::from(value)) / 100),
+    };
+    std::time::Duration::from_millis(millis.clamp(200, 3000))
+}
+
+/// In-flight UDP socket window derived from speed (pressure only).
+/// Bounded 8..=64 and hard-capped by [`MAX_UDP_IN_FLIGHT_HARD`].
+pub fn udp_concurrency_for_speed(speed: SpeedSetting) -> usize {
+    use crate::plan::NamedSpeed;
+    let concurrent = match speed {
+        SpeedSetting::Named(NamedSpeed::Slow) => 16,
+        SpeedSetting::Named(NamedSpeed::Balanced) => 32,
+        SpeedSetting::Named(NamedSpeed::Fast) => 64,
+        SpeedSetting::Named(NamedSpeed::Auto) => 32,
+        SpeedSetting::Numeric(value) => 8 + ((56u16 * u16::from(value)) / 100) as usize,
+    };
+    concurrent.clamp(8, 64).min(MAX_UDP_IN_FLIGHT_HARD)
+}
+
+/// Resolved UDP port list for one scan task, derived from the shared
+/// operator port selection: `Common` → `udp-common-v1` (NOT the TCP set),
+/// `Explicit` → the same operator list, `All` → `1..=65535`.
+/// Always sorted, deduped, port 0 excluded.
+pub fn resolve_udp_ports(selection: &TcpPortSelection, level: u8) -> ResolvedPorts {
+    let _ = level;
+    match selection {
+        TcpPortSelection::Common => ResolvedPorts {
+            ports: UDP_COMMON_V1.to_vec(),
+            source: PortSource::LevelAutomatic,
+        },
+        TcpPortSelection::Explicit(ports) => {
+            let mut normalized = ports.clone();
+            normalized.sort_unstable();
+            normalized.dedup();
+            normalized.retain(|port| *port > 0);
+            ResolvedPorts {
+                ports: normalized,
+                source: PortSource::Explicit,
+            }
+        }
+        TcpPortSelection::All => ResolvedPorts {
+            ports: (1..=65_535).collect(),
+            source: PortSource::All,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -455,6 +455,16 @@ pub enum EventKind {
     PortTimedOut,
     PortProbeError,
     PortScanCompleted,
+    // UDP discovery lifecycle (P23). Same bounded-output philosophy as TCP
+    // with UDP semantics: a response proves responsiveness (never identity
+    // by itself); attributable port-unreachable proves closed; anything
+    // else is OpenOrFiltered uncertainty, never a guess.
+    UdpScanStarted,
+    UdpPortOpen,
+    UdpPortClosed,
+    UdpPortFiltered,
+    UdpProbeError,
+    UdpScanCompleted,
     // Phase 7 service-intelligence lifecycle. Per-probe outcome events stay
     // in JSONL (quiet on the terminal); the human table shows one row per
     // classified service with product hints, never guessed versions.

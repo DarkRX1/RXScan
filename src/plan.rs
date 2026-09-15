@@ -346,11 +346,6 @@ impl ScanPlan {
         }
         let host_requested = cli.ping || cli.discover;
         let udp_requested = cli.udp;
-        if udp_requested {
-            // Fail fast: the scheduler has no UDP executor, so planning a
-            // UDP intent task would only produce a predictable `Skipped`.
-            return Err(PlanError::UdpNotImplemented);
-        }
         let ports_requested = cli.ports.is_some()
             || cli.all_ports
             || config.ports.is_some()
@@ -430,6 +425,14 @@ impl ScanPlan {
         let tcp_policy =
             crate::tcp_discovery::TcpScanPolicy::new(level, goal, tcp_ports.clone(), speed);
         reasons.push(format!("TCP port policy: {}.", tcp_policy.describe()));
+        if udp_requested {
+            let udp_policy =
+                crate::udp_discovery::UdpScanPolicy::new(level, goal, tcp_ports.clone(), speed);
+            reasons.push(format!(
+                "UDP discovery requested explicitly: {}. Default Recon stays TCP-only; UDP runs in addition, never instead.",
+                udp_policy.describe()
+            ));
+        }
         let service_policy = crate::service_probe::ServicePolicy::new(level, goal, speed);
         reasons.push(format!(
             "Service probe policy: {}.",
@@ -445,7 +448,7 @@ impl ScanPlan {
         ));
         let mut skipped = level_skipped;
         skipped.push(
-            "Current execution includes bounded host discovery, TCP connect port scanning, service probing, DNS observations, HTTP/1.1 web observations, crawling, baseline checks, managed content discovery, and inert contextual GET query fuzzing where evidence permits. UDP scanning, OS/device fingerprinting, POST workflows, JavaScript execution, browser-assisted inspection, cipher-suite enumeration, and vulnerability assessment are not implemented in this build."
+            "Current execution includes bounded host discovery, TCP connect port scanning, service probing, DNS observations, HTTP/1.1 web observations, crawling, baseline checks, managed content discovery, and inert contextual GET query fuzzing where evidence permits. OS/device fingerprinting, POST workflows, JavaScript execution, browser-assisted inspection, cipher-suite enumeration, and vulnerability assessment are not implemented in this build."
                 .to_owned(),
         );
         Ok(Self {

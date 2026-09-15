@@ -54,11 +54,6 @@ pub fn validate_kind() -> TaskKind {
     TaskKind::Custom("rxscan.control.validate".to_owned())
 }
 
-/// UDP intent kind (no executor in Phase 4; runs as `Skipped`).
-pub fn udp_intent_kind() -> TaskKind {
-    TaskKind::Custom("rxscan.udp.intent".to_owned())
-}
-
 /// Base kinds per level, in deterministic execution order (highest priority first).
 ///
 /// Only executable, seed-meaningful kinds appear here: every kind has a
@@ -169,8 +164,11 @@ pub fn eligible_task_kinds(
             .map_or(eligible.len(), |index| index + 1);
         eligible.insert(position.min(eligible.len()), TaskKind::PortDiscovery);
     }
-    if udp_requested && !eligible.contains(&udp_intent_kind()) {
-        eligible.push(udp_intent_kind());
+    // Explicit `--udp` adds real UDP discovery at every level (explicit
+    // wins, mirroring `--ports`): one bounded UdpDiscovery task per target.
+    // UDP never joins by level/goal alone; default Recon stays TCP-only.
+    if udp_requested && !eligible.contains(&TaskKind::UdpDiscovery) {
+        eligible.push(TaskKind::UdpDiscovery);
     }
     eligible
 }
@@ -183,6 +181,7 @@ pub fn priority_for_kind(kind: &TaskKind) -> u8 {
         match kind {
             TaskKind::HostDiscovery => 80,
             TaskKind::PortDiscovery => 60,
+            TaskKind::UdpDiscovery => 55,
             TaskKind::ServiceProbe => 50,
             TaskKind::DnsProbe => 50,
             TaskKind::HttpProbe => 45,
@@ -203,7 +202,7 @@ pub fn planned_module_for_kind(kind: &TaskKind) -> Option<PlannedModule> {
     match kind {
         TaskKind::HostDiscovery => Some(PlannedModule::HostDiscovery),
         TaskKind::PortDiscovery => Some(PlannedModule::TcpDiscovery),
-        TaskKind::Custom(name) if name == "rxscan.udp.intent" => Some(PlannedModule::UdpDiscovery),
+        TaskKind::UdpDiscovery => Some(PlannedModule::UdpDiscovery),
         _ => None,
     }
 }
@@ -262,7 +261,6 @@ pub fn describe_unavailable() -> String {
     [
         "  - tls-probe tasks (dedicated TLS/cipher enumeration; TLS handshake facts observed via service probing remain available)",
         "  - fingerprint tasks (OS/device fingerprint engine)",
-        "  - udp port scanning (--udp is rejected fail-fast with a clear error)",
     ]
     .join("\n")
 }

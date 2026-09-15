@@ -110,7 +110,7 @@ pub struct ProbeCtx<'a> {
     /// Task-level deadline (hard stop).
     pub deadline: Instant,
     pub cancel: &'a CancellationToken,
-    /// Hard-counted connections opened through [`ProbeCtx::connect`],
+    /// Hard-counted connections opened through `ProbeCtx::connect`,
     /// shared across derived contexts for exact per-service accounting.
     pub connections: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
