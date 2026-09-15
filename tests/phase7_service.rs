@@ -172,9 +172,22 @@ fn ftp_fixture() -> Fixture {
         let _ = stream.write_all(b"220 FixtureFTP 1.0 ready\r\n");
         let _ = stream.set_read_timeout(Some(Duration::from_millis(400)));
         let mut chunk = [0u8; 512];
+        // Answer the disambiguation exchange the way a real FTP server
+        // does: reject EHLO, accept NOOP. A lone 220 never classifies.
         if let Ok(count) = stream.read(&mut chunk) {
             received.lock().unwrap().extend_from_slice(&chunk[..count]);
+            if chunk[..count].starts_with(b"EHLO") {
+                let _ = stream.write_all(b"500 EHLO not understood\r\n");
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(400)));
+                if let Ok(count) = stream.read(&mut chunk) {
+                    received.lock().unwrap().extend_from_slice(&chunk[..count]);
+                    if chunk[..count].starts_with(b"NOOP") {
+                        let _ = stream.write_all(b"200 NOOP ok\r\n");
+                    }
+                }
+            }
         }
+        std::thread::sleep(Duration::from_millis(100));
     })
 }
 
@@ -905,7 +918,9 @@ fn ftp_banner_recognition_stays_passive() {
     assert_eq!(observation["protocol"], "ftp");
     assert_eq!(observation["product_hint"], "FixtureFTP");
     assert_eq!(observation["version_hint"], "1.0");
-    assert!(fixture.received_bytes().is_empty());
+    // Disambiguation exchange only: one EHLO (rejected) + one NOOP
+    // (accepted). Still no authentication, no file commands.
+    assert_eq!(fixture.received_bytes(), b"EHLO rxscan.local\r\nNOOP\r\n");
 }
 
 #[test]
@@ -1858,11 +1873,12 @@ fn no_authentication_or_destructive_bytes_are_ever_sent() {
             "forbidden protocol bytes observed: {forbidden}"
         );
     }
-    // Exact allowlist: passive probes send nothing at all.
+    // Exact allowlist: purely passive probes send nothing at all.
     assert!(ssh.received_bytes().is_empty());
-    assert!(ftp.received_bytes().is_empty());
     assert!(mysql.received_bytes().is_empty());
     assert!(generic.received_bytes().is_empty());
+    // Mail disambiguation sends exactly EHLO (+NOOP for FTP).
+    assert_eq!(ftp.received_bytes(), b"EHLO rxscan.local\r\nNOOP\r\n");
     // Active probes send exactly their documented payloads.
     assert_eq!(redis.received_bytes(), b"PING\r\n");
     assert_eq!(postgres.received_bytes(), vec![0, 0, 0, 8, 4, 210, 22, 47]);
@@ -2112,4 +2128,525 @@ fn malformed_and_silent_nonstandard_ports_stay_unknown_end_to_end() {
     let human = rxscan::run::human_summary(&report);
     assert!(!human.contains("ssh"), "human must not claim SSH: {human}");
     fs::remove_dir_all(directory).unwrap();
+}
+
+// ---------- Wave 1: port-independent identification matrix ----------
+
+fn plan_for_ports_at_level(ports: &str, level: &str) -> ScanPlan {
+    let cli =
+        Cli::try_parse_from(["rxscan", "127.0.0.1", "--ports", ports, "--level", level]).unwrap();
+    ScanPlan::compile(cli).unwrap()
+}
+
+fn run_unknown_plan(port: u16, level: &str, timeout_ms: u64) -> ModuleOutput {
+    // No explicit probe order: the module derives the level-graded
+    // speculative plan, exactly as production DecisionEngine tasks do.
+    let plan = plan_for_ports_at_level(&port.to_string(), level);
+    let guard = Arc::new(PolicyScopeGuard::new(plan.scope.clone()));
+    let module = ServiceProbeModule::new(fast_policy(&plan), guard.clone());
+    let parent = rxscan::tcp_discovery::port_asset_id(
+        &rxscan::tcp_discovery::parent_asset_id_for_ip(&"127.0.0.1".parse().unwrap()),
+        "tcp",
+        port,
+    );
+    let task = Task::new_with_params(
+        TaskKind::ServiceProbe,
+        None,
+        Vec::new(),
+        None,
+        plan.stable_id(),
+        50,
+        Duration::from_millis(timeout_ms),
+        RetryPolicy::default(),
+        "rxscan.service",
+        provenance_for(&plan),
+        TaskScopeTarget::Ip("127.0.0.1".parse().unwrap()),
+        BTreeMap::from([
+            ("target".to_owned(), "127.0.0.1".to_owned()),
+            ("address".to_owned(), "127.0.0.1".to_owned()),
+            ("port".to_owned(), port.to_string()),
+            ("transport".to_owned(), "tcp".to_owned()),
+            ("parent_asset".to_owned(), parent),
+        ]),
+        guard.as_ref(),
+    )
+    .unwrap();
+    block_on_service(
+        &module,
+        ModuleContext::new(task, CancellationToken::default()),
+    )
+    .unwrap()
+}
+
+fn completed_details(output: &ModuleOutput) -> serde_json::Value {
+    output
+        .events
+        .iter()
+        .find(|event| format!("{:?}", event.kind) == "ServiceProbeCompleted")
+        .map(|event| event.details.data.clone())
+        .expect("service_probe_completed event")
+}
+
+#[test]
+fn wave1_protocols_identified_on_ephemeral_ports() {
+    // Every Wave-1 protocol on a nonstandard ephemeral port, at the level
+    // where the selector first reaches it. Port numbers never participate.
+    let ssh = ssh_fixture();
+    assert_eq!(
+        service_observation_in(&run_unknown_plan(ssh.port, "1", 8000))["protocol"],
+        "ssh",
+        "SSH classifies from passive bytes even at L1"
+    );
+    let http = http_response_fixture();
+    assert_eq!(
+        service_observation_in(&run_unknown_plan(http.port, "2", 8000))["protocol"],
+        "http",
+        "HTTP classifies via L2 speculative GET"
+    );
+    let redis = redis_fixture();
+    assert_eq!(
+        service_observation_in(&run_unknown_plan(redis.port, "3", 10000))["protocol"],
+        "redis",
+        "Redis classifies via L3 speculative PING"
+    );
+    let mysql = mysql_fixture();
+    assert_eq!(
+        service_observation_in(&run_unknown_plan(mysql.port, "3", 10000))["protocol"],
+        "mysql",
+        "MySQL classifies from passive framing at any level"
+    );
+    let tls = tls_server_fixture(false);
+    assert_eq!(
+        service_observation_in(&run_unknown_plan(tls.port, "4", 15000))["protocol"],
+        "tls",
+        "TLS handshakes classify on ephemeral ports at L4"
+    );
+    let postgres = postgres_fixture(Arc::new(AtomicBool::new(false)));
+    assert_eq!(
+        service_observation_in(&run_unknown_plan(postgres.port, "5", 20000))["protocol"],
+        "postgres",
+        "PostgreSQL classifies via L5 speculative SSLRequest"
+    );
+}
+
+#[test]
+fn mail_protocols_identified_on_ephemeral_ports_at_l5() {
+    // FTP/SMTP greetings gate disambiguation at L5 unknown plans; the
+    // exchange (not the port) decides between them.
+    let ftp = ftp_fixture();
+    let observation = service_observation_in(&run_unknown_plan(ftp.port, "5", 20000));
+    assert_eq!(observation["protocol"], "ftp");
+    assert_eq!(observation["product_hint"], "FixtureFTP");
+    let smtp = smtp_fixture();
+    let observation = service_observation_in(&run_unknown_plan(smtp.port, "5", 20000));
+    assert_eq!(observation["protocol"], "smtp");
+}
+
+// ---------- Wave 1: adversarial collisions ----------
+
+#[test]
+fn http_body_containing_ssh_banner_stays_http() {
+    let fixture = Fixture::spawn(|mut stream, received| {
+        let _ = stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 26\r\n\r\nbody with SSH-2.0-noise\r\n");
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(300)));
+        let mut chunk = [0u8; 512];
+        if let Ok(count) = stream.read(&mut chunk) {
+            received.lock().unwrap().extend_from_slice(&chunk[..count]);
+        }
+    });
+    let observation = service_observation_in(&run_unknown_plan(fixture.port, "3", 10000));
+    assert_eq!(observation["protocol"], "http");
+    assert!(
+        observation["evidence_lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|line| line.as_str().unwrap().contains("200")),
+        "status evidence must survive an SSH-looking body: {observation}"
+    );
+}
+
+#[test]
+fn smtp_banner_containing_http_word_stays_smtp() {
+    // Grammar (220 + 250), not substrings, decides. The banner token
+    // `HTTP-mailer` is preserved as product evidence, not identity.
+    let fixture = Fixture::spawn(|mut stream, received| {
+        let _ = stream.write_all(b"220 HTTP-mailer 1.0 ready\r\n");
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(400)));
+        let mut chunk = [0u8; 512];
+        if let Ok(count) = stream.read(&mut chunk) {
+            received.lock().unwrap().extend_from_slice(&chunk[..count]);
+            if chunk[..count].starts_with(b"EHLO") {
+                let _ = stream.write_all(b"250-mailer Hello\r\n250 8BITMIME\r\n");
+            }
+        }
+    });
+    let observation = service_observation_in(&run_unknown_plan(fixture.port, "5", 20000));
+    assert_eq!(observation["protocol"], "smtp");
+}
+
+#[test]
+fn garbage_on_likely_ports_never_invents_identity() {
+    let garbage = Fixture::spawn(|mut stream, received| {
+        let _ = stream.write_all(b"\x00\xffGARBAGE!!\r\n");
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(300)));
+        let mut chunk = [0u8; 512];
+        if let Ok(count) = stream.read(&mut chunk) {
+            received.lock().unwrap().extend_from_slice(&chunk[..count]);
+        }
+    });
+    // SSH-shaped plan against garbage: unknown.
+    let plan = plan_for_ports(&garbage.port.to_string());
+    let guard = Arc::new(PolicyScopeGuard::new(plan.scope.clone()));
+    let module = ServiceProbeModule::new(fast_policy(&plan), guard.clone());
+    for probes in ["ssh", "ftp", "smtp", "generic"] {
+        let task = service_task_for(
+            &plan,
+            "127.0.0.1",
+            garbage.port,
+            probes,
+            8000,
+            guard.as_ref(),
+        );
+        let output = block_on_service(
+            &module,
+            ModuleContext::new(task, CancellationToken::default()),
+        )
+        .unwrap();
+        assert_eq!(
+            service_observation_in(&output)["protocol"],
+            "unknown",
+            "garbage via {probes} must stay unknown"
+        );
+    }
+}
+
+#[test]
+fn tls_prefix_without_handshake_stays_unknown() {
+    // TLS record header bytes with no handshake behind them: the rustls
+    // handshake fails, and failure is a miss, never an identity.
+    let fixture = Fixture::spawn(|mut stream, received| {
+        let _ = stream.write_all(b"\x16\x03\x01\x00\x04nope");
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(300)));
+        let mut chunk = [0u8; 512];
+        if let Ok(count) = stream.read(&mut chunk) {
+            received.lock().unwrap().extend_from_slice(&chunk[..count]);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    });
+    let plan = plan_for_ports(&fixture.port.to_string());
+    let guard = Arc::new(PolicyScopeGuard::new(plan.scope.clone()));
+    let module = ServiceProbeModule::new(fast_policy(&plan), guard.clone());
+    let task = service_task_for(
+        &plan,
+        "127.0.0.1",
+        fixture.port,
+        "tls",
+        8000,
+        guard.as_ref(),
+    );
+    let output = block_on_service(
+        &module,
+        ModuleContext::new(task, CancellationToken::default()),
+    )
+    .unwrap();
+    assert_eq!(service_observation_in(&output)["protocol"], "unknown");
+}
+
+#[test]
+fn redis_lookalikes_require_exact_pong() {
+    for banner in ["+PONG is great\r\n", "x+PONG\r\n", "+pong\r\n", "PONG\r\n"] {
+        let owned = banner.to_owned();
+        let fixture = Fixture::spawn(move |mut stream, received| {
+            let _ = stream.write_all(owned.as_bytes());
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(300)));
+            let mut chunk = [0u8; 512];
+            if let Ok(count) = stream.read(&mut chunk) {
+                received.lock().unwrap().extend_from_slice(&chunk[..count]);
+            }
+        });
+        let plan = plan_for_ports(&fixture.port.to_string());
+        let guard = Arc::new(PolicyScopeGuard::new(plan.scope.clone()));
+        let module = ServiceProbeModule::new(fast_policy(&plan), guard.clone());
+        let task = service_task_for(
+            &plan,
+            "127.0.0.1",
+            fixture.port,
+            "redis",
+            8000,
+            guard.as_ref(),
+        );
+        let output = block_on_service(
+            &module,
+            ModuleContext::new(task, CancellationToken::default()),
+        )
+        .unwrap();
+        assert_eq!(
+            service_observation_in(&output)["protocol"],
+            "unknown",
+            "embedded +PONG {banner:?} must not classify as Redis"
+        );
+    }
+}
+
+#[test]
+fn postgres_single_byte_from_noise_stays_unknown() {
+    // A chatterbox whose first byte happens to be `N` (or `S`) but keeps
+    // talking refutes PostgreSQL via the trailing-bytes grace check.
+    // (A lone `N` followed by true silence is byte-identical to a real
+    // refusal, so it stays Probable by design — never Confirmed.)
+    for payload in [b"NOPE\r\n".as_slice(), b"SSH-2.0-x\r\n".as_slice()] {
+        let owned = payload.to_owned();
+        let fixture = Fixture::spawn(move |mut stream, received| {
+            let _ = stream.write_all(&owned);
+            std::thread::sleep(Duration::from_millis(300));
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+            let mut chunk = [0u8; 512];
+            if let Ok(count) = stream.read(&mut chunk) {
+                received.lock().unwrap().extend_from_slice(&chunk[..count]);
+            }
+        });
+        let plan = plan_for_ports(&fixture.port.to_string());
+        let guard = Arc::new(PolicyScopeGuard::new(plan.scope.clone()));
+        let module = ServiceProbeModule::new(fast_policy(&plan), guard.clone());
+        let task = service_task_for(
+            &plan,
+            "127.0.0.1",
+            fixture.port,
+            "postgres",
+            8000,
+            guard.as_ref(),
+        );
+        let output = block_on_service(
+            &module,
+            ModuleContext::new(task, CancellationToken::default()),
+        )
+        .unwrap();
+        assert_eq!(
+            service_observation_in(&output)["protocol"],
+            "unknown",
+            "noise {payload:?} must not classify as PostgreSQL"
+        );
+    }
+}
+
+#[test]
+fn ambiguous_and_malformed_220_stay_unknown() {
+    // 220 greeting whose EHLO goes unanswered: ambiguous, never resolved
+    // by port or by prefix.
+    let hanging = Fixture::spawn(|mut stream, received| {
+        let _ = stream.write_all(b"220 quiet.example.com ready\r\n");
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(300)));
+        let mut chunk = [0u8; 512];
+        if let Ok(count) = stream.read(&mut chunk) {
+            received.lock().unwrap().extend_from_slice(&chunk[..count]);
+            std::thread::sleep(Duration::from_millis(600));
+        }
+    });
+    // Malformed 220 (no separator): not a greeting at all.
+    let malformed = Fixture::spawn(|mut stream, received| {
+        let _ = stream.write_all(b"220X not a greeting\r\n");
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(300)));
+        let mut chunk = [0u8; 512];
+        if let Ok(count) = stream.read(&mut chunk) {
+            received.lock().unwrap().extend_from_slice(&chunk[..count]);
+        }
+    });
+    // Multiline FTP greeting disambiguates via NOOP after EHLO rejection.
+    // (Includes non-ASCII bytes to prove lossy handling never breaks framing.)
+    let multiline = Fixture::spawn(|mut stream, received| {
+        let _ = stream.write_all("220-welcome to корпус\r\n220 MultiFTP 2.0 ready\r\n".as_bytes());
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(400)));
+        let mut chunk = [0u8; 512];
+        if let Ok(count) = stream.read(&mut chunk) {
+            received.lock().unwrap().extend_from_slice(&chunk[..count]);
+            if chunk[..count].starts_with(b"EHLO") {
+                let _ = stream.write_all(b"500 no EHLO here\r\n");
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(400)));
+                if let Ok(count) = stream.read(&mut chunk) {
+                    received.lock().unwrap().extend_from_slice(&chunk[..count]);
+                    if chunk[..count].starts_with(b"NOOP") {
+                        let _ = stream.write_all(b"200 ok\r\n");
+                    }
+                }
+            }
+        }
+    });
+    for (fixture, expected) in [(&hanging, "unknown"), (&malformed, "unknown")] {
+        let plan = plan_for_ports(&fixture.port.to_string());
+        let guard = Arc::new(PolicyScopeGuard::new(plan.scope.clone()));
+        let module = ServiceProbeModule::new(fast_policy(&plan), guard.clone());
+        for probes in ["ftp", "smtp"] {
+            let task = service_task_for(
+                &plan,
+                "127.0.0.1",
+                fixture.port,
+                probes,
+                8000,
+                guard.as_ref(),
+            );
+            let output = block_on_service(
+                &module,
+                ModuleContext::new(task, CancellationToken::default()),
+            )
+            .unwrap();
+            assert_eq!(
+                service_observation_in(&output)["protocol"],
+                expected,
+                "ambiguous greeting via {probes} must stay unknown"
+            );
+        }
+    }
+    let observation = service_observation_in(&run_unknown_plan(multiline.port, "5", 20000));
+    assert_eq!(observation["protocol"], "ftp");
+}
+
+#[test]
+fn delayed_greeting_within_window_still_classifies() {
+    // A 300ms-delayed SSH banner arrives inside the passive window:
+    // delay alone must not downgrade real evidence to unknown.
+    let fixture = Fixture::spawn(|mut stream, received| {
+        std::thread::sleep(Duration::from_millis(300));
+        let _ = stream.write_all(b"SSH-2.0-PatientSSH_1.0\r\n");
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(300)));
+        let mut chunk = [0u8; 512];
+        if let Ok(count) = stream.read(&mut chunk) {
+            received.lock().unwrap().extend_from_slice(&chunk[..count]);
+        }
+    });
+    let observation = service_observation_in(&run_unknown_plan(fixture.port, "2", 10000));
+    assert_eq!(observation["protocol"], "ssh");
+    assert_eq!(observation["product_hint"], "PatientSSH");
+}
+
+#[test]
+fn fragmented_ssh_banner_still_classifies() {
+    // Byte-at-a-time delivery: framing accumulates, grammar still proves.
+    let fixture = Fixture::spawn(|mut stream, received| {
+        for byte in b"SSH-2.0-FragSSH_3.1\r\n" {
+            let _ = stream.write_all(&[*byte]);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(300)));
+        let mut chunk = [0u8; 512];
+        if let Ok(count) = stream.read(&mut chunk) {
+            received.lock().unwrap().extend_from_slice(&chunk[..count]);
+        }
+    });
+    let observation = service_observation_in(&run_unknown_plan(fixture.port, "2", 10000));
+    assert_eq!(observation["protocol"], "ssh");
+    assert_eq!(observation["product_hint"], "FragSSH");
+}
+
+// ---------- Wave 1: fingerprint, accounting, precision ----------
+
+#[test]
+fn unknown_fingerprint_is_bounded_deterministic_and_honest() {
+    let fixture = unknown_banner_fixture();
+    let observation = service_observation_in(&run_unknown_plan(fixture.port, "3", 10000));
+    assert_eq!(observation["protocol"], "unknown");
+    let fingerprint = observation
+        .get("unknown_fingerprint")
+        .expect("unknown services carry a fingerprint");
+    assert_eq!(fingerprint["hash16"].as_str().unwrap().len(), 16);
+    assert!(fingerprint["len"].as_u64().unwrap() > 0);
+    assert!(fingerprint["len"].as_u64().unwrap() <= 2048);
+    assert_eq!(fingerprint["spoke_first"], serde_json::json!(true));
+    assert_eq!(fingerprint["truncated"], serde_json::json!(false));
+    // Deterministic: the same observation twice yields the same hash.
+    let again = service_observation_in(&run_unknown_plan(fixture.port, "3", 10000));
+    assert_eq!(
+        again["unknown_fingerprint"]["hash16"],
+        fingerprint["hash16"]
+    );
+    // Silence fingerprints nothing.
+    let silent = silent_fixture();
+    let silent_observation = service_observation_in(&run_unknown_plan(silent.port, "3", 15000));
+    assert_eq!(silent_observation["protocol"], "unknown");
+    assert!(
+        silent_observation.get("unknown_fingerprint").is_none()
+            || silent_observation["unknown_fingerprint"].is_null()
+    );
+}
+
+#[test]
+fn service_accounting_is_exact_per_open_port() {
+    // SSH via passive only: 1 connection, 1 probe, 0 writes.
+    let ssh = ssh_fixture();
+    let plan = plan_for_ports(&ssh.port.to_string());
+    let guard = Arc::new(PolicyScopeGuard::new(plan.scope.clone()));
+    let module = ServiceProbeModule::new(fast_policy(&plan), guard.clone());
+    let task = service_task_for(&plan, "127.0.0.1", ssh.port, "ssh", 8000, guard.as_ref());
+    let output = block_on_service(
+        &module,
+        ModuleContext::new(task, CancellationToken::default()),
+    )
+    .unwrap();
+    let details = completed_details(&output);
+    assert_eq!(details["connections_opened"], serde_json::json!(1));
+    assert_eq!(details["probes_attempted"], serde_json::json!(1));
+    assert_eq!(details["writes"], serde_json::json!(0));
+    assert_eq!(details["bytes_written"], serde_json::json!(0));
+    assert!(details["bytes_read"].as_u64().unwrap() > 0);
+    // Matched-by attribution travels with findings and observations.
+    // Explicit single-probe plan: the dedicated probe is responsible.
+    assert_eq!(details["matcher"], serde_json::json!("ssh"));
+    // Unknown-plan run: the shared passive observation is responsible.
+    let passive_observation = service_observation_in(&run_unknown_plan(ssh.port, "1", 8000));
+    assert_eq!(passive_observation["protocol"], "ssh");
+    assert_eq!(
+        passive_observation["matched_by"],
+        serde_json::json!("passive")
+    );
+    // Active HTTP path without passive coverage: 1 connection, 1 probe,
+    // exactly 1 write, bytes both directions.
+    let http = http_response_fixture();
+    let plan = plan_for_ports(&http.port.to_string());
+    let guard = Arc::new(PolicyScopeGuard::new(plan.scope.clone()));
+    let module = ServiceProbeModule::new(fast_policy(&plan), guard.clone());
+    let task = service_task_for(&plan, "127.0.0.1", http.port, "http", 8000, guard.as_ref());
+    let output = block_on_service(
+        &module,
+        ModuleContext::new(task, CancellationToken::default()),
+    )
+    .unwrap();
+    let details = completed_details(&output);
+    assert_eq!(details["protocol"], serde_json::json!("http"));
+    assert_eq!(details["connections_opened"], serde_json::json!(1));
+    assert_eq!(details["probes_attempted"], serde_json::json!(1));
+    assert_eq!(details["writes"], serde_json::json!(1));
+    assert!(details["bytes_written"].as_u64().unwrap() > 0);
+    assert!(details["bytes_read"].as_u64().unwrap() > 0);
+    assert_eq!(details["matcher"], serde_json::json!("http"));
+}
+
+#[test]
+fn misleading_product_words_never_become_products() {
+    // `220 server ESMTP`: no justifiable product — protocol without product.
+    let fixture = Fixture::spawn(|mut stream, received| {
+        let _ = stream.write_all(b"220 server ESMTP\r\n");
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(400)));
+        let mut chunk = [0u8; 512];
+        if let Ok(count) = stream.read(&mut chunk) {
+            received.lock().unwrap().extend_from_slice(&chunk[..count]);
+            if chunk[..count].starts_with(b"EHLO") {
+                let _ = stream.write_all(b"250-server Hello\r\n250 8BITMIME\r\n");
+            }
+        }
+    });
+    let observation = service_observation_in(&run_unknown_plan(fixture.port, "5", 20000));
+    assert_eq!(observation["protocol"], "smtp");
+    assert!(
+        observation.get("product_hint").is_none() || observation["product_hint"].is_null(),
+        "chatter must not become product: {}",
+        observation
+    );
+    // Banner itself is still preserved verbatim.
+    assert!(
+        observation["banner"]
+            .as_str()
+            .unwrap()
+            .contains("220 server ESMTP")
+    );
 }
