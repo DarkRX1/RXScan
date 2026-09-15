@@ -60,7 +60,7 @@ Invalid values fail fast (exit 2): zero/negative-equivalent, values exceeding ha
 
 ## Level and speed
 
-- `--level 1–5` is investigation breadth/depth (see `src/level.rs` v1 policy plus `src/discovery.rs` host breadth). Level 1 is validation-only for all goals; higher levels add host/port/service/DNS/HTTP/TLS/fingerprint/content/crawl/fuzz intents filtered by `--goal`. Host-discovery breadth per level: L1 minimal (`icmp x1 + tcp [80]`), L2 (`icmp x1 + tcp [80,443]`), L3 standard (`icmp x2 + tcp [22,80,443]`), L4 broader (`icmp x2 + tcp [22,80,443,8080]`), L5 deepest bounded (`icmp x3 + tcp [22,80,443,8080,8443]`). Level 5 is bounded, never unbounded. Explicit `--ping`/`--discover`/`--udp`/`--ports`/`--all-ports` add their intent even if the level would not otherwise include it.
+- `--level 1–5` is investigation breadth/depth (see `src/level.rs` v1 policy plus `src/discovery.rs` host breadth). Level 1 is validation-only for all workflows; higher levels add host/port/service/DNS/HTTP intents filtered by canonical workflow (`recon`, `discover`, `ports`, `services`, `web`, `full`). TLS-probe and fingerprint tasks have no executor and are never planned; content/crawl/fuzz are evidence-triggered follow-ups only (fuzz requires workflow `full`). Host-discovery breadth per level: L1 minimal (`icmp x1 + tcp [80]`), L2 (`icmp x1 + tcp [80,443]`), L3 standard (`icmp x2 + tcp [22,80,443]`), L4 broader (`icmp x2 + tcp [22,80,443,8080]`), L5 deepest bounded (`icmp x3 + tcp [22,80,443,8080,8443]`). Level 5 is bounded, never unbounded. Explicit `--ping`/`--discover`/`--udp`/`--ports`/`--all-ports` add their intent even if the level would not otherwise include it.
 - `--speed slow|balanced|fast|auto|0–100` is execution pressure: concurrency ceiling, retry defaults, default task timeout, and per-probe ICMP/TCP timeouts (300–3000ms). Speed 100 is still capped by `max_concurrency` and hard budgets (never unlimited) and never changes Alive/Unknown/Unreachable meaning. `auto` v1 is a conservative deterministic baseline identical to `balanced` and is reported honestly as non-adaptive in `--explain`; adaptive feedback is Phase 4.1+ work.
 
 ## Host discovery policy
@@ -126,7 +126,7 @@ Invalid values fail fast (exit 2): zero/negative-equivalent, values exceeding ha
 
 ## Phase 12 contextual fuzzing policy
 
-- No new CLI flags or TOML keys: contextual fuzzing follows existing `--goal fuzz|custom`, `--level`, `--speed`, scope, and scheduler budgets.
+- No new CLI flags or TOML keys: contextual fuzzing follows existing `--goal full` (aliases `fuzz`, `custom`), `--level`, `--speed`, scope, and scheduler budgets.
 - Eligibility: `Baseline` outputs with `ResponseSignatureObserved` for an endpoint containing a concrete non-sensitive GET query parameter may propose `Fuzz` tasks through the Decision Engine. Fuzz modules never enqueue follow-up work.
 - Active contexts: GET query parameters only. GET-form active fuzzing, POST forms, cookies, headers, and path-variable fuzzing are RESERVED.
 - Level matrix: L1-L2 disabled; L3 one observed parameter with up to two mutations and at most two fuzz tasks per origin; L4 up to three parameters with up to three mutations each and at most four fuzz tasks per origin; L5 up to four parameters with up to four mutations each and at most eight fuzz tasks per origin. Existing goal/level eligibility and scheduler budgets still apply; L5 is bounded.

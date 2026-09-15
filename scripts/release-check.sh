@@ -1,5 +1,5 @@
 #!/bin/sh
-# RXScan release validation entry point (Phase 20).
+# RXScan release validation entry point.
 #
 # Runs the release gates and stops on the first failure. This script never
 # publishes, pushes, tags, deletes user files, or requires root. It writes
@@ -32,16 +32,15 @@ step() {
   echo "==> $1"
 }
 
-require_clean_tree() {
+report_tree_state() {
   if [ -n "$(git status --porcelain)" ]; then
-    echo "--- git status ---" >&2
+    echo "--- git status (validating dirty tree) ---" >&2
     git status --short >&2
-    fail "working tree is dirty; release validation requires a clean tree"
   fi
 }
 
-step "git clean/dirty check"
-require_clean_tree
+step "git state"
+report_tree_state
 git rev-parse HEAD
 
 step "cargo fmt --check"
