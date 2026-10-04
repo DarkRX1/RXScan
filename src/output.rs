@@ -70,6 +70,14 @@ impl<W: Write> JsonlWriter<W> {
         self.bytes_written
     }
 
+    pub fn max_bytes(&self) -> u64 {
+        self.max_bytes
+    }
+
+    pub fn remaining(&self) -> u64 {
+        self.max_bytes.saturating_sub(self.bytes_written)
+    }
+
     fn write_envelope<T: Serialize>(
         &mut self,
         record_type: &'static str,
@@ -119,6 +127,108 @@ impl<W: Write> JsonlWriter<W> {
     }
     pub fn write_asset(&mut self, asset: &Asset) -> Result<(), OutputError> {
         self.write_envelope("asset", asset)
+    }
+
+    /// Correlation-engine records (additive schema): graph entities and
+    /// edges stream after module outputs. Unknown `record_type` values are
+    /// ignored by older consumers reading the envelope generically.
+    pub fn write_graph_entity(
+        &mut self,
+        entity: &crate::graph::GraphEntity,
+    ) -> Result<(), OutputError> {
+        self.write_envelope("graph_entity", entity)
+    }
+    pub fn write_graph_edge(&mut self, edge: &crate::graph::GraphEdge) -> Result<(), OutputError> {
+        self.write_envelope("graph_edge", edge)
+    }
+
+    /// Intelligence records (additive schema): OS/device candidates, SSH
+    /// host keys, TLS posture, software identities, vulnerability
+    /// candidates, attention events. Unknown `record_type` values are
+    /// ignored by older consumers reading the envelope generically.
+    pub fn write_os_candidate(
+        &mut self,
+        record: &crate::os_fingerprint::OsHostReport,
+    ) -> Result<(), OutputError> {
+        self.write_envelope("os_candidate", record)
+    }
+    pub fn write_device_candidate(
+        &mut self,
+        record: &crate::device::DeviceHostReport,
+    ) -> Result<(), OutputError> {
+        self.write_envelope("device_candidate", record)
+    }
+    pub fn write_ssh_host_key(
+        &mut self,
+        record: &crate::ssh::SshHostKeyRecord,
+    ) -> Result<(), OutputError> {
+        self.write_envelope("ssh_host_key", record)
+    }
+    pub fn write_tls_posture(
+        &mut self,
+        record: &crate::tls::TlsPosture,
+    ) -> Result<(), OutputError> {
+        self.write_envelope("tls_posture", record)
+    }
+    pub fn write_software_identity(
+        &mut self,
+        record: &crate::vuln::SoftwareInventoryEntry,
+    ) -> Result<(), OutputError> {
+        self.write_envelope("software_identity", record)
+    }
+    pub fn write_vulnerability_candidate(
+        &mut self,
+        record: &crate::vuln::VulnMatchRecord,
+    ) -> Result<(), OutputError> {
+        self.write_envelope("vulnerability_candidate", record)
+    }
+    pub fn write_attention_event(
+        &mut self,
+        record: &crate::project_db::AttentionEvent,
+    ) -> Result<(), OutputError> {
+        self.write_envelope("attention_event", record)
+    }
+
+    /// Project-layer records (additive schema): scan summary, coverage,
+    /// classifier provenance, and computed changes. Older consumers ignore
+    /// unknown `record_type` envelopes generically.
+    pub fn write_project_scan(&mut self, record: &serde_json::Value) -> Result<(), OutputError> {
+        self.write_envelope("project_scan", record)
+    }
+    pub fn write_coverage(&mut self, record: &serde_json::Value) -> Result<(), OutputError> {
+        self.write_envelope("coverage", record)
+    }
+    pub fn write_change(
+        &mut self,
+        change: &crate::project_db::GraphChange,
+    ) -> Result<(), OutputError> {
+        self.write_envelope("change", change)
+    }
+    pub fn write_classification_provenance(
+        &mut self,
+        record: &serde_json::Value,
+    ) -> Result<(), OutputError> {
+        self.write_envelope("classification_provenance", record)
+    }
+
+    /// Final truncation record. Every written JSONL record is
+    /// complete; when the output budget is exhausted we stop writing new
+    /// records, preserve the valid partial file, and append this record
+    /// only if the budget permits. Never deletes partial results.
+    pub fn write_termination(
+        &mut self,
+        reason: &str,
+        bytes_written: u64,
+        records_written: u64,
+    ) -> Result<(), OutputError> {
+        let payload = serde_json::json!({
+            "type": "termination",
+            "reason": reason,
+            "bytes_written": bytes_written,
+            "records_written": records_written,
+            "truncated": true,
+        });
+        self.write_envelope("termination", &payload)
     }
 
     pub fn flush(&mut self) -> Result<(), OutputError> {

@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "fingerprints": [
+    {
+      "id": "http-apache",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Apache",
+        "case_insensitive": true
+      },
+      "product": "Apache",
+      "vendor": "apache",
+      "confidence": 85,
+      "source": "seed-v1",
+      "version_extractor": {
+        "type": "prefixed_token",
+        "prefix": "Apache/",
+        "max_len": 32
+      }
+    },
+    {
+      "id": "http-caddy",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Caddy",
+        "case_insensitive": true
+      },
+      "product": "Caddy",
+      "vendor": "caddyserver",
+      "confidence": 85,
+      "source": "seed-v1",
+      "version_extractor": {
+        "type": "prefixed_token",
+        "prefix": "Caddy/",
+        "max_len": 32
+      }
+    },
+    {
+      "id": "http-nginx",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "nginx",
+        "case_insensitive": true
+      },
+      "product": "nginx",
+      "vendor": "f5",
+      "confidence": 85,
+      "source": "seed-v1",
+      "version_extractor": {
+        "type": "prefixed_token",
+        "prefix": "nginx/",
+        "max_len": 32
+      }
+    }
+  ]
+}

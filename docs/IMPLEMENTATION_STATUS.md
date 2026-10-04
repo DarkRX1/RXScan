@@ -228,3 +228,98 @@ Verified locally on 2026-09-12 (see validation results in the Phase 4 completion
 - Known limitation documented: external mid-run `cancel_all` is unreachable
   while `run()` holds `&mut`; in-run cancellation via tokens, per-task
   timeouts, and the global budget is stressed instead.
+
+## Correlation-engine phase verification (evidence graph + TLS identity)
+
+Verified locally on 2026-10-03:
+
+- `cargo fmt --check` — passed
+- `cargo clippy --all-targets` — passed, zero warnings
+- `cargo test` — passed: 572 tests, 0 failures (24 targets, incl. new
+  `fingerprint_packs` live pack-engine tests and `graph_correlation`
+  TLS/graph/confidence tests)
+- Live pack engine: packs load once per scan (`fingerprints/v1` default,
+  `RXSCAN_FINGERPRINT_DIR` override; malformed files rejected per-file,
+  scan proceeds) into a shared compiled DB; per-port matching is
+  in-memory only (exact/prefix/contains, protocol-gated, ≤4 candidates,
+  deterministic rule-id order). Built-in protocol/product evidence always
+  wins; external matches supplement unobserved products, corroborate
+  agreements without confidence gain, or surface as bounded alternates.
+  Unknown services keep protocol `unknown` with capped suggestions.
+- TLS identity: leaf SHA-256 becomes a global `cert:sha256:` asset plus
+  serial/key-algorithm/nominal-bits/signature-algorithm/chain-length/
+  self-signed/ALPN/SNI observation fields; `PresentsCertificate`
+  relationships carry provenance. Same cert on two ports yields one
+  entity (live reuse proof against openssl `s_server`).
+- Evidence graph: post-scan pure builder over completed outputs
+  (entities/edges with provenance, dedup, 8k/16k caps) correlating
+  ports, services, technologies, fingerprints, certificates, SANs
+  (scope-annotated, `contacted: false`), DNS A/AAAA (+other records),
+  endpoints, and redirects. Streams as additive `graph_entity`/
+  `graph_edge` JSONL records; human output stays concise (counts only).
+- Benchmarks (release, loopback): all-port TCP 1223ms wall (1214ms scan,
+  6 graph entities); 1k ports 29ms; /24 1–100 in 351ms wall; mixed
+  TCP+UDP 1k in 35ms; deadlines 100ms→104ms, 500ms→506ms, 1s→1008ms
+  (truncated, partial preserved). No hot-path network changes; added
+  work is post-scan linear passes plus ≤rules×observations string
+  matching per service task.
+- Known limitations: external packs do not yet extract versions (product
+  only; version stays observed-or-absent); web endpoint entities link
+  only via crawl `page_url`/`RedirectObserved` location (no asset-id
+  join); OS/device candidates are reserved kinds without engines; no
+  cipher enumeration, no vuln correlation, no JavaScript execution.
+
+## Asset-intelligence phase verification (versions, joins, expansion, project graph)
+
+Verified locally on 2026-10-03:
+
+- `cargo fmt --check` — passed
+- `git diff --check` — passed
+- `cargo clippy --all-targets` — passed, zero warnings
+- `cargo test` — passed: 612 tests, 0 failures (25+ targets, incl. new
+  `project_graph` persistence/diff/lineage/expansion/property tests,
+  extended `fingerprint_packs` extraction/merge tests, `decision`
+  lineage/depth tests)
+- Version extraction: declarative pack extractors
+  (`after_delimiter`/`token_position`/`key_value`/`prefixed_token`/
+  `semver_token`), 32B bound, ASCII safe-charset, digit required,
+  de-quoted evidence text; failures keep product-only matches; builtin
+  versions always win conflicts (recorded as `version_conflicts`);
+  adopted versions capped at product confidence. Seed packs carry
+  extractors (ssh/http); product-only rules load unchanged.
+- Field confidence: protocol/product/version/vendor tracked separately
+  on observations, findings (`product_confidence`,
+  `version_confidence`), and `ServiceIdentified` events; aggregate
+  confidence preserved for compatibility.
+- Endpoint joins: URL canonicalization at graph ingest (default ports
+  filled, IPv6 bracketed); `resolves_to_endpoint` + `served_by` edges to
+  observed ports/services only (never fabricated); hostname URLs join
+  through observed DNS mappings; virtual hosts share one port entity.
+  Service identity is endpoint+protocol (stable across version change).
+- Expansion: certificate SAN hostnames/IPs propose bounded DNS/host
+  follow-ups (16+16/completion, wildcards/malformed skipped, out-of-scope
+  stays observation-only); DNS CNAME chains one alias lookup (≤4);
+  depth capped at 3 hops; lineage params
+  (`discovery_depth`/`discovery_path`/`originating_seed`/
+  `parent_evidence_id`/`truncated_expansions`/`reason`) stripped from
+  task identity (repeated evidence dedups). Live chain proven:
+  TLS cert → SAN 127.0.0.2 → host discovery → port scan.
+- Project graph (SQLite, `rusqlite` bundled): versioned schema with
+  atomic migrations, transactional imports, temporal fields,
+  retention modes, strict untrusted-input validation, indexed queries
+  (kind/from/to/reuse/provenance/changes), interrupted runs stay
+  `interrupted`, newer schemas refused. `rxscan --project-db` import;
+  `rxscan project-db scans|summary|changes|diff` commands.
+- Diff: coverage-gated ports/hosts/services/certs/hostnames/edges
+  (absence without coverage yields no record); rotation retains both
+  certificates; classifier provenance persisted per scan.
+- Benchmarks (unit, debug): match 5µs/10 rules, 29µs/100, 317µs/1000;
+  graph join 200ent/1.1ms, 2k/18ms, 8k-capped/178ms; import 21.5k
+  records/sec; diff 1499 changes/28ms; 1.4MB project file per 1k-port
+  scan. Release scans: 1k ports 31ms, all-ports 2.6s, mixed 1k 31ms,
+  /24 1–100 453ms, web workflow 534ms, deadlines 104/506/1008ms.
+- Known limitations: external versions supplement only (no standalone
+  version rules without products); endpoint joins use task-event order
+  independent two-pass builder (no asset-id join); DNS expansion covers
+  A/AAAA/CNAME only; no OS/device engines; no cipher enumeration, vuln
+  correlation, or JS execution.

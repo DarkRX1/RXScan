@@ -1394,12 +1394,14 @@ fn jsonl_round_trip_preserves_web_records() {
         assert_eq!(value["schema_version"], SCHEMA_VERSION);
         let record_type = value["record_type"].as_str().unwrap();
         let payload = &value["payload"];
-        assert!(
-            payload["provenance"]["scan_plan_id"]
-                .as_str()
-                .unwrap()
-                .starts_with("plan_")
-        );
+        if let Some(provenance) = payload.get("provenance") {
+            if let Some(plan_id) = provenance.get("scan_plan_id").and_then(|v| v.as_str()) {
+                assert!(
+                    plan_id.starts_with("plan_"),
+                    "unexpected scan_plan_id {plan_id} in {record_type}"
+                );
+            }
+        }
         match record_type {
             "asset"
                 if payload["id"]

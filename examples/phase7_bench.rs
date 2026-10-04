@@ -119,6 +119,7 @@ fn main() {
             deadline,
             cancel: &cancel,
             connections: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            ssh_kex_capture: false,
         };
         let started = Instant::now();
         let attempt = match probe {
@@ -171,6 +172,7 @@ fn main() {
         deadline,
         cancel: &cancel,
         connections: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        ssh_kex_capture: false,
     };
     let attempt = rxscan::probes::probe_generic(&ctx);
     println!(
@@ -193,6 +195,7 @@ fn main() {
             deadline,
             cancel: &config_token,
             connections: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            ssh_kex_capture: false,
         };
         rxscan::probes::probe_generic(&ctx)
     });

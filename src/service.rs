@@ -244,17 +244,41 @@ pub struct ServiceObservation {
     pub product_hint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version_hint: Option<String>,
+    /// Derived version family (`1.24.0` → `1.24.x`). Never an exactness
+    /// claim beyond the observed `version_hint`; useful for range-level
+    /// correlation without overstating patch precision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_family: Option<String>,
+    /// Inferred vendor for well-known products (static map, evidence-backed
+    /// only when `product_hint` is present). `None` means unknown vendor —
+    /// never guessed from the port number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor_hint: Option<String>,
+    /// CPE 2.3 candidate (`cpe:2.3:a:vendor:product:version:...`, `*` for
+    /// unknown components). Present only when a product is observed;
+    /// correlation input, never a vulnerability claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpe_hint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub banner: Option<String>,
     #[serde(default)]
     pub capabilities: Vec<String>,
     pub confidence: u8,
+    /// Per-field certainty (protocol/product/version/vendor). Additive;
+    /// old serialized observations without it deserialize to `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field_confidence: Option<FieldConfidence>,
     pub evidence_lines: Vec<String>,
     pub timestamp: u64,
     /// Registry probe (or `passive` fan-out step) whose evidence classified
     /// this service. `None` for unclassified observations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matched_by: Option<String>,
+    /// Fingerprint rule source (`builtin:<probe>` or `fingerprints/<file>#<id>`).
+    /// Always present when classified; documents which rule produced the
+    /// product/vendor/version conclusion for auditability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_source: Option<String>,
     /// Bounded correlation fingerprint, present only for unidentified
     /// services with a non-empty observation. Never an identity claim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -658,6 +682,515 @@ pub fn truncate_bounded(text: &str, max_bytes: usize) -> (String, bool) {
     (text[..end].to_owned(), true)
 }
 
+// ---------------- fingerprint enrichment (Phase 8/36) ----------------
+//
+// Pure, deterministic, evidence-gated derivation from already-observed
+// product/version strings. No network, no port-number guessing: every
+// conclusion requires an observed product token. Confidence reflects
+// evidence strength, never port priors.
+
+/// Well-known product → vendor map. Bounded static list for correlation;
+/// unknown products yield `None` (never guessed).
+pub fn vendor_for_product(product: &str) -> Option<&'static str> {
+    match product.to_ascii_lowercase().as_str() {
+        "nginx" => Some("f5"),
+        "apache" | "httpd" => Some("apache"),
+        "openssh" | "dropbear" => Some("openbsd"),
+        "postfix" => Some("wietse_venema"),
+        "vsftpd" => Some("beasts"),
+        "pure-ftpd" | "pure_ftpd" => Some("pureftpd"),
+        "proftpd" => Some("proftpd"),
+        "redis" => Some("redis"),
+        "mysql" | "mariadb" => Some("oracle"),
+        "postgresql" | "postgres" => Some("postgresql"),
+        "exim" => Some("exim"),
+        "sendmail" => Some("sendmail"),
+        "dovecot" => Some("dovecot"),
+        "iis" | "microsoft-iis" => Some("microsoft"),
+        "lighttpd" => Some("lighttpd"),
+        "caddy" => Some("caddyserver"),
+        "traefik" => Some("traefik"),
+        "haproxy" => Some("haproxy"),
+        "squid" => Some("squid"),
+        "varnish" => Some("varnish"),
+        _ => None,
+    }
+}
+
+/// Sanitize one CPE component: lowercase, safe alphabet, bounded length.
+/// Returns `*` for empty/unsafe input (CPE wildcard, never invented text).
+fn sanitize_cpe_component(raw: &str) -> String {
+    let lower = raw.trim().to_ascii_lowercase();
+    if lower.is_empty() || lower.len() > 64 {
+        return "*".to_owned();
+    }
+    let cleaned: String = lower
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '~') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    // CPE forbids leading digit-only collapse issues; keep as-is but never
+    // emit empty.
+    if cleaned.trim_matches(['.', '_', '-']).is_empty() {
+        "*".to_owned()
+    } else {
+        cleaned
+    }
+}
+
+/// CPE 2.3 candidate for an observed product/version pair.
+///
+/// Format: `cpe:2.3:a:<vendor>:<product>:<version>:*:*:*:*:*:*:*`.
+/// Unknown vendor/version become `*`. Returns `None` when no product was
+/// observed (never synthesize identity from a port number).
+pub fn cpe_for_product_version(
+    product: Option<&str>,
+    version: Option<&str>,
+    vendor: Option<&str>,
+) -> Option<String> {
+    let product = product.filter(|p| !p.trim().is_empty())?;
+    let vendor_part = vendor
+        .filter(|v| !v.trim().is_empty())
+        .map(sanitize_cpe_component)
+        .unwrap_or_else(|| "*".to_owned());
+    let product_part = sanitize_cpe_component(product);
+    let version_part = version
+        .filter(|v| !v.trim().is_empty())
+        .map(sanitize_cpe_component)
+        .unwrap_or_else(|| "*".to_owned());
+    Some(format!(
+        "cpe:2.3:a:{vendor_part}:{product_part}:{version_part}:*:*:*:*:*:*:*"
+    ))
+}
+
+/// Derive a version family (`1.24.0` → `1.24.x`, `8.0` → `8.0`,
+/// `22.2p1` → `22.2.x`). Returns `None` for absent input; passes through
+/// non-numeric suffixes conservatively without inventing precision.
+pub fn version_family(version: Option<&str>) -> Option<String> {
+    let version = version.filter(|v| !v.trim().is_empty())?;
+    let version = version.trim();
+    // Split off any trailing non-numeric build tag after the dotted core
+    // (`22.2p1` → core `22.2`, tag `p1` dropped for the family).
+    let core_end = version
+        .char_indices()
+        .take_while(|(_, c)| c.is_ascii_digit() || *c == '.')
+        .map(|(i, c)| i + c.len_utf8())
+        .last()
+        .unwrap_or(0);
+    let core = version[..core_end.min(version.len())].trim_matches('.');
+    if core.is_empty() {
+        return Some(version.to_owned());
+    }
+    let parts: Vec<&str> = core.split('.').collect();
+    if parts.len() >= 3 {
+        Some(format!("{}.{}.x", parts[0], parts[1]))
+    } else {
+        Some(core.to_owned())
+    }
+}
+
+/// Calibrate identification confidence from evidence signals.
+///
+/// Rules (never exceed 95; port priors add zero):
+/// * base = strongest single-signal class (CONFIRMED/STRONG/...);
+/// * each *independent* corroborating signal (distinct probe or artifact:
+///   banner + cert + header + behavior) adds +1, capped at 95;
+/// * agreement over the SAME bytes adds nothing (no double-count);
+/// * exact version without a second signal caps at 90 (family may still
+///   be reported; exactness needs corroboration).
+pub fn calibrate_confidence(
+    base: u8,
+    independent_signals: usize,
+    exact_version_claimed: bool,
+) -> u8 {
+    let mut confidence = base.saturating_add(independent_signals.min(5) as u8);
+    if exact_version_claimed && independent_signals == 0 {
+        confidence = confidence.min(90);
+    }
+    confidence.min(95)
+}
+
+/// Enriched fingerprint conclusion for one classified observation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FingerprintEnrichment {
+    pub vendor: Option<String>,
+    pub version_family: Option<String>,
+    pub cpe: Option<String>,
+    pub confidence: u8,
+    pub rule_source: String,
+}
+
+/// Enrich an observed (product, version, base confidence, probe) tuple.
+/// Pure function: deterministic, no I/O. `independent_signals` counts
+/// distinct corroborating artifacts beyond the primary observation.
+pub fn enrich_fingerprint(
+    product: Option<&str>,
+    version: Option<&str>,
+    base_confidence: u8,
+    matched_by: Option<&str>,
+    independent_signals: usize,
+) -> FingerprintEnrichment {
+    let vendor = product.and_then(vendor_for_product).map(str::to_owned);
+    let version_family = version_family(version);
+    let cpe = cpe_for_product_version(product, version, vendor.as_deref());
+    let exact_version = version.is_some_and(|v| !v.trim().is_empty());
+    let confidence = calibrate_confidence(base_confidence, independent_signals, exact_version);
+    let rule_source = match matched_by {
+        Some(probe) => format!("builtin:{probe}"),
+        None => "builtin:passive".to_owned(),
+    };
+    FingerprintEnrichment {
+        vendor,
+        version_family,
+        cpe,
+        confidence,
+        rule_source,
+    }
+}
+
+// ---------------- evidence classes + candidate merge (correlation engine) ----------------
+//
+// Confidence merging must not double-count correlated evidence: an HTTP
+// Server header and an external fingerprint matching the SAME banner bytes
+// are one underlying signal, not two. Evidence is classified so merging
+// counts distinct CLASSES, never raw matcher hits.
+
+/// Evidence class for confidence merging. Variants are semantic buckets;
+/// two observations in the same class corroborate weakly (duplicate), two
+/// in different classes corroborate independently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum EvidenceClass {
+    /// Port-number prior: ordering hint only, always zero confidence weight.
+    TransportHint,
+    /// Deterministic protocol handshake (SSH ident string, TLS ServerHello,
+    /// Redis PONG, MySQL framing). Strongest single class.
+    ProtocolHandshake,
+    /// Product token parsed from a banner/greeting by built-in grammar.
+    BannerToken,
+    /// TLS certificate/version/cipher artifacts beyond the handshake.
+    TlsArtifact,
+    /// HTTP headers/status beyond the status line.
+    HttpArtifact,
+    /// External fingerprint-pack rule match.
+    ExternalFingerprint,
+    /// Behavioral evidence (timing, error behavior, capability exchange).
+    Behavior,
+}
+
+/// Count distinct merging classes in a class list (deduplicated). Port
+/// priors (`TransportHint`) never count.
+pub fn count_distinct_classes(classes: &[EvidenceClass]) -> usize {
+    let mut seen = std::collections::BTreeSet::new();
+    for class in classes {
+        if *class == EvidenceClass::TransportHint {
+            continue;
+        }
+        seen.insert(*class);
+    }
+    seen.len()
+}
+
+/// Combine a base confidence with corroborating evidence classes.
+/// Same rule as [`calibrate_confidence`]: +1 per distinct extra class,
+/// cap 95, exact version caps at 90 with fewer than 2 distinct classes.
+pub fn combine_confidence(
+    base: u8,
+    extra_classes: &[EvidenceClass],
+    exact_version_claimed: bool,
+) -> u8 {
+    calibrate_confidence(
+        base,
+        count_distinct_classes(extra_classes),
+        exact_version_claimed,
+    )
+}
+
+/// One merged alternate product hypothesis (conflicting evidence kept
+/// visible, never silently dropped).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlternateProduct {
+    pub product: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
+    pub confidence: u8,
+    pub rule_id: String,
+    pub rule_source: String,
+}
+
+/// Result of merging external fingerprint candidates with the built-in
+/// conclusion, following strict precedence:
+/// 1. deterministic protocol handshake (built-in protocol always wins);
+/// 2. exact built-in signature product;
+/// 3. exact external signature (supplements ONLY when built-in has no product);
+/// 4. conflicting external products become bounded alternates.
+///
+/// An external version adopted for an agreed product that the built-in
+/// observation did not version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdoptedVersion {
+    pub version: String,
+    pub confidence: u8,
+    pub rule_id: String,
+    pub rule_source: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CandidateMerge {
+    /// External product adopted (only when built-in observed none).
+    pub adopted: Option<AdoptedProduct>,
+    /// External version adopted (only when the final product is agreed
+    /// and the built-in observation had no version).
+    pub adopted_version: Option<AdoptedVersion>,
+    /// Conflicting hypotheses kept visible (bounded, deterministic order).
+    pub alternates: Vec<AlternateProduct>,
+    /// External matches agreeing with the built-in product (corroboration).
+    pub corroborated_by: Vec<Corroboration>,
+    /// Conflicting external versions (built-in version wins; bounded).
+    pub version_conflicts: Vec<AlternateVersion>,
+}
+
+/// An external rule agreeing with the built-in product conclusion.
+/// Recorded for audit; same-bytes agreement never inflates confidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Corroboration {
+    pub rule_id: String,
+    pub rule_source: String,
+}
+
+/// An external product adopted into the primary conclusion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdoptedProduct {
+    pub product: String,
+    pub vendor: Option<String>,
+    pub confidence: u8,
+    pub rule_id: String,
+    pub rule_source: String,
+    /// Adopted declarative version (only when the rule extracted one and
+    /// the built-in observation had none).
+    pub version: Option<String>,
+    /// Version confidence: capped at or below the adopted product
+    /// confidence (a version is never surer than its product without
+    /// independent corroboration).
+    pub version_confidence: Option<u8>,
+}
+
+/// A conflicting external version kept visible. The built-in observed
+/// version always wins; the conflict is evidence, not a silent drop.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlternateVersion {
+    pub product: String,
+    pub builtin_version: String,
+    pub external_version: String,
+    pub external_confidence: u8,
+    pub rule_id: String,
+    pub rule_source: String,
+}
+
+/// Per-field confidence: protocol, product, version, and vendor identifications
+/// carry different evidence, so they carry different certainty. The aggregate
+/// observation confidence is preserved separately for compatibility; it is
+/// NOT the minimum of these fields (one weak field must not erase strong
+/// ones). Unknown fields report 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FieldConfidence {
+    pub protocol: u8,
+    pub product: u8,
+    pub version: u8,
+    pub vendor: u8,
+}
+
+/// Maximum alternates retained per observation (bounded ambiguity).
+pub const MAX_ALTERNATES: usize = 3;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalCandidateView<'a> {
+    pub product: &'a str,
+    pub vendor: Option<&'a str>,
+    pub confidence: u8,
+    pub rule_id: &'a str,
+    pub rule_source: &'a str,
+    pub matcher: &'a crate::fingerprints::MatcherKind,
+    pub version: Option<&'a str>,
+    pub version_confidence: Option<u8>,
+}
+
+/// Confidence cap for unclassified-observation suggestions by matcher
+/// strength: a `contains` hit on unknown bytes is a weak heuristic (60),
+/// `prefix` is stronger (75), `exact` on the whole observation is strong
+/// (85). Never exceeds the rule's own confidence.
+pub fn unknown_suggestion_cap(
+    matcher: &crate::fingerprints::MatcherKind,
+    rule_confidence: u8,
+) -> u8 {
+    let cap = match matcher {
+        crate::fingerprints::MatcherKind::Exact => 85,
+        crate::fingerprints::MatcherKind::Prefix => 75,
+        crate::fingerprints::MatcherKind::Contains => 60,
+    };
+    rule_confidence.min(cap)
+}
+
+/// Merge external candidates with the built-in product conclusion.
+/// Pure, deterministic, bounded. Built-in evidence is authoritative: an
+/// external product never overwrites an observed built-in product, and an
+/// external version never overwrites an observed built-in version.
+/// Versions compare by trimmed case-insensitive equality; anything else is
+/// a visible conflict, never a silent replacement.
+pub fn merge_external_candidates(
+    builtin_product: Option<&str>,
+    builtin_version: Option<&str>,
+    builtin_confidence: u8,
+    candidates: &[ExternalCandidateView<'_>],
+) -> CandidateMerge {
+    let mut merge = CandidateMerge::default();
+    // Deterministic candidate order: confidence desc, then rule id.
+    let mut ordered: Vec<&ExternalCandidateView<'_>> = candidates.iter().collect();
+    ordered.sort_by(|a, b| {
+        b.confidence
+            .cmp(&a.confidence)
+            .then_with(|| a.rule_id.cmp(b.rule_id))
+    });
+    let versions_equal = |left: &str, right: &str| {
+        left.trim().eq_ignore_ascii_case(right.trim()) && !left.trim().is_empty()
+    };
+    match builtin_product.filter(|p| !p.trim().is_empty()) {
+        Some(builtin) => {
+            for candidate in ordered {
+                if candidate.product.eq_ignore_ascii_case(builtin) {
+                    merge.corroborated_by.push(Corroboration {
+                        rule_id: candidate.rule_id.to_owned(),
+                        rule_source: candidate.rule_source.to_owned(),
+                    });
+                    // Same product: version may still add information.
+                    match (
+                        builtin_version.filter(|v| !v.trim().is_empty()),
+                        candidate.version.filter(|v| !v.trim().is_empty()),
+                    ) {
+                        (Some(_), Some(_)) => {}
+                        (None, Some(external)) if merge.adopted_version.is_none() => {
+                            let confidence = candidate
+                                .version_confidence
+                                .unwrap_or(candidate.confidence)
+                                .min(builtin_confidence)
+                                .min(95);
+                            merge.adopted_version = Some(AdoptedVersion {
+                                version: external.to_owned(),
+                                confidence,
+                                rule_id: candidate.rule_id.to_owned(),
+                                rule_source: candidate.rule_source.to_owned(),
+                            });
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+                if merge.alternates.len() < MAX_ALTERNATES
+                    && !merge
+                        .alternates
+                        .iter()
+                        .any(|alt| alt.product.eq_ignore_ascii_case(candidate.product))
+                {
+                    merge.alternates.push(AlternateProduct {
+                        product: candidate.product.to_owned(),
+                        vendor: candidate.vendor.map(str::to_owned),
+                        confidence: candidate.confidence.min(builtin_confidence).min(95),
+                        rule_id: candidate.rule_id.to_owned(),
+                        rule_source: candidate.rule_source.to_owned(),
+                    });
+                }
+            }
+            // Version conflicts only against the agreed product: conflicting
+            // products are already alternates, their versions meaningless.
+            if let Some(builtin_v) = builtin_version.filter(|v| !v.trim().is_empty()) {
+                for candidate in candidates {
+                    let Some(external_v) = candidate.version.filter(|v| !v.trim().is_empty())
+                    else {
+                        continue;
+                    };
+                    if !candidate.product.eq_ignore_ascii_case(builtin) {
+                        continue;
+                    }
+                    if versions_equal(builtin_v, external_v) {
+                        continue;
+                    }
+                    if merge.version_conflicts.len() >= MAX_ALTERNATES {
+                        break;
+                    }
+                    if merge
+                        .version_conflicts
+                        .iter()
+                        .any(|conflict| conflict.rule_id == candidate.rule_id)
+                    {
+                        continue;
+                    }
+                    merge.version_conflicts.push(AlternateVersion {
+                        product: builtin.to_owned(),
+                        builtin_version: builtin_v.to_owned(),
+                        external_version: external_v.to_owned(),
+                        external_confidence: candidate.confidence,
+                        rule_id: candidate.rule_id.to_owned(),
+                        rule_source: candidate.rule_source.to_owned(),
+                    });
+                }
+            }
+        }
+        None => {
+            // No built-in product: the strongest external candidate may
+            // supply one, calibrated as a single-signal claim (exact
+            // version unknown at this layer → conservative).
+            if let Some(best) = ordered.first() {
+                let adopted_confidence = best.confidence.min(90);
+                let (version, version_confidence) =
+                    match best.version.filter(|v| !v.trim().is_empty()) {
+                        Some(extracted) => {
+                            let confidence = best
+                                .version_confidence
+                                .unwrap_or(best.confidence)
+                                .min(adopted_confidence);
+                            (Some(extracted.to_owned()), Some(confidence))
+                        }
+                        None => (None, None),
+                    };
+                merge.adopted = Some(AdoptedProduct {
+                    product: best.product.to_owned(),
+                    vendor: best.vendor.map(str::to_owned),
+                    confidence: adopted_confidence,
+                    rule_id: best.rule_id.to_owned(),
+                    rule_source: best.rule_source.to_owned(),
+                    version,
+                    version_confidence,
+                });
+                for candidate in ordered.iter().skip(1) {
+                    if merge.alternates.len() >= MAX_ALTERNATES {
+                        break;
+                    }
+                    if candidate.product.eq_ignore_ascii_case(best.product)
+                        || merge
+                            .alternates
+                            .iter()
+                            .any(|alt| alt.product.eq_ignore_ascii_case(candidate.product))
+                    {
+                        continue;
+                    }
+                    merge.alternates.push(AlternateProduct {
+                        product: candidate.product.to_owned(),
+                        vendor: candidate.vendor.map(str::to_owned),
+                        confidence: candidate.confidence.min(90),
+                        rule_id: candidate.rule_id.to_owned(),
+                        rule_source: candidate.rule_source.to_owned(),
+                    });
+                }
+            }
+        }
+    }
+    merge
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -678,6 +1211,62 @@ mod tests {
             assert!(BANNER == 50);
             assert!(SILENT == 20);
         };
+    }
+
+    #[test]
+    fn enrichment_never_guesses_from_ports() {
+        // No product → no vendor, no CPE, even with a version string.
+        let enriched = enrich_fingerprint(None, Some("1.0"), 80, Some("http"), 0);
+        assert_eq!(enriched.vendor, None);
+        assert_eq!(enriched.cpe, None);
+        // Unknown product → no vendor, wildcard vendor CPE.
+        let enriched = enrich_fingerprint(
+            Some("TotallyUnknownDaemon"),
+            Some("9.9"),
+            80,
+            Some("generic"),
+            0,
+        );
+        assert_eq!(enriched.vendor, None);
+        assert_eq!(
+            enriched.cpe.as_deref(),
+            Some("cpe:2.3:a:*:totallyunknowndaemon:9.9:*:*:*:*:*:*:*")
+        );
+    }
+
+    #[test]
+    fn enrichment_maps_vendor_cpe_family() {
+        let enriched = enrich_fingerprint(Some("nginx"), Some("1.24.0"), 90, Some("http"), 1);
+        assert_eq!(enriched.vendor.as_deref(), Some("f5"));
+        assert_eq!(enriched.version_family.as_deref(), Some("1.24.x"));
+        assert_eq!(
+            enriched.cpe.as_deref(),
+            Some("cpe:2.3:a:f5:nginx:1.24.0:*:*:*:*:*:*:*")
+        );
+        assert_eq!(enriched.rule_source, "builtin:http");
+        // Exact version with corroboration keeps high confidence, capped 95.
+        assert!(enriched.confidence <= 95 && enriched.confidence >= 90);
+        // Exact version with NO second signal caps at 90.
+        let solo = enrich_fingerprint(Some("nginx"), Some("1.24.0"), 90, Some("http"), 0);
+        assert_eq!(solo.confidence, 90);
+    }
+
+    #[test]
+    fn version_family_stays_conservative() {
+        assert_eq!(version_family(Some("1.24.0")).as_deref(), Some("1.24.x"));
+        assert_eq!(version_family(Some("8.0")).as_deref(), Some("8.0"));
+        assert_eq!(version_family(Some("22.2p1")).as_deref(), Some("22.2"));
+        assert_eq!(version_family(None), None);
+        assert_eq!(version_family(Some("  ")), None);
+    }
+
+    #[test]
+    fn confidence_never_exceeds_95_or_counts_port_priors() {
+        // Even max base + many signals caps at 95.
+        assert_eq!(calibrate_confidence(95, 5, true), 95);
+        assert_eq!(calibrate_confidence(90, 10, true), 95);
+        // Same-bytes agreement (0 independent signals) adds nothing beyond cap rule.
+        assert_eq!(calibrate_confidence(80, 0, false), 80);
     }
 
     #[test]

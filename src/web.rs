@@ -572,6 +572,7 @@ pub fn fetch_plain(
         deadline,
         cancel,
         connections: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        ssh_kex_capture: false,
     };
     let mut stream = ctx.connect().map_err(|reason| {
         if reason.contains("cancelled") || reason.contains("deadline") {

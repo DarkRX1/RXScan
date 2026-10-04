@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "id": "dev-printer-cups",
+      "role": "printer",
+      "signals": [
+        {"kind": "service_product", "pattern": "CUPS", "weight": 25, "vendor_signal": true},
+        {"kind": "http_server", "pattern": "CUPS", "weight": 15}
+      ],
+      "confidence_cap": 85,
+      "source": "seed-v1"
+    },
+    {
+      "id": "dev-nas-synology",
+      "role": "nas",
+      "signals": [
+        {"kind": "http_server", "pattern": "Synology", "weight": 22, "vendor_signal": true},
+        {"kind": "service_product", "pattern": "Synology", "weight": 16}
+      ],
+      "confidence_cap": 85,
+      "source": "seed-v1"
+    },
+    {
+      "id": "dev-camera-axis",
+      "role": "camera",
+      "signals": [
+        {"kind": "http_server", "pattern": "AXIS", "weight": 22, "vendor_signal": true},
+        {"kind": "service_product", "pattern": "AXIS", "weight": 16}
+      ],
+      "confidence_cap": 85,
+      "source": "seed-v1"
+    }
+  ]
+}

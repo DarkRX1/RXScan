@@ -205,8 +205,9 @@ fn execute_discovery(
     }
     let started_at = Timestamp::now();
     let start_instant = Instant::now();
-    let task_deadline = Instant::now()
-        .checked_add(Duration::from_millis(task.timeout_ms.max(1)))
+    // Clamped to the remaining global budget (Priority 1).
+    let task_deadline = context
+        .effective_deadline()
         .unwrap_or_else(|| Instant::now() + Duration::from_secs(60));
 
     // Target label for evidence (stable, from params or scope).

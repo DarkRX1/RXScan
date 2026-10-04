@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "id": "dev-server-lamp",
+      "role": "server",
+      "signals": [
+        {"kind": "service_product", "pattern": "nginx", "weight": 12},
+        {"kind": "service_product", "pattern": "OpenSSH", "weight": 12},
+        {"kind": "service_product", "pattern": "PostgreSQL", "weight": 14}
+      ],
+      "confidence_cap": 75,
+      "source": "seed-v1"
+    },
+    {
+      "id": "dev-hypervisor-esxi",
+      "role": "hypervisor",
+      "signals": [
+        {"kind": "http_server", "pattern": "VMware", "weight": 22, "vendor_signal": true},
+        {"kind": "service_product", "pattern": "VMware", "weight": 16}
+      ],
+      "confidence_cap": 85,
+      "source": "seed-v1"
+    }
+  ]
+}

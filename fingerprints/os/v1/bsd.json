@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "id": "os-freebsd",
+      "family": "FreeBSD",
+      "features": [
+        {"source": "ssh_banner", "pattern": "FreeBSD", "weight": 25},
+        {"source": "banner_token", "pattern": "FreeBSD", "weight": 12}
+      ],
+      "exclusions": [
+        {"source": "ssh_banner", "pattern": "Linux", "weight": 1}
+      ],
+      "confidence_cap": 85,
+      "source": "seed-v1"
+    },
+    {
+      "id": "os-openbsd",
+      "family": "OpenBSD",
+      "features": [
+        {"source": "ssh_banner", "pattern": "OpenBSD", "weight": 15},
+        {"source": "service_product", "pattern": "OpenSSH", "weight": 8}
+      ],
+      "confidence_cap": 70,
+      "source": "seed-v1"
+    },
+    {
+      "id": "os-netbsd",
+      "family": "NetBSD",
+      "features": [
+        {"source": "ssh_banner", "pattern": "NetBSD", "weight": 25}
+      ],
+      "confidence_cap": 75,
+      "source": "seed-v1"
+    }
+  ]
+}

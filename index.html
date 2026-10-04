@@ -10,6 +10,16 @@
     />
     <meta name="theme-color" content="#00ff41" />
     <meta name="robots" content="index, follow" />
+    <!-- Defense-in-depth for non-Netlify hosts (file://, other static hosts).
+         Mirrors the Content-Security-Policy in /_headers, minus frame-ancestors
+         (ignored in <meta> by spec — enforced via headers on Netlify).
+         X-Frame-Options / X-Content-Type-Options cannot be set via <meta>;
+         they are enforced via /_headers. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; upgrade-insecure-requests"
+    />
+    <meta name="referrer" content="strict-origin-when-cross-origin" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link

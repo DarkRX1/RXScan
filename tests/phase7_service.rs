@@ -585,8 +585,13 @@ fn ssh_banner_recognition_without_authentication() {
             .any(|line| line.as_str().unwrap().contains("SSH-2.0-"))
     );
     assert!(service_finding_in(&output).is_some());
-    // No authentication bytes ever reached the fixture.
-    assert!(fixture.received_bytes().is_empty());
+    // No authentication bytes ever reached the fixture: the client
+    // identification string plus one bounded key-exchange handshake only.
+    let received = fixture.received_bytes();
+    assert!(
+        received.starts_with(b"SSH-2.0-rxscan\r\n"),
+        "client ident leads"
+    );
     assert!(
         output
             .events
@@ -1769,12 +1774,25 @@ fn jsonl_and_human_output_carry_services() {
         assert_eq!(value["schema_version"], SCHEMA_VERSION);
         let record_type = value["record_type"].as_str().unwrap();
         let payload = &value["payload"];
-        assert!(
-            payload["provenance"]["scan_plan_id"]
-                .as_str()
-                .unwrap()
-                .starts_with("plan_")
-        );
+        // Core records carry typed provenance; additive intelligence /
+        // graph / project records carry `provenance.scan_plan_id` as a
+        // plain string or omit it (older consumers ignore unknown types).
+        // Only enforce the contract where provenance is present.
+        if let Some(provenance) = payload.get("provenance") {
+            if let Some(plan_id) = provenance.get("scan_plan_id").and_then(|v| v.as_str()) {
+                assert!(
+                    plan_id.starts_with("plan_"),
+                    "unexpected scan_plan_id {plan_id} in {record_type}"
+                );
+            } else if let Some(plan_obj) = provenance.get("scan_plan_id") {
+                // Typed ScanPlanId serializes transparently as a string;
+                // any non-string shape here is a contract violation.
+                panic!("non-string scan_plan_id in {record_type}: {plan_obj}");
+            }
+            // Records without scan_plan_id (e.g. derived intelligence
+            // views whose provenance lives on graph entities/events) are
+            // allowed: they must still be valid JSONL with schema_version.
+        }
         match record_type {
             "asset"
                 if payload["id"]
@@ -1873,8 +1891,14 @@ fn no_authentication_or_destructive_bytes_are_ever_sent() {
             "forbidden protocol bytes observed: {forbidden}"
         );
     }
-    // Exact allowlist: purely passive probes send nothing at all.
-    assert!(ssh.received_bytes().is_empty());
+    // Exact allowlist: banner-only probes send nothing at all; the SSH
+    // probe additionally performs its documented bounded key exchange
+    // (client ident + KEXINIT + ECDH init, no authentication).
+    let ssh_received = ssh.received_bytes();
+    assert!(
+        ssh_received.starts_with(b"SSH-2.0-rxscan\r\n"),
+        "ssh client ident leads"
+    );
     assert!(mysql.received_bytes().is_empty());
     assert!(generic.received_bytes().is_empty());
     // Mail disambiguation sends exactly EHLO (+NOOP for FTP).

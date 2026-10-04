@@ -598,8 +598,9 @@ fn execute_udp_scan(
     }
     let started_at = Timestamp::now();
     let start_instant = Instant::now();
-    let task_deadline = Instant::now()
-        .checked_add(Duration::from_millis(task.timeout_ms.max(1)))
+    // Clamped to the remaining global budget (Priority 1).
+    let task_deadline = context
+        .effective_deadline()
         .unwrap_or_else(|| Instant::now() + Duration::from_secs(60));
     let provenance = Provenance::new(
         UDP_DISCOVERY_MODULE_NAME,
@@ -693,8 +694,17 @@ fn execute_udp_scan(
     let mut retries_total = 0u64;
 
     for (ip, parent_id) in ips.iter().zip(parent_ids.iter()) {
-        if cancel.is_cancelled() {
-            return Err(ModuleError::Cancelled);
+        // Preserve partial on deadline (P1/P9): never discard scanned
+        // addresses solely because the deadline fired mid-flight.
+        if context.is_cancelled() || cancel.is_cancelled() {
+            truncated_any = true;
+            let remaining_ips = ips.len().saturating_sub(
+                ips.iter()
+                    .position(|candidate| candidate == ip)
+                    .unwrap_or(0),
+            );
+            unscanned_total += resolved.ports.len().saturating_mul(remaining_ips);
+            break;
         }
         // Per-derived-address scope check: discovery must never expand scope.
         if !guard.permits(&TaskScopeTarget::Ip(*ip)) {
@@ -707,8 +717,10 @@ fn execute_udp_scan(
             break;
         }
         let outcome = scanner.scan(*ip, &resolved.ports, source, &scan_config);
-        if outcome.cancelled || cancel.is_cancelled() {
-            return Err(ModuleError::Cancelled);
+        // Partial preservation: cancelled/truncated scans still contribute
+        // their completed probes + exact unscanned counts below.
+        if outcome.cancelled {
+            truncated_any = true;
         }
         truncated_any |= outcome.truncated;
         unscanned_total += outcome.unscanned;
@@ -938,8 +950,10 @@ fn execute_udp_scan(
                 }
             }
         }
-        if cancel.is_cancelled() {
-            return Err(ModuleError::Cancelled);
+        // Preserve partial across addresses instead of discarding.
+        if context.is_cancelled() || cancel.is_cancelled() {
+            truncated_any = true;
+            break;
         }
     }
 

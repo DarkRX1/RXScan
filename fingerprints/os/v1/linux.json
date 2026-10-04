@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "id": "os-linux-ssh-distro",
+      "family": "Linux",
+      "features": [
+        {"source": "ssh_banner", "pattern": "Ubuntu", "weight": 20},
+        {"source": "ssh_banner", "pattern": "Debian", "weight": 20},
+        {"source": "ssh_banner", "pattern": "Raspbian", "weight": 18}
+      ],
+      "confidence_cap": 80,
+      "source": "seed-v1"
+    },
+    {
+      "id": "os-linux-ubuntu",
+      "family": "Linux",
+      "generation": "Ubuntu",
+      "features": [
+        {"source": "ssh_banner", "pattern": "Ubuntu", "weight": 22},
+        {"source": "http_server", "pattern": "Ubuntu", "weight": 14}
+      ],
+      "confidence_cap": 85,
+      "source": "seed-v1"
+    },
+    {
+      "id": "os-linux-debian",
+      "family": "Linux",
+      "generation": "Debian",
+      "features": [
+        {"source": "ssh_banner", "pattern": "Debian", "weight": 22},
+        {"source": "http_server", "pattern": "Debian", "weight": 14}
+      ],
+      "confidence_cap": 85,
+      "source": "seed-v1"
+    },
+    {
+      "id": "os-linux-android",
+      "family": "Linux",
+      "generation": "Android",
+      "features": [
+        {"source": "ssh_banner", "pattern": "Android", "weight": 22},
+        {"source": "banner_token", "pattern": "Android", "weight": 12}
+      ],
+      "confidence_cap": 80,
+      "source": "seed-v1"
+    }
+  ]
+}

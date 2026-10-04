@@ -39,6 +39,7 @@ body {
 
 img {
   max-width: 100%;
+  height: auto;
 }
 
 a {
@@ -631,7 +632,7 @@ h4 {
 }
 
 .hero-title {
-  font-size: clamp(2.2rem, 6vw, 3.75rem);
+  font-size: clamp(1.85rem, 5vw + 1rem, 3.75rem);
   font-weight: 700;
   margin-bottom: 1rem;
 }
@@ -872,6 +873,25 @@ h4 {
   font-size: 0.92rem;
 }
 
+.cert-body {
+  min-width: 0;
+}
+
+.cert-meta {
+  font-size: 0.78rem;
+  color: var(--muted);
+  margin: 0.3rem 0 0;
+}
+
+.cert-link {
+  display: inline-block;
+  margin-top: 0.4rem;
+  color: var(--matrix);
+  font-size: 0.82rem;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
 .dot {
   width: 0.45rem;
   height: 0.45rem;
@@ -930,6 +950,7 @@ h4 {
 
 .role-row {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 0.75rem;
   padding: 0.75rem;
@@ -1079,6 +1100,7 @@ textarea {
   color: #fff;
   padding: 0.7rem 0.8rem;
   border-radius: 0.5rem;
+  max-width: 100%;
 }
 
 textarea {
@@ -1182,14 +1204,6 @@ textarea {
 }
 
 @media (min-width: 768px) {
-  .nav-links,
-  .nav-status {
-    display: flex;
-  }
-  .menu-btn,
-  .mobile-menu {
-    display: none !important;
-  }
   .grid-2 {
     grid-template-columns: 1.4fr 1fr;
   }
@@ -1207,10 +1221,149 @@ textarea {
 }
 
 @media (min-width: 1024px) {
+  .nav-links,
+  .nav-status {
+    display: flex;
+  }
+  .menu-btn,
+  .mobile-menu {
+    display: none !important;
+  }
   .hero-grid {
     display: grid;
     grid-template-columns: 1.7fr 1fr;
     gap: 1.25rem;
+  }
+}
+
+/* ---- Responsive reflow (tablet/mobile only; desktop >= 1280px unchanged) ----
+   Same components, reflowed: multi-column areas collapse, decorative HUD
+   scales or hides, text uses fluid sizes, code/tables scroll internally. */
+
+pre {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+code {
+  overflow-wrap: break-word;
+}
+
+p,
+li,
+dd,
+dt,
+td,
+th,
+h1,
+h2,
+h3,
+h4 {
+  overflow-wrap: break-word;
+}
+
+.profile-row > div,
+.section-head > div {
+  min-width: 0;
+}
+
+/* Wide tables scroll inside their panel instead of pushing the page. */
+.console-panel {
+  overflow-x: auto;
+}
+
+.menu-btn {
+  width: 2.75rem;
+  height: 2.75rem;
+}
+
+.mobile-menu a {
+  padding: 0.75rem 0;
+}
+
+/* Tablet portrait: 3-column skill groups get cramped at ~768px, so use two
+   columns here only. Desktop (>= 1024px) keeps the approved 3 columns. */
+@media (min-width: 768px) and (max-width: 1023px) {
+  .grid-3 {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+/* Tablet and below: scale decorative orbs/rings so they cannot cover text;
+   hide the elements that have no room (bottom-left rings, falling streaks). */
+@media (max-width: 768px) {
+  .orb-a {
+    width: 320px;
+    height: 320px;
+  }
+  .orb-b {
+    width: 260px;
+    height: 260px;
+  }
+  .orb-c,
+  .orb-d {
+    width: 160px;
+    height: 160px;
+  }
+  .ring-1 {
+    width: 180px;
+    height: 180px;
+    top: 24px;
+    right: 8px;
+  }
+  .ring-2 {
+    width: 122px;
+    height: 122px;
+    top: 53px;
+    right: 37px;
+  }
+  .ring-3 {
+    width: 66px;
+    height: 66px;
+    top: 68px;
+    right: 52px;
+  }
+  .ring-bl-1,
+  .ring-bl-2,
+  .fall {
+    display: none;
+  }
+}
+
+/* Phones: tighter card/panel padding, single-column key/value rows,
+   full-width stacked CTAs for reliable touch targets. */
+@media (max-width: 480px) {
+  #main {
+    padding: 5rem 0.75rem 3rem;
+  }
+  .card {
+    padding: 1.25rem 1rem;
+  }
+  .kv {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+  .kv dd {
+    margin-bottom: 0.65rem;
+  }
+}
+
+@media (max-width: 420px) {
+  .cta-row .btn {
+    flex: 1 1 100%;
+  }
+}
+
+/* Small phones: keep brand and stat numerals inside the viewport. */
+@media (max-width: 380px) {
+  .brand {
+    font-size: 1.05rem;
+  }
+  .stat {
+    padding: 0.85rem 0.5rem;
+  }
+  .stat strong {
+    font-size: 1.25rem;
   }
 }
 

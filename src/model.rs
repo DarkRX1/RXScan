@@ -101,6 +101,7 @@ pub enum AssetKind {
     Url,
     Endpoint,
     Certificate,
+    SshHostKey,
     Technology,
     Other,
 }
@@ -177,6 +178,74 @@ impl Asset {
             schema_version: SCHEMA_VERSION,
             id,
             kind,
+            identity,
+            attributes: BTreeMap::new(),
+            first_seen: provenance.timestamp,
+            last_seen: provenance.timestamp,
+            provenance,
+        })
+    }
+
+    /// Creates a globally-addressed certificate asset keyed by leaf SHA-256.
+    /// Identity is `cert:sha256:<hex>` independent of any observing port, so
+    /// the same certificate presented on two ports yields one asset and
+    /// reuse correlation falls out of asset identity. Rejects malformed
+    /// fingerprints instead of panicking.
+    pub fn certificate(
+        fingerprint_sha256: &str,
+        provenance: Provenance,
+    ) -> Result<Self, ModelError> {
+        let fingerprint = fingerprint_sha256.trim().to_ascii_lowercase();
+        let valid =
+            fingerprint.len() == 64 && fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit());
+        if !valid {
+            return Err(ModelError::InvalidAssetIdentity);
+        }
+        let identity = format!("cert:sha256:{fingerprint}");
+        let id = AssetId(format!(
+            "asset_{}_{}",
+            kind_name(&AssetKind::Certificate),
+            stable_hash(&format!(
+                "{}:{identity}",
+                kind_name(&AssetKind::Certificate)
+            ))
+        ));
+        Ok(Self {
+            schema_version: SCHEMA_VERSION,
+            id,
+            kind: AssetKind::Certificate,
+            identity,
+            attributes: BTreeMap::new(),
+            first_seen: provenance.timestamp,
+            last_seen: provenance.timestamp,
+            provenance,
+        })
+    }
+
+    /// Creates a globally-addressed SSH host-key asset keyed by key blob
+    /// SHA-256. Identity is `sshkey:sha256:<hex>` independent of any
+    /// observing endpoint, so reuse correlation falls out of identity.
+    /// Rejects malformed fingerprints instead of panicking.
+    pub fn ssh_host_key(
+        fingerprint_sha256: &str,
+        provenance: Provenance,
+    ) -> Result<Self, ModelError> {
+        let fingerprint = fingerprint_sha256.trim().to_ascii_lowercase();
+        let valid =
+            fingerprint.len() == 64 && fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit());
+        if !valid {
+            return Err(ModelError::InvalidAssetIdentity);
+        }
+        let identity = format!("sshkey:sha256:{fingerprint}");
+        let id = AssetId(format!(
+            "asset_{}_{}",
+            kind_name(&AssetKind::SshHostKey),
+            stable_hash(&format!("{}:{identity}", kind_name(&AssetKind::SshHostKey)))
+        ));
+        Ok(Self {
+            schema_version: SCHEMA_VERSION,
+            id,
+            kind: AssetKind::SshHostKey,
             identity,
             attributes: BTreeMap::new(),
             first_seen: provenance.timestamp,
@@ -385,6 +454,15 @@ pub enum RelationshipKind {
     MailExchangeFor,
     NameServerFor,
     ReverseResolvesTo,
+    // Correlation-engine relationships. Every edge carries provenance on
+    // the owning event; edges never imply identity equivalence (a shared
+    // certificate relates hosts, it does not merge them).
+    PresentsCertificate,
+    PresentsSshHostKey,
+    HasSan,
+    IdentifiedBy,
+    Suggests,
+    References,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "subject_type", content = "id", rename_all = "snake_case")]
@@ -479,6 +557,18 @@ pub enum EventKind {
     TlsObserved,
     HttpObserved,
     ServiceProbeCompleted,
+    // Correlation-engine lifecycle. Fingerprint candidates are observations
+    // with provenance, never silent selections: the primary conclusion and
+    // any alternates stay visible side by side.
+    FingerprintCandidateObserved,
+    // SSH host-key observations: captured public key material with
+    // algorithm lists. The exchange signature is never verified by the
+    // scanner (recorded honestly); the key fingerprint is correlation
+    // evidence, never an authentication verdict.
+    SshHostKeyObserved,
+    // Structured TLS posture: factual assessment flags derived from
+    // handshake + certificate evidence (never vulnerability verdicts).
+    TlsPostureObserved,
     // Phase 8 web-foundation lifecycle. Per-URL observations stay in JSONL
     // (quiet on the terminal); redirects are first-class events so chains,
     // loops, caps, and out-of-scope stops are all auditable.
@@ -661,6 +751,7 @@ fn kind_name(kind: &AssetKind) -> &'static str {
         AssetKind::Url => "url",
         AssetKind::Endpoint => "endpoint",
         AssetKind::Certificate => "certificate",
+        AssetKind::SshHostKey => "ssh_host_key",
         AssetKind::Technology => "technology",
         AssetKind::Other => "other",
     }

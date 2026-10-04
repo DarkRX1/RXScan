@@ -170,6 +170,14 @@ fn lower_cidr_target(
         }
     }
     let _ = seed_params;
+    // Discovery-first execution (Priorities 2/3): broad CIDR workflows run
+    // fast bounded live-host discovery first; port/service/web work follows
+    // only against candidate hosts via the Decision Engine (Alive always,
+    // Unknown when explicit/level>=3, Unreachable never). Emitting a
+    // CIDR-wide Port/Udp task against the network address (.0) would waste
+    // a full port scan on a likely-dead address and serialize behind host
+    // discovery; per-host port tasks are proposed by the engine instead.
+    let host_eligible = eligible.contains(&TaskKind::HostDiscovery);
     for kind in eligible {
         if *kind == TaskKind::HostDiscovery {
             // Bounded expansion: first `remaining` permitted hosts in order.
@@ -204,7 +212,91 @@ fn lower_cidr_target(
                     deduped,
                 )?;
             }
+        } else if host_eligible {
+            // Discovery gates deep work: skip initial CIDR-wide port/udp/
+            // service/http/dns tasks (network-address scope). The Decision
+            // Engine proposes scoped per-host follow-ups from host facts.
+            // Control validation tasks (Custom) still emit below via the
+            // single-task path so every level keeps its validation intent.
+            if *kind == validate_kind() {
+                let (scope_target, base_params) = scope_target_for_plan_target(plan, target_index);
+                if !guard.permits(&scope_target) {
+                    continue;
+                }
+                let params = params_for_kind(plan, kind, &base_params);
+                emit_task(
+                    plan,
+                    plan_id,
+                    guard,
+                    kind,
+                    scope_target,
+                    params,
+                    default_timeout,
+                    default_retry,
+                    deduped,
+                )?;
+            }
+            continue;
         } else {
+            // No host discovery to gate on (e.g. L1 explicit ports): expand
+            // port/udp intents per-host so explicit operator intent still
+            // scans the range instead of only the network address.
+            if *kind == TaskKind::PortDiscovery || *kind == TaskKind::UdpDiscovery {
+                let remaining = *host_budget_remaining;
+                // Share the host budget for this fallback expansion; when
+                // exhausted, fall back to the single-task cidr intent.
+                let hosts = if remaining > 0 {
+                    let expanded =
+                        crate::discovery::expand_cidr_bounded(cidr, &plan.scope, remaining);
+                    *host_budget_remaining = host_budget_remaining.saturating_sub(expanded.len());
+                    expanded
+                } else {
+                    Vec::new()
+                };
+                if hosts.is_empty() {
+                    let (scope_target, base_params) =
+                        scope_target_for_plan_target(plan, target_index);
+                    if !guard.permits(&scope_target) {
+                        continue;
+                    }
+                    let params = params_for_kind(plan, kind, &base_params);
+                    emit_task(
+                        plan,
+                        plan_id,
+                        guard,
+                        kind,
+                        scope_target,
+                        params,
+                        default_timeout,
+                        default_retry,
+                        deduped,
+                    )?;
+                    continue;
+                }
+                for host in hosts {
+                    let scope_target = TaskScopeTarget::Ip(host);
+                    if !guard.permits(&scope_target) {
+                        continue;
+                    }
+                    let mut base = BTreeMap::new();
+                    base.insert("target".to_owned(), target.original_input.clone());
+                    base.insert("cidr".to_owned(), cidr.to_string());
+                    base.insert("host".to_owned(), host.to_string());
+                    let params = params_for_kind(plan, kind, &base);
+                    emit_task(
+                        plan,
+                        plan_id,
+                        guard,
+                        kind,
+                        scope_target,
+                        params,
+                        default_timeout,
+                        default_retry,
+                        deduped,
+                    )?;
+                }
+                continue;
+            }
             // Non-host intents stay single-task (cidr param, network scope).
             let (scope_target, base_params) = scope_target_for_plan_target(plan, target_index);
             // If the seed network is out of scope but hosts exist, still emit

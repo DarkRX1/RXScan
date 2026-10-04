@@ -1,26 +1,12 @@
-//! Phase 8 scaffold + real modules.
-//!
-//! * `HostDiscovery` runs the real bounded `HostDiscoveryModule` (native ICMP
-//!   echo + TCP reachability, no shell `ping`). See `host_discovery.rs`.
-//! * `PortDiscovery` runs the real bounded `TcpDiscoveryModule` (native TCP
-//!   connect scanning, one task per target with a bounded internal window,
-//!   no thread per port). See `tcp_discovery.rs`.
-//! * `ServiceProbe` runs the real bounded `ServiceProbeModule` (native
-//!   protocol handshakes — SSH/HTTP/TLS/FTP/SMTP/Redis/MySQL/PostgreSQL plus
-//!   a passive generic banner read; no authentication, no destructive
-//!   commands). See `service_probe.rs`.
-//! * `HttpProbe` runs the real bounded `WebProbeModule` (native HTTP/1.1
-//!   single exchanges, canonical URLs, bounded redirects with per-hop scope
-//!   checks, TLS evidence reuse; no crawling). See `web_probe.rs`.
-//! * Control validation remains an honest scaffold.
+//! Control scaffolds for scheduler bootstrap and tests.
 //!
 //! * [`ControlValidateModule`] (`rxscan.control.validate`): per-target
 //!   control validation. Always registered.
 //!
-//! All deeper intents (`TlsProbe`, `DnsProbe`, `Fingerprint`,
-//! `ContentDiscovery`, `Crawl`, `Fuzz`, `rxscan.udp.intent`) have NO
-//! registered module in Phase 8 and run as `Skipped` (`module unavailable`).
-//! That is intentional honesty, visible in `--explain` and runtime output.
+//! Real discovery modules (`HostDiscovery`, `TcpDiscovery`, `ServiceProbe`,
+//! `HttpProbe`, DNS, crawl, content, fuzz) live in their own files and
+//! register directly in `run.rs`; this file only carries the control
+//! scaffold plus backwards-compatible test aliases below.
 //!
 //! Every scaffold module is cooperative: it checks cancellation every
 //! millisecond and returns `Cancelled` promptly. Typical latency <5ms.

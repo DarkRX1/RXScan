@@ -3,7 +3,11 @@
 //! Each probe speaks just enough of one protocol to *identify* it — never to
 //! authenticate, enumerate, crawl, or destroy. Exact bytes sent per probe:
 //!
-//! * `ssh`: sends NOTHING (passive banner read, ≤2048B).
+//! * `ssh`: banner read (≤2048B) plus, at service level ≥ 2, one bounded
+//!   Curve25519 key-exchange handshake (client ident + KEXINIT + ECDH init,
+//!   ≤3s wall budget) to capture the server host key and algorithm lists.
+//!   No authentication, no channels, no signature verification (recorded
+//!   honestly as unverified presented key material).
 //! * `http`: `GET / HTTP/1.0` + Host/Connection/User-Agent (<160B); reads
 //!   headers ≤16KiB and body ≤16KiB; redirects observed, never followed.
 //! * `tls`: TLS ClientHello only (rustls); reads the handshake + chain
@@ -48,6 +52,10 @@ pub struct ProbeAttempt {
     pub capabilities: Vec<String>,
     /// Certificate facts (TLS-family probes only).
     pub cert: Option<CertFacts>,
+    /// SSH host-key facts (SSH probe with KEX capture only).
+    pub ssh_host_key: Option<crate::ssh::SshHostKeyFacts>,
+    /// SSH server algorithm advertisement (SSH probe with KEX capture only).
+    pub ssh_kex: Option<crate::ssh::SshKexFacts>,
     pub confidence: u8,
     pub evidence: Vec<String>,
     pub bytes_in: usize,
@@ -86,6 +94,8 @@ impl ProbeAttempt {
             banner: None,
             capabilities: Vec::new(),
             cert: None,
+            ssh_host_key: None,
+            ssh_kex: None,
             confidence: 0,
             evidence: vec![reason.into()],
             bytes_in: 0,
@@ -113,6 +123,9 @@ pub struct ProbeCtx<'a> {
     /// Hard-counted connections opened through `ProbeCtx::connect`,
     /// shared across derived contexts for exact per-service accounting.
     pub connections: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Whether the SSH probe may perform its bounded key-exchange capture
+    /// (service policy level ≥ 2). Conservative profiles keep banner-only.
+    pub ssh_kex_capture: bool,
 }
 
 impl ProbeCtx<'_> {
@@ -353,6 +366,32 @@ pub fn probe_ssh(ctx: &ProbeCtx) -> ProbeAttempt {
         crate::service::confidence::CHARACTERISTIC
     };
     attempt.evidence = vec![format!("ssh: received protocol banner SSH-{rest}")];
+    // Bounded host-key capture (service level ≥ 2 via `ssh_kex_capture`):
+    // one Curve25519 exchange on this same connection, public key only,
+    // no authentication. Best-effort: banner classification stands
+    // regardless of the outcome.
+    if ctx.ssh_kex_capture {
+        let kex_deadline = ctx
+            .deadline
+            .min(Instant::now() + crate::ssh::MAX_KEX_CAPTURE);
+        match crate::ssh::capture_host_key(&mut stream, kex_deadline, ctx.cancel) {
+            Some((host_key, kex)) => {
+                attempt.evidence.push(format!(
+                    "ssh: host key {} ({} bits) via {}; signature unverified",
+                    host_key.key_type,
+                    host_key.bits,
+                    kex.selected_kex.as_deref().unwrap_or("curve25519-sha256")
+                ));
+                attempt.ssh_host_key = Some(host_key);
+                attempt.ssh_kex = Some(kex);
+            }
+            None => {
+                attempt
+                    .evidence
+                    .push("ssh: host-key capture unavailable (no supported KEX)".to_owned());
+            }
+        }
+    }
     attempt
 }
 
@@ -719,6 +758,8 @@ pub fn probe_tls(ctx: &ProbeCtx) -> TlsProbeOutcome {
             banner: None,
             capabilities: Vec::new(),
             cert: None,
+            ssh_host_key: None,
+            ssh_kex: None,
             confidence: 0,
             evidence: vec!["tls: handshake timed out".to_owned()],
             bytes_in: 0,
@@ -736,6 +777,8 @@ pub fn probe_tls(ctx: &ProbeCtx) -> TlsProbeOutcome {
             banner: None,
             capabilities: Vec::new(),
             cert: None,
+            ssh_host_key: None,
+            ssh_kex: None,
             confidence: 0,
             evidence: vec![format!("tls: handshake failed ({other:?})")],
             bytes_in: 0,
@@ -1243,6 +1286,7 @@ pub fn probe_generic(ctx: &ProbeCtx) -> ProbeAttempt {
         deadline: ctx.deadline.min(started + budget),
         cancel: ctx.cancel,
         connections: ctx.connections.clone(),
+        ssh_kex_capture: false,
     };
     let (bytes, saw_newline, truncated) =
         read_until(&mut stream, b"\n", MAX_BANNER_BYTES, &short, started);

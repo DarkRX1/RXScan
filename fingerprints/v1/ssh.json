@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "fingerprints": [
+    {
+      "id": "ssh-dropbear",
+      "protocol": "ssh",
+      "probe": "ssh",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "dropbear",
+        "case_insensitive": true
+      },
+      "product": "Dropbear",
+      "vendor": "openbsd",
+      "confidence": 85,
+      "source": "seed-v1"
+    },
+    {
+      "id": "ssh-openssh",
+      "protocol": "ssh",
+      "probe": "ssh",
+      "matcher": {
+        "kind": "prefix",
+        "pattern": "SSH-2.0-OpenSSH",
+        "case_insensitive": false
+      },
+      "product": "OpenSSH",
+      "vendor": "openbsd",
+      "confidence": 90,
+      "source": "seed-v1",
+      "version_extractor": {
+        "type": "after_delimiter",
+        "delimiter": "OpenSSH_",
+        "max_len": 32
+      }
+    }
+  ]
+}

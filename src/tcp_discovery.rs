@@ -384,8 +384,11 @@ fn execute_port_scan(
     }
     let started_at = Timestamp::now();
     let start_instant = Instant::now();
-    let task_deadline = Instant::now()
-        .checked_add(Duration::from_millis(task.timeout_ms.max(1)))
+    // No task receives a timeout exceeding the remaining global budget:
+    // the effective deadline is the earlier of the per-task timeout and
+    // the authoritative global wall-clock deadline (Priority 1).
+    let task_deadline = context
+        .effective_deadline()
         .unwrap_or_else(|| Instant::now() + Duration::from_secs(60));
     let provenance = Provenance::new(
         TCP_DISCOVERY_MODULE_NAME,
@@ -476,8 +479,21 @@ fn execute_port_scan(
     let mut fd_peak_max = 0usize;
 
     for (ip, parent_id) in ips.iter().zip(parent_ids.iter()) {
-        if cancel.is_cancelled() {
-            return Err(ModuleError::Cancelled);
+        // Global + task cancellation both stop new work, but already
+        // collected probes are preserved as a truncated partial (P1/P9):
+        // never discard a whole scan solely because the deadline fired
+        // mid-flight.
+        if context.is_cancelled() || cancel.is_cancelled() {
+            truncated_any = true;
+            // Remaining ports for this + all unstarted addresses count as
+            // unscanned so requested/attempted accounting stays exact.
+            let remaining_ips = ips.len().saturating_sub(
+                ips.iter()
+                    .position(|candidate| candidate == ip)
+                    .unwrap_or(0),
+            );
+            unscanned_total += resolved.ports.len().saturating_mul(remaining_ips);
+            break;
         }
         if !guard.permits(&TaskScopeTarget::Ip(*ip)) {
             continue;
@@ -489,8 +505,12 @@ fn execute_port_scan(
             break;
         }
         let outcome = scanner.scan(*ip, &resolved.ports, &scan_config);
-        if outcome.cancelled || cancel.is_cancelled() {
-            return Err(ModuleError::Cancelled);
+        // Deadline/cancel mid-scan preserves partial probes as truncated
+        // (P1): the scanner returns `probes + unscanned == requested` with
+        // `truncated=true`; we emit the partial PortScanCompleted below
+        // instead of discarding it via `Cancelled`.
+        if outcome.cancelled {
+            truncated_any = true;
         }
         truncated_any |= outcome.truncated;
         unscanned_total += outcome.unscanned;
@@ -706,8 +726,11 @@ fn execute_port_scan(
                 }
             }
         }
-        if cancel.is_cancelled() {
-            return Err(ModuleError::Cancelled);
+        // Preserve partial across addresses: a cancel between addresses
+        // truncates the remainder instead of discarding scanned hosts.
+        if context.is_cancelled() || cancel.is_cancelled() {
+            truncated_any = true;
+            break;
         }
     }
 

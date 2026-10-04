@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "id": "dev-router-dnsmasq",
+      "role": "router",
+      "signals": [
+        {"kind": "service_product", "pattern": "dnsmasq", "weight": 20},
+        {"kind": "http_server", "pattern": "router", "weight": 15},
+        {"kind": "dns_name", "pattern": "router", "weight": 8}
+      ],
+      "confidence_cap": 85,
+      "source": "seed-v1"
+    },
+    {
+      "id": "dev-router-mikrotik",
+      "role": "router",
+      "signals": [
+        {"kind": "service_product", "pattern": "MikroTik", "weight": 22, "vendor_signal": true},
+        {"kind": "http_server", "pattern": "RouterOS", "weight": 18, "vendor_signal": true}
+      ],
+      "confidence_cap": 88,
+      "source": "seed-v1"
+    },
+    {
+      "id": "dev-firewall-pfsense",
+      "role": "firewall",
+      "signals": [
+        {"kind": "http_server", "pattern": "pfSense", "weight": 22, "vendor_signal": true},
+        {"kind": "service_product", "pattern": "pfSense", "weight": 18}
+      ],
+      "confidence_cap": 85,
+      "source": "seed-v1"
+    },
+    {
+      "id": "dev-switch-generic",
+      "role": "switch",
+      "signals": [
+        {"kind": "http_server", "pattern": "switch", "weight": 18},
+        {"kind": "service_product", "pattern": "snmp", "weight": 12}
+      ],
+      "confidence_cap": 75,
+      "source": "seed-v1"
+    }
+  ]
+}

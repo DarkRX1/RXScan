@@ -841,9 +841,10 @@ fn scan_ports_udp(
             queue.push_front((port, attempts));
         }
     }
-    // Pending dropped here closes all FDs (no leaks). Unattempted queue tail
-    // counts as unscanned when truncated.
-    let unscanned = queue.len();
+    // Pending dropped here closes all FDs (no leaks). Queue tail plus
+    // in-flight probes abandoned on deadline/cancel count as unscanned so
+    // `retained + unscanned` accounting stays exact (P11).
+    let unscanned = queue.len().saturating_add(pending.len());
     if unscanned > 0 {
         outcome.truncated = true;
     }

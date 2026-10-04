@@ -33,6 +33,95 @@ use crate::level::priority_for_kind;
 use crate::model::{AssetId, ScanPlanId, Timestamp};
 use crate::plan::{ScanGoal, TcpPortSelection};
 
+/// Maximum evidence-expansion hops from a seed target. A certificate SAN
+/// may propose DNS (depth+1), DNS addresses may propose host discovery,
+/// and so on — but chains stop here. Together with task/host budgets, the
+/// global deadline, scope checks, and visited-set dedup (identical task IDs
+/// collapse), this bounds recursive expansion: certificate→DNS→certificate
+/// ping-pong cannot run away.
+pub const MAX_DISCOVERY_DEPTH: u8 = 3;
+/// Per-source expansion caps per completion. Names beyond the cap stay
+/// graph-recorded observations (`contacted: false`); the count is recorded
+/// in proposal params as `truncated_expansions`.
+pub const MAX_SAN_DNS_PROPOSALS: usize = 16;
+pub const MAX_SAN_IP_PROPOSALS: usize = 16;
+pub const MAX_CNAME_FOLLOWUPS: usize = 4;
+/// Maximum discovery-path string length (bounded lineage).
+pub const MAX_DISCOVERY_PATH_LEN: usize = 256;
+
+/// Discovery lineage read from a completed task: (depth, path, seed).
+/// Seed tasks carry no lineage params and read as depth 0.
+fn parent_lineage(completed: &Task) -> (u8, String, String) {
+    let depth = completed
+        .params
+        .get("discovery_depth")
+        .and_then(|value| value.parse::<u8>().ok())
+        .unwrap_or(0);
+    let path = completed
+        .params
+        .get("discovery_path")
+        .cloned()
+        .unwrap_or_default();
+    let seed = completed
+        .params
+        .get("originating_seed")
+        .cloned()
+        .or_else(|| completed.params.get("target").cloned())
+        .unwrap_or_default();
+    (depth, path, seed)
+}
+
+/// Lineage params for one expansion hop. `hop` is a short fixed label
+/// (`cert:<8hex>`, `dns:<name>`, `host:<ip>`); the joined path is bounded,
+/// keeping the seed head and the recent tail. These params are stripped
+/// from canonical task identity (see `execution::canonical_task_id`), so
+/// the same target discovered twice shares one task ID and never duplicates
+/// work — lineage explains, identity dedups.
+fn child_lineage(
+    parent: &(u8, String, String),
+    hop: &str,
+    evidence_id: Option<&str>,
+    seed_target: &str,
+) -> BTreeMap<String, String> {
+    let (depth, path, seed) = parent;
+    let seed = if seed.is_empty() {
+        seed_target.to_owned()
+    } else {
+        seed.clone()
+    };
+    let extended = if path.is_empty() {
+        format!("seed>{hop}")
+    } else {
+        format!("{path}>{hop}")
+    };
+    let path = if extended.len() > MAX_DISCOVERY_PATH_LEN {
+        let tail_keep = MAX_DISCOVERY_PATH_LEN.saturating_sub(104);
+        let head: String = extended.chars().take(96).collect();
+        let tail: String = extended
+            .chars()
+            .rev()
+            .take(tail_keep)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
+        format!("{head}…>{tail}")
+    } else {
+        extended
+    };
+    let mut params: BTreeMap<String, String> = BTreeMap::new();
+    params.insert(
+        "discovery_depth".to_owned(),
+        (depth.saturating_add(1)).to_string(),
+    );
+    params.insert("discovery_path".to_owned(), path);
+    params.insert("originating_seed".to_owned(), seed);
+    if let Some(id) = evidence_id.filter(|id| !id.is_empty()) {
+        params.insert("parent_evidence_id".to_owned(), id.to_owned());
+    }
+    params
+}
+
 /// Deterministic V1 engine: host → TCP proposals only.
 #[derive(Clone)]
 pub struct TcpDecisionEngine {
@@ -73,13 +162,22 @@ impl TcpDecisionEngine {
 
     /// Build the deterministic per-host port task (same shape as lowering so
     /// single-host duplicates share IDs and are skipped, not rescanned).
-    fn port_task_for_host(&self, host: std::net::IpAddr, target_label: &str) -> Option<Task> {
+    /// `reason` documents the evidence rule that produced this task; it is
+    /// explanatory metadata stripped from the canonical ID, so dedup is
+    /// preserved.
+    fn port_task_for_host(
+        &self,
+        host: std::net::IpAddr,
+        target_label: &str,
+        reason: &str,
+    ) -> Option<Task> {
         let scope_target = TaskScopeTarget::Ip(host);
         if !self.scope_guard.permits(&scope_target) {
             return None;
         }
         let mut params = BTreeMap::new();
         params.insert("target".to_owned(), target_label.to_owned());
+        params.insert("reason".to_owned(), reason.to_owned());
         match &self.tcp_selection {
             TcpPortSelection::Common => {
                 params.insert("ports".to_owned(), "common".to_owned());
@@ -205,16 +303,26 @@ impl crate::execution::DecisionEngine for TcpDecisionEngine {
         };
         match state {
             HostState::Alive => self
-                .port_task_for_host(host_ip, &target)
+                .port_task_for_host(
+                    host_ip,
+                    &target,
+                    &format!("host {host_ip} concluded alive → TCP port discovery"),
+                )
                 .into_iter()
                 .collect(),
             HostState::Unknown => {
                 // Explicit operator intent wins; otherwise standard+ levels
                 // assume ICMP may be blocked and still scan.
                 if self.explicit_ports() || self.level >= 3 {
-                    self.port_task_for_host(host_ip, &target)
-                        .into_iter()
-                        .collect()
+                    self.port_task_for_host(
+                        host_ip,
+                        &target,
+                        &format!(
+                            "host {host_ip} concluded unknown (ICMP-blocked possible) → TCP port discovery"
+                        ),
+                    )
+                    .into_iter()
+                    .collect()
                 } else {
                     Vec::new()
                 }
@@ -376,6 +484,15 @@ impl ServiceDecisionEngine {
         params.insert("transport".to_owned(), "tcp".to_owned());
         params.insert("parent_asset".to_owned(), fact.port_asset_id.clone());
         params.insert("probes".to_owned(), probes.join(","));
+        params.insert(
+            "reason".to_owned(),
+            format!(
+                "open TCP port {} on {} → service identification ({})",
+                fact.port,
+                fact.address,
+                probes.join(",")
+            ),
+        );
         let governor = crate::execution::SpeedGovernor::new(self.speed, 1).ok()?;
         let provenance = crate::model::Provenance::new(
             "rxscan.decision",
@@ -438,6 +555,7 @@ pub struct Phase7Engine {
     content: ContentDecisionEngine,
     fuzz: FuzzDecisionEngine,
     dns: DnsDecisionEngine,
+    cert: CertDecisionEngine,
 }
 
 impl Phase7Engine {
@@ -545,7 +663,8 @@ impl Phase7Engine {
                 speed,
                 fuzz_budget,
             ),
-            dns: DnsDecisionEngine::new(scope_guard, plan_id, level, goal, speed),
+            dns: DnsDecisionEngine::new(scope_guard.clone(), plan_id.clone(), level, goal, speed),
+            cert: CertDecisionEngine::new(scope_guard, plan_id, level, goal, speed),
         }
     }
 }
@@ -568,6 +687,7 @@ impl crate::execution::DecisionEngine for Phase7Engine {
         .chain(self.content.follow_up_tasks(completed, output))
         .chain(self.fuzz.follow_up_tasks(completed, output))
         .chain(self.dns.follow_up_tasks(completed, output))
+        .chain(self.cert.follow_up_tasks(completed, output))
         .collect()
     }
 }
@@ -639,6 +759,10 @@ impl WebDecisionEngine {
         params.insert("port".to_owned(), port.to_string());
         params.insert("scheme".to_owned(), scheme.to_owned());
         params.insert("parent_service".to_owned(), parent_service_asset.to_owned());
+        params.insert(
+            "reason".to_owned(),
+            format!("identified {service} service on {address}:{port} → web observation"),
+        );
         let governor = crate::execution::SpeedGovernor::new(self.speed, 1).ok()?;
         let provenance = crate::model::Provenance::new(
             "rxscan.decision",
@@ -783,6 +907,10 @@ impl CrawlDecisionEngine {
             parent_endpoint,
             target_label,
             is_root,
+        );
+        params.insert(
+            "reason".to_owned(),
+            format!("confirmed web endpoint {} → crawl", url.canonical()),
         );
         if !visited.is_empty() {
             params.insert("visited".to_owned(), visited.to_owned());
@@ -1030,6 +1158,13 @@ impl BaselineDecisionEngine {
         let mut params =
             crate::baseline::baseline_task_params(url, source_endpoint, origin_baseline);
         params.insert("source".to_owned(), source.to_owned());
+        params.insert(
+            "reason".to_owned(),
+            format!(
+                "endpoint {} observed ({source}) → baseline check",
+                url.canonical()
+            ),
+        );
         let governor = crate::execution::SpeedGovernor::new(self.speed, 1).ok()?;
         let provenance = crate::model::Provenance::new(
             "rxscan.decision",
@@ -1213,6 +1348,13 @@ impl ContentDecisionEngine {
         if let Some(hash) = baseline_hashes.filter(|value| !value.is_empty()) {
             params.insert("baseline_normalized_sha256".to_owned(), hash.to_owned());
         }
+        params.insert(
+            "reason".to_owned(),
+            format!(
+                "baseline for {} → managed content discovery",
+                root.canonical()
+            ),
+        );
         let governor = crate::execution::SpeedGovernor::new(self.speed, 1).ok()?;
         let provenance = crate::model::Provenance::new(
             "rxscan.decision",
@@ -1453,7 +1595,18 @@ impl FuzzDecisionEngine {
             crate::fuzz::FUZZ_MODULE_NAME,
             provenance,
             scope_target,
-            crate::fuzz::fuzz_task_params(url, source_endpoint, param, Some(signature)),
+            {
+                let mut params =
+                    crate::fuzz::fuzz_task_params(url, source_endpoint, param, Some(signature));
+                params.insert(
+                    "reason".to_owned(),
+                    format!(
+                        "baseline signature for {} → bounded query fuzz (param {param})",
+                        url.canonical()
+                    ),
+                );
+                params
+            },
             self.scope_guard.as_ref(),
         )
         .ok()?;
@@ -1568,6 +1721,248 @@ impl crate::execution::DecisionEngine for FuzzDecisionEngine {
     }
 }
 
+/// Certificate SAN expansion: `ServiceProbe` outputs carrying TLS
+/// certificate observations propose bounded, scope-checked follow-ups —
+/// `DnsProbe` for in-scope SAN hostnames, `HostDiscovery` for in-scope SAN
+/// IP literals. TLS code only emits evidence; this engine owns follow-up
+/// generation. Out-of-scope names stay graph-recorded observations
+/// (`contacted: false`); no task is generated for them. Wildcard SANs
+/// (`*.example.com`) are never resolved directly.
+#[derive(Clone)]
+pub struct CertDecisionEngine {
+    scope_guard: Arc<dyn ScopeGuard>,
+    plan_id: ScanPlanId,
+    level: u8,
+    goal: ScanGoal,
+    speed: crate::plan::SpeedSetting,
+}
+
+impl CertDecisionEngine {
+    pub fn new(
+        scope_guard: Arc<dyn ScopeGuard>,
+        plan_id: ScanPlanId,
+        level: u8,
+        goal: ScanGoal,
+        speed: crate::plan::SpeedSetting,
+    ) -> Self {
+        Self {
+            scope_guard,
+            plan_id,
+            level: level.clamp(1, 5),
+            goal,
+            speed,
+        }
+    }
+
+    fn dns_task(
+        &self,
+        hostname: &str,
+        fingerprint: &str,
+        lineage: &BTreeMap<String, String>,
+    ) -> Option<Task> {
+        let scope_target = TaskScopeTarget::Host(hostname.to_owned());
+        if !self.scope_guard.permits(&scope_target) {
+            return None;
+        }
+        let governor = crate::execution::SpeedGovernor::new(self.speed, 1).ok()?;
+        let provenance = crate::model::Provenance::new(
+            "rxscan.decision",
+            "13.1.0",
+            self.plan_id.clone(),
+            Timestamp::now(),
+        )
+        .ok()?;
+        let mut params = BTreeMap::from([
+            ("target".to_owned(), hostname.to_owned()),
+            ("hostname".to_owned(), hostname.to_owned()),
+            (
+                "reason".to_owned(),
+                format!(
+                    "certificate {fingerprint} SAN {hostname} is within scope → DNS resolution"
+                ),
+            ),
+        ]);
+        params.extend(lineage.clone());
+        Task::new_with_params(
+            TaskKind::DnsProbe,
+            None,
+            Vec::new(),
+            None,
+            self.plan_id.clone(),
+            priority_for_kind(&TaskKind::DnsProbe),
+            governor.default_timeout(),
+            governor.default_retry_policy(),
+            "rxscan.dns",
+            provenance,
+            scope_target,
+            params,
+            self.scope_guard.as_ref(),
+        )
+        .ok()
+    }
+
+    fn host_task(
+        &self,
+        ip: IpAddr,
+        fingerprint: &str,
+        lineage: &BTreeMap<String, String>,
+        source_asset: Option<AssetId>,
+    ) -> Option<Task> {
+        let scope_target = TaskScopeTarget::Ip(ip);
+        if !self.scope_guard.permits(&scope_target) {
+            return None;
+        }
+        let governor = crate::execution::SpeedGovernor::new(self.speed, 1).ok()?;
+        let provenance = crate::model::Provenance::new(
+            "rxscan.decision",
+            "13.1.0",
+            self.plan_id.clone(),
+            Timestamp::now(),
+        )
+        .ok()?;
+        let mut params = BTreeMap::from([
+            ("target".to_owned(), ip.to_string()),
+            ("source".to_owned(), "cert-san".to_owned()),
+            (
+                "reason".to_owned(),
+                format!("certificate {fingerprint} SAN {ip} is within scope → host discovery"),
+            ),
+        ]);
+        params.extend(lineage.clone());
+        Task::new_with_params(
+            TaskKind::HostDiscovery,
+            None,
+            Vec::new(),
+            source_asset,
+            self.plan_id.clone(),
+            priority_for_kind(&TaskKind::HostDiscovery),
+            governor.default_timeout(),
+            governor.default_retry_policy(),
+            crate::host_discovery::HOST_DISCOVERY_MODULE_NAME,
+            provenance,
+            scope_target,
+            params,
+            self.scope_guard.as_ref(),
+        )
+        .ok()
+    }
+}
+
+impl crate::execution::DecisionEngine for CertDecisionEngine {
+    fn follow_up_tasks(&self, completed: &Task, output: &ModuleOutput) -> Vec<Task> {
+        if completed.kind != TaskKind::ServiceProbe || self.level == 0 {
+            return Vec::new();
+        }
+        // Workflow gating mirrors DNS expansion: Ports stops after the port
+        // scan; every other workflow may expand certificate observations.
+        if !matches!(
+            self.goal,
+            ScanGoal::Recon
+                | ScanGoal::Discover
+                | ScanGoal::Services
+                | ScanGoal::Web
+                | ScanGoal::Full
+        ) {
+            return Vec::new();
+        }
+        let (depth, path, seed) = parent_lineage(completed);
+        if depth >= MAX_DISCOVERY_DEPTH {
+            return Vec::new();
+        }
+        let parent = (depth, path, seed);
+        let evidence_id = output
+            .evidence
+            .first()
+            .map(|evidence| evidence.id.0.as_str());
+        // First pass: gather bounded candidate sets (names + IPs) so
+        // truncation counts are known BEFORE task construction (params
+        // must be final at construction; post-hoc mutation would
+        // invalidate canonical task IDs).
+        let mut dns_names: Vec<(String, String)> = Vec::new();
+        let mut ip_addrs: Vec<(IpAddr, String, Option<AssetId>)> = Vec::new();
+        let mut skipped = 0usize;
+        for event in &output.events {
+            if !matches!(event.kind, crate::model::EventKind::TlsObserved) {
+                continue;
+            }
+            let data = &event.details.data;
+            let fingerprint = data
+                .get("fingerprint_sha256")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown-cert");
+            let short = fingerprint.chars().take(12).collect::<String>();
+            if let Some(names) = data.get("san_dns").and_then(serde_json::Value::as_array) {
+                for name in names.iter().filter_map(serde_json::Value::as_str) {
+                    let normalized = name.trim().trim_end_matches('.').to_ascii_lowercase();
+                    if normalized.is_empty()
+                        || normalized.starts_with("*.")
+                        || dns_names.iter().any(|(known, _)| *known == normalized)
+                    {
+                        continue;
+                    }
+                    if crate::dns::canonical_hostname(&normalized).is_err() {
+                        continue;
+                    }
+                    if dns_names.len() >= MAX_SAN_DNS_PROPOSALS {
+                        skipped += 1;
+                        continue;
+                    }
+                    dns_names.push((normalized, short.clone()));
+                }
+            }
+            if let Some(addresses) = data.get("san_ip").and_then(serde_json::Value::as_array) {
+                for text in addresses.iter().filter_map(serde_json::Value::as_str) {
+                    let Ok(ip) = text.trim().parse::<IpAddr>() else {
+                        continue;
+                    };
+                    if ip_addrs.iter().any(|(known, _, _)| *known == ip) {
+                        continue;
+                    }
+                    if ip_addrs.len() >= MAX_SAN_IP_PROPOSALS {
+                        skipped += 1;
+                        continue;
+                    }
+                    ip_addrs.push((ip, short.clone(), event.asset_id.clone()));
+                }
+            }
+        }
+        if parent.0.saturating_add(1) > MAX_DISCOVERY_DEPTH {
+            return Vec::new();
+        }
+        let seed_target = completed.params.get("target").cloned().unwrap_or_default();
+        let mut out = Vec::new();
+        for (hostname, fingerprint) in &dns_names {
+            let mut lineage = child_lineage(
+                &parent,
+                &format!("cert:{fingerprint}"),
+                evidence_id,
+                &seed_target,
+            );
+            if skipped > 0 {
+                lineage.insert("truncated_expansions".to_owned(), skipped.to_string());
+            }
+            if let Some(task) = self.dns_task(hostname, fingerprint, &lineage) {
+                out.push(task);
+            }
+        }
+        for (ip, fingerprint, source_asset) in &ip_addrs {
+            let mut lineage = child_lineage(
+                &parent,
+                &format!("cert:{fingerprint}"),
+                evidence_id,
+                &seed_target,
+            );
+            if skipped > 0 {
+                lineage.insert("truncated_expansions".to_owned(), skipped.to_string());
+            }
+            if let Some(task) = self.host_task(*ip, fingerprint, &lineage, source_asset.clone()) {
+                out.push(task);
+            }
+        }
+        out
+    }
+}
+
 #[derive(Clone)]
 pub struct DnsDecisionEngine {
     scope_guard: Arc<dyn ScopeGuard>,
@@ -1594,7 +1989,12 @@ impl DnsDecisionEngine {
         }
     }
 
-    fn host_task(&self, ip: IpAddr, source_asset: Option<AssetId>) -> Option<Task> {
+    fn host_task(
+        &self,
+        ip: IpAddr,
+        source_asset: Option<AssetId>,
+        lineage: &BTreeMap<String, String>,
+    ) -> Option<Task> {
         let scope_target = TaskScopeTarget::Ip(ip);
         if !self.scope_guard.permits(&scope_target) {
             return None;
@@ -1607,6 +2007,15 @@ impl DnsDecisionEngine {
             Timestamp::now(),
         )
         .ok()?;
+        let mut params = BTreeMap::from([
+            ("target".to_owned(), ip.to_string()),
+            ("source".to_owned(), "dns".to_owned()),
+            (
+                "reason".to_owned(),
+                format!("DNS A/AAAA observation → host discovery for {ip}"),
+            ),
+        ]);
+        params.extend(lineage.clone());
         Task::new_with_params(
             TaskKind::HostDiscovery,
             None,
@@ -1619,10 +2028,52 @@ impl DnsDecisionEngine {
             crate::host_discovery::HOST_DISCOVERY_MODULE_NAME,
             provenance,
             scope_target,
-            BTreeMap::from([
-                ("target".to_owned(), ip.to_string()),
-                ("source".to_owned(), "dns".to_owned()),
-            ]),
+            params,
+            self.scope_guard.as_ref(),
+        )
+        .ok()
+    }
+
+    fn dns_task(
+        &self,
+        hostname: &str,
+        via: &str,
+        lineage: &BTreeMap<String, String>,
+    ) -> Option<Task> {
+        let scope_target = TaskScopeTarget::Host(hostname.to_owned());
+        if !self.scope_guard.permits(&scope_target) {
+            return None;
+        }
+        let governor = crate::execution::SpeedGovernor::new(self.speed, 1).ok()?;
+        let provenance = crate::model::Provenance::new(
+            "rxscan.decision",
+            "13.0.0",
+            self.plan_id.clone(),
+            Timestamp::now(),
+        )
+        .ok()?;
+        let mut params = BTreeMap::from([
+            ("target".to_owned(), hostname.to_owned()),
+            ("hostname".to_owned(), hostname.to_owned()),
+            (
+                "reason".to_owned(),
+                format!("DNS {via} alias → DNS resolution for {hostname}"),
+            ),
+        ]);
+        params.extend(lineage.clone());
+        Task::new_with_params(
+            TaskKind::DnsProbe,
+            None,
+            Vec::new(),
+            None,
+            self.plan_id.clone(),
+            priority_for_kind(&TaskKind::DnsProbe),
+            governor.default_timeout(),
+            governor.default_retry_policy(),
+            "rxscan.dns",
+            provenance,
+            scope_target,
+            params,
             self.scope_guard.as_ref(),
         )
         .ok()
@@ -1648,6 +2099,14 @@ impl crate::execution::DecisionEngine for DnsDecisionEngine {
         }
         let mut out = Vec::new();
         let mut seen = BTreeSet::new();
+        let mut seen_names = BTreeSet::new();
+        let mut cname_count = 0usize;
+        let (depth, path, seed) = parent_lineage(completed);
+        if depth >= MAX_DISCOVERY_DEPTH {
+            return Vec::new();
+        }
+        let parent = (depth, path, seed);
+        let seed_target = completed.params.get("target").cloned().unwrap_or_default();
         for event in &output.events {
             if !matches!(event.kind, crate::model::EventKind::DnsRecordObserved) {
                 continue;
@@ -1658,7 +2117,7 @@ impl crate::execution::DecisionEngine for DnsDecisionEngine {
                 .get("record_type")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("");
-            if record_type != "A" && record_type != "AAAA" {
+            if record_type != "A" && record_type != "AAAA" && record_type != "CNAME" {
                 continue;
             }
             let Some(value) = event
@@ -1669,13 +2128,44 @@ impl crate::execution::DecisionEngine for DnsDecisionEngine {
             else {
                 continue;
             };
+            if record_type == "CNAME" {
+                // Alias chasing stays bounded: one DNS task per distinct
+                // alias target, capped per completion, depth-gated.
+                let alias = value.trim().trim_end_matches('.').to_ascii_lowercase();
+                if alias.is_empty() || !seen_names.insert(alias.clone()) {
+                    continue;
+                }
+                if crate::dns::canonical_hostname(&alias).is_err() {
+                    continue;
+                }
+                if cname_count >= MAX_CNAME_FOLLOWUPS {
+                    continue;
+                }
+                cname_count += 1;
+                let lineage = child_lineage(
+                    &parent,
+                    &format!("dns:{record_type}"),
+                    output.evidence.first().map(|e| e.id.0.as_str()),
+                    &seed_target,
+                );
+                if let Some(task) = self.dns_task(&alias, record_type, &lineage) {
+                    out.push(task);
+                }
+                continue;
+            }
             let Ok(ip) = value.parse::<IpAddr>() else {
                 continue;
             };
             if !seen.insert(ip) {
                 continue;
             }
-            if let Some(task) = self.host_task(ip, event.asset_id.clone()) {
+            let lineage = child_lineage(
+                &parent,
+                &format!("dns:{record_type}"),
+                output.evidence.first().map(|e| e.id.0.as_str()),
+                &seed_target,
+            );
+            if let Some(task) = self.host_task(ip, event.asset_id.clone(), &lineage) {
                 out.push(task);
             }
             if out.len() >= 16 {
@@ -1785,5 +2275,348 @@ mod tests {
             crate::plan::SpeedSetting::default(),
         );
         assert_eq!(explicit.follow_up_tasks(&task, &unknown).len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod lineage_tests {
+    use super::*;
+    use crate::execution::{DecisionEngine, PolicyScopeGuard, RetryPolicy};
+    use crate::model::{BoundedDetails, Event, Provenance};
+    use crate::scope::ScopePolicy;
+    use crate::target::TargetSpec;
+    use std::time::Duration;
+
+    fn test_plan_id() -> ScanPlanId {
+        ScanPlanId("plan_test".to_owned())
+    }
+
+    struct AllowAll;
+    impl ScopeGuard for AllowAll {
+        fn permits(&self, _target: &TaskScopeTarget) -> bool {
+            true
+        }
+    }
+
+    fn scoped_guard() -> Arc<PolicyScopeGuard> {
+        let lan = TargetSpec::parse("127.0.0.0/8").unwrap();
+        let name = TargetSpec::parse("example.test").unwrap();
+        let policy = ScopePolicy::from_targets(&[lan, name], &[], &[]).unwrap();
+        Arc::new(PolicyScopeGuard::new(policy))
+    }
+
+    fn service_task_with_params(params: BTreeMap<String, String>) -> Task {
+        let provenance =
+            Provenance::new("rxscan.service", "7.0.0", test_plan_id(), Timestamp(1)).unwrap();
+        Task::new_with_params(
+            TaskKind::ServiceProbe,
+            None,
+            Vec::new(),
+            None,
+            test_plan_id(),
+            50,
+            Duration::from_millis(1000),
+            RetryPolicy::default(),
+            "rxscan.service",
+            provenance,
+            TaskScopeTarget::Ip("127.0.0.1".parse().unwrap()),
+            params,
+            &AllowAll,
+        )
+        .unwrap()
+    }
+
+    fn tls_output(san_dns: Vec<&str>, san_ip: Vec<&str>, fingerprint: &str) -> ModuleOutput {
+        let provenance =
+            Provenance::new("rxscan.service", "7.0.0", test_plan_id(), Timestamp(1)).unwrap();
+        let event = Event::new(
+            crate::model::EventKind::TlsObserved,
+            None,
+            BoundedDetails::from_value(
+                serde_json::json!({
+                    "target": "127.0.0.1",
+                    "fingerprint_sha256": fingerprint,
+                    "san_dns": san_dns,
+                    "san_ip": san_ip,
+                }),
+                4096,
+            )
+            .unwrap(),
+            provenance,
+        )
+        .unwrap();
+        ModuleOutput {
+            events: vec![event],
+            evidence: Vec::new(),
+            findings: Vec::new(),
+            assets: Vec::new(),
+        }
+    }
+
+    fn dns_task_with_params(params: BTreeMap<String, String>) -> Task {
+        let provenance =
+            Provenance::new("rxscan.dns", "13.0.0", test_plan_id(), Timestamp(1)).unwrap();
+        Task::new_with_params(
+            TaskKind::DnsProbe,
+            None,
+            Vec::new(),
+            None,
+            test_plan_id(),
+            50,
+            Duration::from_millis(1000),
+            RetryPolicy::default(),
+            "rxscan.dns",
+            provenance,
+            TaskScopeTarget::Host("example.test".to_owned()),
+            params,
+            &AllowAll,
+        )
+        .unwrap()
+    }
+
+    fn dns_output(records: Vec<(&str, &str)>) -> ModuleOutput {
+        let provenance =
+            Provenance::new("rxscan.dns", "13.0.0", test_plan_id(), Timestamp(1)).unwrap();
+        let events = records
+            .into_iter()
+            .map(|(record_type, value)| {
+                Event::new(
+                    crate::model::EventKind::DnsRecordObserved,
+                    None,
+                    BoundedDetails::from_value(
+                        serde_json::json!({
+                            "name": "example.test",
+                            "record_type": record_type,
+                            "value": value,
+                        }),
+                        4096,
+                    )
+                    .unwrap(),
+                    provenance.clone(),
+                )
+                .unwrap()
+            })
+            .collect();
+        ModuleOutput {
+            events,
+            evidence: Vec::new(),
+            findings: Vec::new(),
+            assets: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn cert_san_proposes_dns_for_in_scope_names_only() {
+        let guard = scoped_guard();
+        let engine = CertDecisionEngine::new(
+            guard.clone(),
+            test_plan_id(),
+            3,
+            ScanGoal::Recon,
+            crate::plan::SpeedSetting::default(),
+        );
+        let task = service_task_with_params(BTreeMap::from([(
+            "target".to_owned(),
+            "127.0.0.1".to_owned(),
+        )]));
+        let output = tls_output(
+            vec![
+                "example.test",
+                "evil.example.com",
+                "*.wild.example.test",
+                "!!!",
+            ],
+            vec![],
+            &"ab".repeat(32),
+        );
+        let proposals = engine.follow_up_tasks(&task, &output);
+        // example.test is in scope; evil.example.com is not; wildcard and
+        // malformed names never become tasks.
+        assert_eq!(proposals.len(), 1, "got {proposals:?}");
+        let proposal = &proposals[0];
+        assert_eq!(proposal.kind, TaskKind::DnsProbe);
+        assert_eq!(
+            proposal.params.get("hostname").map(String::as_str),
+            Some("example.test")
+        );
+        assert_eq!(
+            proposal.params.get("discovery_depth").map(String::as_str),
+            Some("1")
+        );
+        assert!(
+            proposal
+                .params
+                .get("reason")
+                .is_some_and(|reason| reason.contains("within scope → DNS resolution"))
+        );
+        assert!(proposal.params.contains_key("discovery_path"));
+    }
+
+    #[test]
+    fn cert_san_ip_proposes_host_discovery() {
+        let guard = scoped_guard();
+        let engine = CertDecisionEngine::new(
+            guard.clone(),
+            test_plan_id(),
+            3,
+            ScanGoal::Recon,
+            crate::plan::SpeedSetting::default(),
+        );
+        let task = service_task_with_params(BTreeMap::from([(
+            "target".to_owned(),
+            "127.0.0.1".to_owned(),
+        )]));
+        let output = tls_output(vec![], vec!["127.0.0.2", "10.9.9.9"], &"cd".repeat(32));
+        let proposals = engine.follow_up_tasks(&task, &output);
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals[0].kind, TaskKind::HostDiscovery);
+        assert_eq!(
+            proposals[0].params.get("source").map(String::as_str),
+            Some("cert-san")
+        );
+    }
+
+    #[test]
+    fn cert_expansion_stops_at_max_depth_and_ports_goal() {
+        let guard = scoped_guard();
+        let engine = CertDecisionEngine::new(
+            guard.clone(),
+            test_plan_id(),
+            3,
+            ScanGoal::Recon,
+            crate::plan::SpeedSetting::default(),
+        );
+        let deep = service_task_with_params(BTreeMap::from([
+            ("target".to_owned(), "127.0.0.1".to_owned()),
+            (
+                "discovery_depth".to_owned(),
+                MAX_DISCOVERY_DEPTH.to_string(),
+            ),
+        ]));
+        let output = tls_output(vec!["example.test"], vec![], &"ab".repeat(32));
+        assert!(engine.follow_up_tasks(&deep, &output).is_empty());
+        // Ports workflow never expands certificates.
+        let ports_engine = CertDecisionEngine::new(
+            guard,
+            test_plan_id(),
+            3,
+            ScanGoal::Ports,
+            crate::plan::SpeedSetting::default(),
+        );
+        let shallow = service_task_with_params(BTreeMap::from([(
+            "target".to_owned(),
+            "127.0.0.1".to_owned(),
+        )]));
+        assert!(ports_engine.follow_up_tasks(&shallow, &output).is_empty());
+    }
+
+    #[test]
+    fn dns_cname_chains_with_depth_cap() {
+        let guard = Arc::new(AllowAll);
+        let engine = DnsDecisionEngine::new(
+            guard.clone(),
+            test_plan_id(),
+            3,
+            ScanGoal::Recon,
+            crate::plan::SpeedSetting::default(),
+        );
+        let task = dns_task_with_params(BTreeMap::from([
+            ("target".to_owned(), "example.test".to_owned()),
+            ("hostname".to_owned(), "example.test".to_owned()),
+        ]));
+        let output = dns_output(vec![("CNAME", "alias.example.test")]);
+        let proposals = engine.follow_up_tasks(&task, &output);
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals[0].kind, TaskKind::DnsProbe);
+        assert_eq!(
+            proposals[0].params.get("hostname").map(String::as_str),
+            Some("alias.example.test")
+        );
+        assert_eq!(
+            proposals[0]
+                .params
+                .get("discovery_depth")
+                .map(String::as_str),
+            Some("1")
+        );
+        // A records still propose host discovery with lineage.
+        let output = dns_output(vec![("A", "127.0.0.2")]);
+        let proposals = engine.follow_up_tasks(&task, &output);
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals[0].kind, TaskKind::HostDiscovery);
+        assert_eq!(
+            proposals[0]
+                .params
+                .get("discovery_depth")
+                .map(String::as_str),
+            Some("1")
+        );
+        // At max depth nothing further is proposed.
+        let deep = dns_task_with_params(BTreeMap::from([
+            ("target".to_owned(), "example.test".to_owned()),
+            ("hostname".to_owned(), "example.test".to_owned()),
+            (
+                "discovery_depth".to_owned(),
+                MAX_DISCOVERY_DEPTH.to_string(),
+            ),
+        ]));
+        assert!(engine.follow_up_tasks(&deep, &output).is_empty());
+    }
+
+    #[test]
+    fn lineage_params_do_not_change_task_identity() {
+        let guard = Arc::new(AllowAll);
+        let provenance =
+            Provenance::new("rxscan.dns", "13.0.0", test_plan_id(), Timestamp(1)).unwrap();
+        let base = || {
+            BTreeMap::from([
+                ("target".to_owned(), "example.test".to_owned()),
+                ("hostname".to_owned(), "example.test".to_owned()),
+            ])
+        };
+        let plain = Task::new_with_params(
+            TaskKind::DnsProbe,
+            None,
+            Vec::new(),
+            None,
+            test_plan_id(),
+            50,
+            Duration::from_millis(1000),
+            RetryPolicy::default(),
+            "rxscan.dns",
+            provenance.clone(),
+            TaskScopeTarget::Host("example.test".to_owned()),
+            base(),
+            guard.as_ref(),
+        )
+        .unwrap();
+        let mut lined = base();
+        lined.insert("discovery_depth".to_owned(), "2".to_owned());
+        lined.insert(
+            "discovery_path".to_owned(),
+            "seed>cert:ab12>dns:x".to_owned(),
+        );
+        lined.insert("originating_seed".to_owned(), "127.0.0.1".to_owned());
+        lined.insert("parent_evidence_id".to_owned(), "ev_1".to_owned());
+        lined.insert("truncated_expansions".to_owned(), "3".to_owned());
+        lined.insert("reason".to_owned(), "why".to_owned());
+        let with_lineage = Task::new_with_params(
+            TaskKind::DnsProbe,
+            None,
+            Vec::new(),
+            None,
+            test_plan_id(),
+            50,
+            Duration::from_millis(1000),
+            RetryPolicy::default(),
+            "rxscan.dns",
+            provenance,
+            TaskScopeTarget::Host("example.test".to_owned()),
+            lined,
+            guard.as_ref(),
+        )
+        .unwrap();
+        assert_eq!(plain.id, with_lineage.id);
+        assert!(with_lineage.identity_is_valid());
     }
 }

@@ -96,6 +96,10 @@ fn main() {
         run_project(&args);
         return;
     }
+    if args.get(1).is_some_and(|arg| arg == "project-db") {
+        run_project_db(&args);
+        return;
+    }
     let cli = Cli::parse();
     let explain_only = cli.explain;
     if explain_only {
@@ -511,6 +515,152 @@ fn run_project(args: &[String]) {
         }
         _ => {
             err!("rxscan project: unknown command {command}");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// SQLite project graph commands (`--project-db` import target).
+///
+/// Usage:
+/// `rxscan project-db scans --db <path> [--json]`
+/// `rxscan project-db summary --db <path> [--json]`
+/// `rxscan project-db changes --db <path> <scan> [--json] [--limit N]`
+/// `rxscan project-db diff --db <path> <old-scan> <new-scan> [--json] [--limit N]`
+///
+/// Read-only except `diff`, which persists computed changes for the scan
+/// pair. Never touches the network; scope already enforced at scan time.
+fn run_project_db(args: &[String]) {
+    use rxscan::project_db::ProjectDb;
+    let usage = "rxscan project-db scans|summary|changes|diff --db <path> ...";
+    let command = args.get(2).map(String::as_str).unwrap_or("--help");
+    if command == "--help" || command == "-h" {
+        out_line!(
+            "rxscan project-db scans --db <path> [--json]\nrxscan project-db summary --db <path> [--json]\nrxscan project-db changes --db <path> <scan> [--json] [--limit N]\nrxscan project-db diff --db <path> <old-scan> <new-scan> [--json] [--limit N]"
+        );
+        return;
+    }
+    // Minimal flag parsing: --db <path>, --json, --limit N, positionals.
+    let mut db_path: Option<&str> = None;
+    let mut json = false;
+    let mut limit = 100usize;
+    let mut positionals: Vec<&str> = Vec::new();
+    let mut iter = args[3..].iter().peekable();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--db" => {
+                db_path = iter.next().map(String::as_str);
+            }
+            "--json" => json = true,
+            "--limit" => {
+                limit = iter
+                    .next()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(100)
+                    .min(10_000);
+            }
+            other => positionals.push(other),
+        }
+    }
+    let Some(db_path) = db_path else {
+        err!("rxscan project-db {command}: missing --db <path> ({usage})");
+        std::process::exit(2);
+    };
+    let db = match ProjectDb::open(std::path::Path::new(db_path)) {
+        Ok(db) => db,
+        Err(error) => {
+            err!("rxscan project-db {command}: {error}");
+            std::process::exit(1);
+        }
+    };
+    match command {
+        "scans" => {
+            let scans = db.scan_ids().unwrap_or_default();
+            if json {
+                out_line!("{}", serde_json::to_string_pretty(&scans).unwrap());
+            } else if scans.is_empty() {
+                out_line!("no scans imported");
+            } else {
+                for scan in scans {
+                    out_line!("{}", scan);
+                }
+            }
+        }
+        "summary" => {
+            let scans = db.scan_ids().unwrap_or_default();
+            if json {
+                out_line!(
+                    "{}",
+                    serde_json::json!({
+                        "scans": scans.len(),
+                        "scan_ids": scans,
+                    })
+                );
+            } else {
+                out_line!("project scans: {}", scans.len());
+                for scan in scans {
+                    out_line!("  {scan}");
+                }
+            }
+        }
+        "changes" => {
+            let Some(scan) = positionals.first() else {
+                err!(
+                    "rxscan project-db changes: usage: rxscan project-db changes --db <path> <scan> [--json] [--limit N]"
+                );
+                std::process::exit(2);
+            };
+            let stored = db.changes_since(scan, limit).unwrap_or_default();
+            if json {
+                out_line!("{}", serde_json::to_string_pretty(&stored).unwrap());
+            } else if stored.is_empty() {
+                out_line!("no recorded changes for {scan}");
+            } else {
+                let changes: Vec<rxscan::project_db::GraphChange> = stored
+                    .into_iter()
+                    .map(|record| rxscan::project_db::GraphChange {
+                        change_type: rxscan::project_db::ChangeType::parse(&record.change_type)
+                            .unwrap_or(rxscan::project_db::ChangeType::Changed),
+                        entity_id: record.entity_id,
+                        old_value: record.old_value,
+                        new_value: record.new_value,
+                        confidence: record.confidence,
+                        evidence: record.evidence,
+                    })
+                    .collect();
+                out_line!("{}", rxscan::project_db::human_changes_summary(&changes));
+            }
+        }
+        "diff" => {
+            if positionals.len() < 2 {
+                err!(
+                    "rxscan project-db diff: usage: rxscan project-db diff --db <path> <old-scan> <new-scan> [--json] [--limit N]"
+                );
+                std::process::exit(2);
+            }
+            let (old_scan, new_scan) = (positionals[0], positionals[1]);
+            let changes = match db.diff_scan_runs(old_scan, new_scan) {
+                Ok(changes) => changes,
+                Err(error) => {
+                    err!("rxscan project-db diff: {error}");
+                    std::process::exit(1);
+                }
+            };
+            let changes: Vec<_> = changes.into_iter().take(limit).collect();
+            // Persist for later `changes` queries (same transaction batch).
+            let mut db = db;
+            if let Err(error) = db.record_changes(new_scan, old_scan, &changes) {
+                err!("rxscan project-db diff: {error}");
+                std::process::exit(1);
+            }
+            if json {
+                out_line!("{}", serde_json::to_string_pretty(&changes).unwrap());
+            } else {
+                out_line!("{}", rxscan::project_db::human_changes_summary(&changes));
+            }
+        }
+        _ => {
+            err!("rxscan project-db: unknown command {command} ({usage})");
             std::process::exit(2);
         }
     }

@@ -881,6 +881,7 @@ pub fn kind_bucket(kind: &AssetKind) -> &'static str {
         AssetKind::Service => "service",
         AssetKind::Url | AssetKind::Endpoint => "endpoint",
         AssetKind::Certificate => "certificate",
+        AssetKind::SshHostKey => "ssh_host_key",
         AssetKind::Technology => "technology",
         AssetKind::Other => "other",
     }

@@ -574,8 +574,12 @@ fn scan_ports_nonblocking(ip: IpAddr, ports: &[u16], config: &ScanConfig) -> Sca
         }
     }
     // Pending dropped here closes all FDs (no leaks). Unattempted queue tail
-    // counts as unscanned when truncated.
-    let unscanned = queue.len();
+    // plus in-flight probes abandoned on deadline/cancel count as unscanned
+    // so `probes.len() + unscanned == requested` always holds (P11). Pending
+    // probes had socket operations but no conclusion; reporting them as
+    // unscanned (never attempted to completion) keeps `attempted =
+    // requested - unscanned` exact.
+    let unscanned = queue.len().saturating_add(pending.len());
     if unscanned > 0 {
         truncated = true;
     }

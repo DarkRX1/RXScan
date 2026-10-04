@@ -205,8 +205,9 @@ fn execute_web_probe(
     }
     let started_at = Timestamp::now();
     let start_instant = Instant::now();
-    let task_deadline = Instant::now()
-        .checked_add(Duration::from_millis(task.timeout_ms.max(1)))
+    // Clamped to the remaining global budget (Priority 1).
+    let task_deadline = context
+        .effective_deadline()
         .unwrap_or_else(|| Instant::now() + Duration::from_secs(60));
     let provenance = Provenance::new(
         WEB_MODULE_NAME,
@@ -882,6 +883,8 @@ fn fetch_single(
                     "version": observation.negotiated_version,
                     "cipher": observation.cipher_suite,
                     "chain_len": observation.peer_certs_der.len(),
+                    "alpn": observation.alpn,
+                    "sni": observation.sni,
                     "latency_ms": observation.latency.as_millis() as u64,
                 })),
                 cert,

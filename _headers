@@ -1,0 +1,29 @@
+# Netlify response headers for DarkRX.dev (static root publish).
+#
+# Single source of truth for response headers. Do NOT duplicate these in a
+# netlify.toml [[headers]] block — Netlify would send both and create
+# duplicate/conflicting policies.
+#
+# Audit notes (Wapiti production scan):
+# - No header configuration existed before this file, so all three Wapiti
+#   findings (CSP script-src, X-Frame-Options, X-Content-Type-Options) were
+#   genuine missing-header findings, not scanner false positives.
+# - This is a static site (index.html + css/ + js/, hash routing). There is no
+#   Next.js runtime, so no 'unsafe-inline' / 'unsafe-eval' script allowance is
+#   required: all JS is same-origin files, all handlers use addEventListener.
+#   script-src stays 'self' only — the scanner finding is fully resolved.
+# - style-src keeps 'unsafe-inline' ONLY for stylesheets: app.js sets inline
+#   `style="..."` attributes on generated markup and the page loads Google
+#   Fonts CSS. Inline *scripts* remain blocked. Wapiti flags script-src, so a
+#   style-src allowance does not re-trigger it.
+# - frame-ancestors 'none' + X-Frame-Options DENY are redundant by design:
+#   the CSP directive covers modern browsers, the legacy header covers older
+#   ones. Both say DENY/none so they cannot conflict.
+
+/*
+  X-Frame-Options: DENY
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()
+  Cross-Origin-Opener-Policy: same-origin
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; upgrade-insecure-requests

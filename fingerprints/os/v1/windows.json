@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "id": "os-windows",
+      "family": "Windows",
+      "features": [
+        {"source": "ssh_banner", "pattern": "Windows", "weight": 22},
+        {"source": "http_server", "pattern": "Win32", "weight": 14},
+        {"source": "http_server", "pattern": "Microsoft", "weight": 12}
+      ],
+      "confidence_cap": 80,
+      "source": "seed-v1"
+    },
+    {
+      "id": "os-macos",
+      "family": "macOS",
+      "features": [
+        {"source": "ssh_banner", "pattern": "Darwin", "weight": 22},
+        {"source": "banner_token", "pattern": "macOS", "weight": 12}
+      ],
+      "confidence_cap": 80,
+      "source": "seed-v1"
+    }
+  ]
+}

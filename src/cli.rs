@@ -118,6 +118,12 @@ pub struct Cli {
     #[arg(long, value_name = "PATH")]
     pub resume: Option<std::path::PathBuf>,
 
+    /// Import this scan's correlation graph into a persistent SQLite
+    /// project database (created/migrated as needed). One-shot scans never
+    /// require it; JSONL streaming stays available either way.
+    #[arg(long, value_name = "PATH")]
+    pub project_db: Option<std::path::PathBuf>,
+
     /// Output format. Only `jsonl` is supported for scan streams.
     #[arg(long, value_name = "FORMAT")]
     pub format: Option<String>,

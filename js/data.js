@@ -35,11 +35,27 @@ window.DARKRX = {
       score: "Technical foundation used as supporting evidence — not the public headline.",
     },
   ],
+  // Professional certifications. Data-driven: add future certificates by
+  // appending { name, issuer, date, duration, certId, pdf } objects.
+  // `pdf` points at the locally hosted certificate file under /certificates/.
+  // Only fields present on the object are rendered (see js/app.js).
   certs: [
-    { name: "Self-directed cybersecurity fundamentals", issuer: "Independent / lab work" },
-    { name: "Detection engineering practice", issuer: "Wazuh · Sysmon · Sigma" },
-    { name: "Adversary simulation drills", issuer: "ATT&CK-mapped lab ops" },
-    { name: "Web & API authorization testing", issuer: "Research notes" },
+    {
+      name: "AI Security Learning Path",
+      issuer: "TryHackMe",
+      date: "25 September 2026",
+      duration: "19 hours 15 minutes",
+      certId: "THM-Z75DRLCHFD",
+      pdf: "certificates/THM-Z75DRLCHFD.pdf",
+    },
+    {
+      name: "Pre Security Learning Path",
+      issuer: "TryHackMe",
+      date: "25 September 2026",
+      duration: "19 hours 10 minutes",
+      certId: "THM-QI7IJX1UOW",
+      pdf: "certificates/THM-QI7IJX1UOW.pdf",
+    },
   ],
   pursuing: ["eJPT-style offensive validation", "Sigma correlation depth", "AD detection coverage"],
   experience: [

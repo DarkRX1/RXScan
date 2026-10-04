@@ -88,6 +88,10 @@ impl ServicePolicy {
 pub struct ServiceProbeModule {
     policy: ServicePolicy,
     scope_guard: Arc<dyn ScopeGuard>,
+    /// Compiled external fingerprint database, loaded ONCE per scan in
+    /// `run.rs` and shared across tasks. `None` keeps built-in-only
+    /// behavior (unit tests, minimal builds).
+    fingerprint_db: Arc<crate::fingerprints::FingerprintDb>,
 }
 
 impl ServiceProbeModule {
@@ -95,6 +99,19 @@ impl ServiceProbeModule {
         Self {
             policy,
             scope_guard,
+            fingerprint_db: Arc::new(crate::fingerprints::FingerprintDb::empty()),
+        }
+    }
+
+    pub fn with_fingerprint_db(
+        policy: ServicePolicy,
+        scope_guard: Arc<dyn ScopeGuard>,
+        fingerprint_db: Arc<crate::fingerprints::FingerprintDb>,
+    ) -> Self {
+        Self {
+            policy,
+            scope_guard,
+            fingerprint_db,
         }
     }
 
@@ -111,7 +128,10 @@ impl Module for ServiceProbeModule {
     fn execute(&self, context: ModuleContext) -> ModuleFuture {
         let policy = self.policy.clone();
         let guard = self.scope_guard.clone();
-        Box::pin(async move { execute_service_probe(&policy, guard.as_ref(), context) })
+        let fingerprint_db = self.fingerprint_db.clone();
+        Box::pin(
+            async move { execute_service_probe(&policy, guard.as_ref(), &fingerprint_db, context) },
+        )
     }
 }
 
@@ -206,6 +226,7 @@ fn parse_service_target(
 fn execute_service_probe(
     policy: &ServicePolicy,
     guard: &dyn ScopeGuard,
+    fingerprint_db: &crate::fingerprints::FingerprintDb,
     context: ModuleContext,
 ) -> Result<ModuleOutput, ModuleError> {
     let task = context.task.clone();
@@ -221,8 +242,9 @@ fn execute_service_probe(
     }
     let started_at = Timestamp::now();
     let start_instant = Instant::now();
-    let task_deadline = Instant::now()
-        .checked_add(Duration::from_millis(task.timeout_ms.max(1)))
+    // Clamped to the remaining global budget (Priority 1).
+    let task_deadline = context
+        .effective_deadline()
         .unwrap_or_else(|| Instant::now() + Duration::from_secs(60));
     let provenance = Provenance::new(
         SERVICE_MODULE_NAME,
@@ -354,6 +376,7 @@ fn execute_service_probe(
         deadline: task_deadline,
         cancel: &cancel,
         connections: connections.clone(),
+        ssh_kex_capture: policy.level >= 2,
     };
     if classified.is_none() {
         // Deferred speculative actives for Phase B, in plan order.
@@ -493,6 +516,7 @@ fn execute_service_probe(
             task_deadline,
             &cancel,
             connections.clone(),
+            policy.level >= 2,
         );
         // Step 1: materialize. TLS sessions stay live for a possible
         // composition; everything else becomes a plain attempt record.
@@ -612,13 +636,15 @@ fn execute_service_probe(
                 replay[index].probe_id == "tls" && replay[index].tls_session.is_some();
             if is_tls_winner {
                 let item = &mut replay[index];
-                let (session, observation, _) = item.tls_session.as_mut().unwrap();
+                let (session, observation, leaf_der) = item.tls_session.as_mut().unwrap();
                 if let Some(facts) = cert_facts.clone() {
                     emit_cert_records(
                         &mut assets,
                         &mut events,
                         &mut evidence_items,
                         &facts,
+                        leaf_der.as_deref(),
+                        observation,
                         &target,
                         &provenance,
                     )?;
@@ -718,6 +744,7 @@ fn execute_service_probe(
         truncated,
         matched_by,
         unknown_fingerprint,
+        fingerprint_db,
         connections_opened,
         probes_executed,
         bytes_written,
@@ -803,6 +830,7 @@ fn run_wave(
     task_deadline: Instant,
     cancel: &CancellationToken,
     connections: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ssh_kex_capture: bool,
 ) -> Vec<(String, WaveOut)> {
     std::thread::scope(|scope| {
         let mut handles = Vec::with_capacity(wave.len());
@@ -828,6 +856,7 @@ fn run_wave(
                         deadline: task_deadline.min(Instant::now() + budget),
                         cancel,
                         connections: conns,
+                        ssh_kex_capture,
                     };
                     run_wave_probe(&owned_id, &probe_ctx)
                 }),
@@ -916,6 +945,7 @@ fn observe_passive(
         deadline: task_deadline.min(started + window),
         cancel,
         connections,
+        ssh_kex_capture: false,
     };
     // Reuse the bounded TCP prober for a pure read: connect, then read
     // without writing. Any connect failure yields an empty observation.
@@ -1313,6 +1343,8 @@ fn bare_tls_attempt(
         banner: None,
         capabilities: Vec::new(),
         cert: cert_facts,
+        ssh_host_key: None,
+        ssh_kex: None,
         confidence,
         evidence: lines,
         bytes_in: 0,
@@ -1336,6 +1368,7 @@ fn finish_observation(
     truncated: bool,
     matched_by: Option<String>,
     unknown_fingerprint: Option<crate::service::UnknownFingerprint>,
+    fingerprint_db: &crate::fingerprints::FingerprintDb,
     connections_opened: u64,
     probes_executed: u32,
     bytes_written: u64,
@@ -1363,6 +1396,8 @@ fn finish_observation(
         banner,
         capabilities,
         rawevidence,
+        ssh_host_key,
+        ssh_kex,
     ) = match classified {
         Some(attempt) => (
             attempt.protocol,
@@ -1374,6 +1409,8 @@ fn finish_observation(
             attempt.banner,
             attempt.capabilities,
             attempt.evidence,
+            attempt.ssh_host_key,
+            attempt.ssh_kex,
         ),
         None => (
             "unknown".to_owned(),
@@ -1385,6 +1422,8 @@ fn finish_observation(
             None,
             Vec::new(),
             vec!["service: no probe classified the service".to_owned()],
+            None,
+            None,
         ),
     };
     let label = if tls && protocol == "http" {
@@ -1394,6 +1433,142 @@ fn finish_observation(
     } else {
         protocol.clone()
     };
+    // Fingerprint enrichment (Phase 8/36) + live external pack merge.
+    // Precedence: deterministic builtin handshake > builtin signature >
+    // external signature (supplements ONLY products the built-ins did not
+    // observe) > bounded visible alternates. Same-bytes agreement
+    // (external rule matching the same banner the built-in parsed) is
+    // recorded as corroboration and never inflates confidence.
+    // Independent corroborating signals are distinct artifacts beyond the
+    // primary probe (TLS cert facts, TLS observation).
+    let independent_signals =
+        usize::from(cert_facts.is_some()).saturating_add(usize::from(tls_observation.is_some()));
+    // Text matched by external rules: the preserved banner plus the
+    // bounded evidence lines (e.g. parsed `Server header "..."` notes).
+    // Both derive from already-observed bytes; matching stays bounded
+    // inside the database (`MAX_MATCH_BYTES`).
+    let mut match_text = banner.clone().unwrap_or_default();
+    for line in &rawevidence {
+        if match_text.len() >= crate::fingerprints::MAX_MATCH_BYTES {
+            break;
+        }
+        if !match_text.is_empty() {
+            match_text.push('\n');
+        }
+        match_text.push_str(line);
+    }
+    let mut alternates: Vec<crate::service::AlternateProduct> = Vec::new();
+    let mut corroborated_by: Vec<crate::service::Corroboration> = Vec::new();
+    let mut unknown_candidates: Vec<crate::fingerprints::UnknownCandidate> = Vec::new();
+    let mut version_conflicts: Vec<crate::service::AlternateVersion> = Vec::new();
+    // Owned working copies: external adoption may supply product/version.
+    let mut product = product;
+    let mut version = version;
+    let mut version_confidence: Option<u8> = None;
+    let mut vendor_hint: Option<String> = None;
+    let mut enriched_confidence = confidence;
+    let mut rule_source: Option<String> = None;
+    if protocol != "unknown" {
+        let candidates = fingerprint_db.candidates_for(&protocol, &match_text);
+        let views: Vec<crate::service::ExternalCandidateView<'_>> = candidates
+            .iter()
+            .map(|candidate| crate::service::ExternalCandidateView {
+                product: candidate.product.as_str(),
+                vendor: candidate.vendor.as_deref(),
+                confidence: candidate.confidence,
+                rule_id: candidate.rule_id.as_str(),
+                rule_source: candidate.rule_source.as_str(),
+                matcher: &candidate.matcher,
+                version: candidate.version.as_deref(),
+                version_confidence: candidate.version_confidence,
+            })
+            .collect();
+        let merge = crate::service::merge_external_candidates(
+            product.as_deref(),
+            version.as_deref(),
+            confidence,
+            &views,
+        );
+        corroborated_by = merge.corroborated_by;
+        alternates = merge.alternates;
+        version_conflicts = merge.version_conflicts;
+        if product.is_none() {
+            if let Some(adopted) = merge.adopted {
+                // Adopted external product (+version): calibrate as a
+                // single-signal claim against genuinely distinct artifacts.
+                enriched_confidence = crate::service::calibrate_confidence(
+                    adopted.confidence,
+                    independent_signals,
+                    adopted.version.is_some(),
+                );
+                vendor_hint = adopted.vendor;
+                rule_source = Some(adopted.rule_source);
+                product = Some(adopted.product);
+                if let Some(extracted) = adopted.version {
+                    // Version confidence never exceeds its product without
+                    // independent corroboration (enforced by the merge).
+                    version_confidence = adopted.version_confidence;
+                    version = Some(extracted);
+                }
+            } else {
+                let enrichment = crate::service::enrich_fingerprint(
+                    product.as_deref(),
+                    version.as_deref(),
+                    confidence,
+                    matched_by.as_deref(),
+                    independent_signals,
+                );
+                enriched_confidence = enrichment.confidence;
+                vendor_hint = enrichment.vendor;
+                rule_source = Some(enrichment.rule_source);
+            }
+        } else {
+            let enrichment = crate::service::enrich_fingerprint(
+                product.as_deref(),
+                version.as_deref(),
+                confidence,
+                matched_by.as_deref(),
+                independent_signals,
+            );
+            enriched_confidence = enrichment.confidence;
+            vendor_hint = enrichment.vendor;
+            rule_source = Some(enrichment.rule_source);
+            if version.is_none() {
+                if let Some(adopted) = merge.adopted_version {
+                    version = Some(adopted.version);
+                    version_confidence = Some(adopted.confidence);
+                }
+            }
+        }
+    } else {
+        // Unclassified observation: match across protocols as suggestions
+        // (never identity). Confidence capped by matcher strength inside
+        // the merge layer; protocol stays `unknown`.
+        unknown_candidates = fingerprint_db.candidates_for_unknown(&match_text);
+    }
+    // Field confidence: per-field certainty, never collapsed to the
+    // weakest field. Product/vendor derive from the same product evidence;
+    // version confidence tracks its own extraction evidence.
+    let field_confidence = crate::service::FieldConfidence {
+        protocol: confidence,
+        product: product.as_ref().map(|_| enriched_confidence).unwrap_or(0),
+        version: version
+            .as_ref()
+            .map(|_| version_confidence.unwrap_or(enriched_confidence.min(90)))
+            .unwrap_or(0),
+        vendor: vendor_hint
+            .as_ref()
+            .map(|_| enriched_confidence)
+            .unwrap_or(0),
+    };
+    // CPE and version family always derive from the FINAL product/version
+    // pair (built-in or adopted), never from alternates.
+    let version_family = crate::service::version_family(version.as_deref());
+    let cpe_hint = crate::service::cpe_for_product_version(
+        product.as_deref(),
+        version.as_deref(),
+        vendor_hint.as_deref(),
+    );
     let asset_id = service_asset_id(&target.parent_port_asset_id, &protocol, tls);
     let observation = ServiceObservation {
         target: target.target_label.clone(),
@@ -1409,12 +1584,17 @@ fn finish_observation(
         protocol_version: proto_version,
         product_hint: product.clone(),
         version_hint: version.clone(),
+        version_family: version_family.clone(),
+        vendor_hint: vendor_hint.clone(),
+        cpe_hint: cpe_hint.clone(),
         banner: banner.clone(),
         capabilities: capabilities.clone(),
-        confidence,
+        confidence: enriched_confidence,
+        field_confidence: Some(field_confidence),
         evidence_lines: rawevidence.clone(),
         timestamp: started_at.0,
         matched_by: matched_by.clone(),
+        rule_source: rule_source.clone(),
         unknown_fingerprint: unknown_fingerprint.clone(),
     };
     assets.push(Asset {
@@ -1428,7 +1608,7 @@ fn finish_observation(
             ("transport".to_owned(), "tcp".to_owned()),
             ("port".to_owned(), target.port.to_string()),
             ("address".to_owned(), target.address.to_string()),
-            ("confidence".to_owned(), confidence.to_string()),
+            ("confidence".to_owned(), enriched_confidence.to_string()),
         ]),
         first_seen: started_at,
         last_seen: started_at,
@@ -1449,6 +1629,77 @@ fn finish_observation(
             provenance,
         )?;
     }
+    // External fingerprint candidates as first-class observations with
+    // provenance (P5): adopted/corroborated/alternate roles stay explicit.
+    // Bounded: at most MAX_CANDIDATES_PER_OBSERVATION per path.
+    for corroboration in &corroborated_by {
+        push_event(
+            &mut events,
+            EventKind::FingerprintCandidateObserved,
+            Some(AssetId(asset_id.clone())),
+            serde_json::json!({
+                "target": target.target_label,
+                "address": target.address.to_string(),
+                "port": target.port,
+                "protocol": protocol,
+                "role": "corroborated",
+                "product": product,
+                "confidence": enriched_confidence,
+                "rule_id": corroboration.rule_id,
+                "rule_source": corroboration.rule_source,
+                "note": "external rule agrees with built-in product on the same bytes; no confidence added",
+            }),
+            provenance,
+        )?;
+    }
+    for alternate in &alternates {
+        push_event(
+            &mut events,
+            EventKind::FingerprintCandidateObserved,
+            Some(AssetId(asset_id.clone())),
+            serde_json::json!({
+                "target": target.target_label,
+                "address": target.address.to_string(),
+                "port": target.port,
+                "protocol": protocol,
+                "role": "alternate",
+                "product": alternate.product,
+                "vendor": alternate.vendor,
+                "confidence": alternate.confidence,
+                "rule_id": alternate.rule_id,
+                "rule_source": alternate.rule_source,
+                "note": "conflicting product hypothesis retained; primary conclusion unchanged",
+            }),
+            provenance,
+        )?;
+    }
+    for candidate in &unknown_candidates {
+        let capped = crate::service::unknown_suggestion_cap(
+            &candidate.candidate.matcher,
+            candidate.candidate.confidence,
+        );
+        push_event(
+            &mut events,
+            EventKind::FingerprintCandidateObserved,
+            Some(AssetId(asset_id.clone())),
+            serde_json::json!({
+                "target": target.target_label,
+                "address": target.address.to_string(),
+                "port": target.port,
+                "protocol": "unknown",
+                "role": "suggested",
+                "suggested_protocol": candidate.suggested_protocol,
+                "product": candidate.candidate.product,
+                "vendor": candidate.candidate.vendor,
+                "confidence": capped,
+                "rule_id": candidate.candidate.rule_id,
+                "rule_source": candidate.candidate.rule_source,
+                "evidence": candidate.candidate.evidence,
+                "note": "unclassified observation; suggestion only, never identity",
+            }),
+            provenance,
+        )?;
+    }
     if protocol != "unknown" {
         let mut identified = Event::new(
             EventKind::ServiceIdentified,
@@ -1463,8 +1714,16 @@ fn finish_observation(
                     "tls": tls,
                     "product_hint": product,
                     "version_hint": version,
-                    "confidence": confidence,
+                    "version_family": version_family,
+                    "vendor_hint": vendor_hint,
+                    "cpe_hint": cpe_hint,
+                    "confidence": enriched_confidence,
+                    "field_confidence": field_confidence,
                     "matcher": matched_by,
+                    "rule_source": rule_source,
+                    "corroborated_by": corroborated_by,
+                    "alternate_products": alternates,
+                    "version_conflicts": version_conflicts,
                 }),
                 MAX_EVENT_DETAILS_BYTES,
             )
@@ -1501,6 +1760,8 @@ fn finish_observation(
                     "service": label,
                     "version": tls_observation.as_ref().map(|observation| observation.negotiated_version.clone()),
                     "cipher": tls_observation.as_ref().map(|observation| observation.cipher_suite.clone()),
+                    "alpn": tls_observation.as_ref().and_then(|observation| observation.alpn.clone()),
+                    "sni": tls_observation.as_ref().and_then(|observation| observation.sni.clone()),
                 }),
                 provenance,
             )?;
@@ -1519,11 +1780,74 @@ fn finish_observation(
             )?;
         }
     }
+    // SSH host-key records: global key asset plus an observed event carrying
+    // the key facts, negotiated algorithm lists, and a port→key edge. The
+    // exchange signature is recorded as unverified (never authenticated).
+    if let Some(host_key) = &ssh_host_key {
+        let key_asset =
+            Asset::ssh_host_key(&host_key.sha256, provenance.clone()).map_err(|_| {
+                ModuleError::Failed {
+                    message: "invalid ssh host key asset".to_owned(),
+                    retryable: false,
+                }
+            })?;
+        let key_id = key_asset.id.clone();
+        if !assets.iter().any(|asset| asset.id == key_id) {
+            assets.push(key_asset);
+        }
+        let kex = ssh_kex.as_ref();
+        let mut key_event = Event::new(
+            EventKind::SshHostKeyObserved,
+            Some(key_id.clone()),
+            BoundedDetails::from_value(
+                serde_json::json!({
+                    "target": target.target_label,
+                    "address": target.address.to_string(),
+                    "port": target.port,
+                    "key_type": host_key.key_type,
+                    "bits": host_key.bits,
+                    "sha256": host_key.sha256,
+                    "signature_verified": false,
+                    "kex_algorithms": kex.map(|kex| kex.kex_algorithms.clone()).unwrap_or_default(),
+                    "host_key_algorithms": kex.map(|kex| kex.host_key_algorithms.clone()).unwrap_or_default(),
+                    "ciphers": kex.map(|kex| kex.ciphers.clone()).unwrap_or_default(),
+                    "macs": kex.map(|kex| kex.macs.clone()).unwrap_or_default(),
+                    "compression": kex.map(|kex| kex.compression.clone()).unwrap_or_default(),
+                    "selected_kex": kex.and_then(|kex| kex.selected_kex.clone()),
+                    "selected_host_key": kex.and_then(|kex| kex.selected_host_key.clone()),
+                }),
+                MAX_EVENT_DETAILS_BYTES,
+            )
+            .map_err(|_| ModuleError::Failed {
+                message: "event details too large".to_owned(),
+                retryable: false,
+            })?,
+            provenance.clone(),
+        )
+        .map_err(|_| ModuleError::Failed {
+            message: "invalid event".to_owned(),
+            retryable: false,
+        })?;
+        key_event.relationships.push(
+            Relationship::new(
+                RelationshipKind::PresentsSshHostKey,
+                RelationshipSubject::Asset(AssetId(target.parent_port_asset_id.clone())),
+                RelationshipSubject::Asset(key_id),
+                provenance.clone(),
+            )
+            .map_err(|_| ModuleError::Failed {
+                message: "invalid relationship".to_owned(),
+                retryable: false,
+            })?,
+        );
+        events.push(key_event);
+    }
     // Observation evidence (always — unknowns included, silence noted).
-    let confidence_checked = Confidence::new(confidence).map_err(|_| ModuleError::Failed {
-        message: "invalid confidence".to_owned(),
-        retryable: false,
-    })?;
+    let confidence_checked =
+        Confidence::new(enriched_confidence).map_err(|_| ModuleError::Failed {
+            message: "invalid confidence".to_owned(),
+            retryable: false,
+        })?;
     let details = BoundedDetails::from_value(
         serde_json::json!(&observation),
         crate::model::MAX_EVIDENCE_DETAILS_BYTES,
@@ -1584,6 +1908,69 @@ fn finish_observation(
                 .metadata
                 .insert("product".to_owned(), serde_json::Value::String(product));
         }
+        if let Some(version) = version {
+            finding
+                .metadata
+                .insert("version".to_owned(), serde_json::Value::String(version));
+        }
+        if let Some(family) = version_family.clone() {
+            finding.metadata.insert(
+                "version_family".to_owned(),
+                serde_json::Value::String(family),
+            );
+        }
+        if let Some(vendor) = vendor_hint.clone() {
+            finding
+                .metadata
+                .insert("vendor".to_owned(), serde_json::Value::String(vendor));
+        }
+        if let Some(cpe) = cpe_hint.clone() {
+            finding
+                .metadata
+                .insert("cpe".to_owned(), serde_json::Value::String(cpe));
+        }
+        if let Some(source) = rule_source.clone() {
+            finding
+                .metadata
+                .insert("rule_source".to_owned(), serde_json::Value::String(source));
+        }
+        finding.metadata.insert(
+            "product_confidence".to_owned(),
+            serde_json::Value::from(field_confidence.product),
+        );
+        finding.metadata.insert(
+            "version_confidence".to_owned(),
+            serde_json::Value::from(field_confidence.version),
+        );
+        if !version_conflicts.is_empty() {
+            finding.metadata.insert(
+                "version_conflicts".to_owned(),
+                serde_json::json!(version_conflicts),
+            );
+        }
+        if !corroborated_by.is_empty() {
+            finding.metadata.insert(
+                "corroborated_by".to_owned(),
+                serde_json::Value::Array(
+                    corroborated_by
+                        .iter()
+                        .map(|c| serde_json::Value::String(c.rule_id.clone()))
+                        .collect(),
+                ),
+            );
+        }
+        if !alternates.is_empty() {
+            finding.metadata.insert(
+                "alternate_products".to_owned(),
+                serde_json::json!(alternates),
+            );
+        }
+        if let Some(host_key) = &ssh_host_key {
+            finding.metadata.insert(
+                "ssh_host_key_sha256".to_owned(),
+                serde_json::Value::String(host_key.sha256.clone()),
+            );
+        }
         findings.push(finding);
     }
     let _ = cert_facts;
@@ -1597,8 +1984,9 @@ fn finish_observation(
             "port": target.port,
             "protocol": protocol,
             "service": label,
-            "confidence": confidence,
+            "confidence": enriched_confidence,
             "matcher": matched_by,
+            "rule_source": rule_source,
             "attempts": attempt_log,
             "truncated": truncated,
             "connections_opened": connections_opened,
@@ -1665,6 +2053,8 @@ fn emit_tls_observed(
             "version": observation.negotiated_version,
             "cipher": observation.cipher_suite,
             "chain_len": observation.peer_certs_der.len(),
+            "alpn": observation.alpn,
+            "sni": observation.sni,
             "latency_ms": observation.latency.as_millis() as u64,
         }),
         provenance,
@@ -1677,6 +2067,8 @@ fn emit_cert_records(
     events: &mut Vec<Event>,
     evidence_items: &mut Vec<Evidence>,
     facts: &CertFacts,
+    leaf_der: Option<&[u8]>,
+    observation: &crate::tls::TlsObservation,
     target: &ServiceTarget,
     provenance: &Provenance,
 ) -> Result<(), ModuleError> {
@@ -1692,21 +2084,150 @@ fn emit_cert_records(
     })?;
     let cert_id = cert_asset.id.clone();
     assets.push(cert_asset);
-    push_event(
-        events,
+    // Normalized certificate identity (correlation engine): stable global
+    // entity plus handshake context. `None` on parse failure or unbounded
+    // input — handshake-only evidence still stands on its own.
+    let identity = leaf_der.and_then(|der| {
+        crate::tls::CertificateIdentity::from_parts(
+            der,
+            observation.peer_certs_der.len(),
+            observation.alpn.as_deref(),
+            observation.sni.as_deref(),
+        )
+    });
+    // Global certificate asset: same SHA-256 on any port yields the same
+    // asset id, so reuse correlation falls out of identity. Kept alongside
+    // the per-port child asset (compatibility); graph/diff layers join on
+    // the global id.
+    let mut global_cert_id: Option<AssetId> = None;
+    if let Some(identity) = &identity {
+        if let Ok(global) =
+            Asset::certificate(&identity.sha256, provenance.clone()).map(|mut asset| {
+                asset.attributes = BTreeMap::from([
+                    ("subject".to_owned(), identity.subject.clone()),
+                    ("issuer".to_owned(), identity.issuer.clone()),
+                    ("serial_hex".to_owned(), identity.serial_hex.clone()),
+                    (
+                        "public_key".to_owned(),
+                        format!(
+                            "{}:{}bit",
+                            identity.public_key_algorithm, identity.public_key_bits_nominal
+                        ),
+                    ),
+                    (
+                        "signature_algorithm".to_owned(),
+                        identity.signature_algorithm.clone(),
+                    ),
+                    ("self_signed".to_owned(), identity.self_signed.to_string()),
+                ]);
+                asset
+            })
+        {
+            global_cert_id = Some(global.id.clone());
+            // Deduplicate within this task: one global asset per fingerprint.
+            if !assets.iter().any(|asset| asset.id == global.id) {
+                assets.push(global);
+            }
+        }
+    }
+    let mut tls_event_data = serde_json::json!({
+        "target": target.target_label,
+        "address": target.address.to_string(),
+        "port": target.port,
+        "subject": facts.subject,
+        "issuer": facts.issuer,
+        "san_dns": facts.san_dns,
+        "san_ip": facts.san_ip,
+        "not_before": facts.not_before,
+        "not_after": facts.not_after,
+        "not_before_epoch": facts.not_before_epoch,
+        "not_after_epoch": facts.not_after_epoch,
+        "fingerprint_sha256": facts.fingerprint_sha256,
+        "hostname_match": facts.hostname_match,
+        "hostname_detail": facts.hostname_detail,
+    });
+    if let Some(identity) = &identity {
+        for (key, value) in [
+            ("serial_hex", identity.serial_hex.clone()),
+            (
+                "public_key_algorithm",
+                identity.public_key_algorithm.clone(),
+            ),
+            (
+                "public_key_bits_nominal",
+                identity.public_key_bits_nominal.to_string(),
+            ),
+            ("signature_algorithm", identity.signature_algorithm.clone()),
+            ("chain_len", identity.chain_len.to_string()),
+            ("self_signed", identity.self_signed.to_string()),
+        ] {
+            tls_event_data[key] = serde_json::Value::String(value);
+        }
+        if let Some(alpn) = &identity.alpn {
+            tls_event_data["alpn"] = serde_json::Value::String(alpn.clone());
+        }
+        if let Some(sni) = &identity.sni {
+            tls_event_data["sni"] = serde_json::Value::String(sni.clone());
+        }
+    }
+    let mut tls_event = Event::new(
         EventKind::TlsObserved,
         Some(cert_id.clone()),
+        BoundedDetails::from_value(tls_event_data, MAX_EVENT_DETAILS_BYTES).map_err(|_| {
+            ModuleError::Failed {
+                message: "event details too large".to_owned(),
+                retryable: false,
+            }
+        })?,
+        provenance.clone(),
+    )
+    .map_err(|_| ModuleError::Failed {
+        message: "invalid event".to_owned(),
+        retryable: false,
+    })?;
+    // HostPort PRESENTS_CERTIFICATE Certificate: reuse-visible edge with
+    // provenance on the event. Sharing a certificate relates observations;
+    // it never merges host identity.
+    if let Some(global_id) = &global_cert_id {
+        tls_event.relationships.push(
+            Relationship::new(
+                RelationshipKind::PresentsCertificate,
+                RelationshipSubject::Asset(AssetId(target.parent_port_asset_id.clone())),
+                RelationshipSubject::Asset(global_id.clone()),
+                provenance.clone(),
+            )
+            .map_err(|_| ModuleError::Failed {
+                message: "invalid relationship".to_owned(),
+                retryable: false,
+            })?,
+        );
+    }
+    events.push(tls_event);
+    // Structured posture from the same evidence (factual flags only).
+    let posture = crate::tls::assess_posture(
+        &format!("{}:{}", target.address, target.port),
+        Some(observation.negotiated_version.as_str()),
+        Some(observation.cipher_suite.as_str()),
+        observation.alpn.as_deref(),
+        identity.as_ref(),
+        Some(facts.hostname_match),
+        (provenance.timestamp.0 / 1000) as i64,
+    );
+    push_event(
+        events,
+        EventKind::TlsPostureObserved,
+        global_cert_id.clone().or(Some(cert_id.clone())),
         serde_json::json!({
             "target": target.target_label,
-            "subject": facts.subject,
-            "issuer": facts.issuer,
-            "san_dns": facts.san_dns,
-            "san_ip": facts.san_ip,
-            "not_before": facts.not_before,
-            "not_after": facts.not_after,
-            "fingerprint_sha256": facts.fingerprint_sha256,
-            "hostname_match": facts.hostname_match,
-            "hostname_detail": facts.hostname_detail,
+            "address": target.address.to_string(),
+            "port": target.port,
+            "endpoint": posture.endpoint,
+            "versions_observed": posture.versions_observed,
+            "negotiated_cipher": posture.negotiated_cipher,
+            "alpn": posture.alpn,
+            "certificate_id": posture.certificate_id,
+            "client_cert_requested": posture.client_cert_requested,
+            "assessment": posture.assessment.iter().map(|flag| flag.to_string()).collect::<Vec<_>>(),
         }),
         provenance,
     )?;

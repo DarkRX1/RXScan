@@ -108,6 +108,16 @@
     });
   }
 
+  // Restrained credential rendering: name, issuer, date, duration,
+  // certificate ID, optional link to the locally hosted PDF.
+  // Only fields present on the cert object are rendered.
+  function certMeta(c) {
+    return `
+      ${c.date ? `<p class="cert-meta mono">${c.date}${c.duration ? ` · ${c.duration}` : ""}</p>` : ""}
+      ${c.certId ? `<p class="cert-meta mono">ID: ${c.certId}</p>` : ""}
+      ${c.pdf ? `<a class="cert-link" href="${c.pdf}" target="_blank" rel="noopener">View certificate</a>` : ""}`;
+  }
+
   function pageHome() {
     const id = D.identity;
     return `
@@ -201,9 +211,10 @@
                 .map(
                   (c) => `<div class="cert">
                     <span class="cert-mark" aria-hidden="true">${I.award}</span>
-                    <div>
+                    <div class="cert-body">
                       <h4>${c.name}</h4>
                       <p class="muted"><span class="dot"></span>${c.issuer}</p>
+                      ${certMeta(c)}
                     </div>
                   </div>`
                 )
@@ -322,7 +333,7 @@
           <p class="lede">Self-directed work until vendor paper exists. The private vault holds the retest records.</p>
         </div>
         <div class="certs" style="grid-template-columns:repeat(auto-fit,minmax(240px,1fr))">
-          ${D.certs.map((c) => `<article class="cert card yellow"><h3>${c.name}</h3><p class="muted"><span class="dot"></span>${c.issuer}</p></article>`).join("")}
+          ${D.certs.map((c) => `<article class="cert card yellow"><span class="cert-mark" aria-hidden="true">${I.award}</span><div class="cert-body"><h3>${c.name}</h3><p class="muted"><span class="dot"></span>${c.issuer}</p>${certMeta(c)}</div></article>`).join("")}
         </div>
       </section>`;
   }

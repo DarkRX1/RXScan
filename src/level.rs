@@ -180,8 +180,13 @@ pub fn priority_for_kind(kind: &TaskKind) -> u8 {
     } else {
         match kind {
             TaskKind::HostDiscovery => 80,
+            // UDP (65) outranks TCP ports (60) so a large TCP scan can never
+            // starve explicitly requested UDP work (Priority 4 fairness):
+            // with >=2 worker slots both run in parallel; with 1 slot UDP
+            // still completes first instead of waiting behind a 65k-port TCP
+            // task. Host discovery (80) still precedes both (P3 ordering).
+            TaskKind::UdpDiscovery => 65,
             TaskKind::PortDiscovery => 60,
-            TaskKind::UdpDiscovery => 55,
             TaskKind::ServiceProbe => 50,
             TaskKind::DnsProbe => 50,
             TaskKind::HttpProbe => 45,
@@ -225,26 +230,43 @@ pub fn describe_initial_tasks(goal: ScanGoal, level: u8) -> String {
 
 /// Human-readable evidence-triggered follow-up rules for `--explain`.
 /// These never run without justifying evidence; workflow gating decides
-/// which rules are live for the selected goal.
+/// which rules are live for the selected goal. Every proposed task carries
+/// an explanatory `reason` param (evidence rule → action) that is stripped
+/// from the canonical task ID, so reasons never cause duplicate work.
 pub fn describe_followups(goal: ScanGoal, level: u8) -> String {
     let mut rules = Vec::new();
-    let alive = "host discovery concluded -> TCP port discovery";
+    let alive = "host discovery concluded (alive, or unknown with explicit/level>=3 policy) -> TCP port discovery [reason: host <ip> concluded <state> → TCP port discovery]";
     rules.push(format!("  - {alive}"));
     if matches!(
         goal,
         ScanGoal::Recon | ScanGoal::Services | ScanGoal::Web | ScanGoal::Full
     ) {
-        rules.push("  - open TCP port -> service identification".to_owned());
+        rules.push(
+            "  - open TCP port -> service identification [reason: open TCP port <port> on <ip> → service identification]"
+                .to_owned(),
+        );
     }
     if matches!(goal, ScanGoal::Recon | ScanGoal::Web | ScanGoal::Full) {
-        rules.push("  - identified HTTP(S) service -> web observation".to_owned());
-        rules.push("  - confirmed web endpoint -> crawl / baseline / content discovery".to_owned());
+        rules.push(
+            "  - identified HTTP(S) service -> web observation [reason: identified <service> on <ip>:<port> → web observation]"
+                .to_owned(),
+        );
+        rules.push(
+            "  - confirmed web endpoint -> crawl / baseline / content discovery [reason: endpoint <url> observed → crawl|baseline|content]"
+                .to_owned(),
+        );
     }
     if matches!(goal, ScanGoal::Full) && level >= 3 {
-        rules.push("  - baseline response signature -> bounded query fuzzing".to_owned());
+        rules.push(
+            "  - baseline response signature -> bounded query fuzzing [reason: baseline signature → fuzz (param <name>)]"
+                .to_owned(),
+        );
     }
     if !matches!(goal, ScanGoal::Ports) {
-        rules.push("  - DNS A/AAAA observation -> host discovery".to_owned());
+        rules.push(
+            "  - DNS A/AAAA observation -> host discovery [reason: DNS A/AAAA observation → host discovery]"
+                .to_owned(),
+        );
     }
     if rules.len() <= 1 {
         rules.push("  - (no follow-ups: this workflow stops after initial tasks)".to_owned());
@@ -259,8 +281,9 @@ pub fn describe_followups(goal: ScanGoal, level: u8) -> String {
 /// list instead of advertising them as selected work.
 pub fn describe_unavailable() -> String {
     [
-        "  - tls-probe tasks (dedicated TLS/cipher enumeration; TLS handshake facts observed via service probing remain available)",
-        "  - fingerprint tasks (OS/device fingerprint engine)",
+        "  - tls-probe tasks (dedicated cipher-suite enumeration; TLS handshake facts + posture observed via service probing remain available)",
+        "  - fingerprint tasks (active OS-fingerprint probes; passive OS/device correlation over normal scan evidence remains available)",
+        "  - exploit / brute-force / credential tasks (never planned; vulnerability correlation stays offline/passive)",
     ]
     .join("\n")
 }
