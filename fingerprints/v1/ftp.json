@@ -1,0 +1,160 @@
+{
+  "fingerprints": [
+    {
+      "confidence": 85,
+      "id": "ftp-bftpd",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "bFTPD"
+      },
+      "probe": "ftp",
+      "product": "bFTPD",
+      "protocol": "ftp",
+      "source": "corpus-v2",
+      "vendor": "bftpd"
+    },
+    {
+      "confidence": 85,
+      "id": "ftp-filezilla",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "FileZilla"
+      },
+      "probe": "ftp",
+      "product": "FileZilla Server",
+      "protocol": "ftp",
+      "source": "corpus-v2",
+      "vendor": "filezilla"
+    },
+    {
+      "confidence": 85,
+      "id": "ftp-glftpd",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "glFTPd"
+      },
+      "probe": "ftp",
+      "product": "glFTPd",
+      "protocol": "ftp",
+      "source": "corpus-v2",
+      "vendor": "glftpd"
+    },
+    {
+      "confidence": 85,
+      "id": "ftp-microsoft",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "Microsoft FTP"
+      },
+      "probe": "ftp",
+      "product": "Microsoft FTP",
+      "protocol": "ftp",
+      "source": "corpus-v2",
+      "vendor": "microsoft"
+    },
+    {
+      "confidence": 85,
+      "id": "ftp-proftpd",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "ProFTPD"
+      },
+      "probe": "ftp",
+      "product": "ProFTPD",
+      "protocol": "ftp",
+      "source": "corpus-v2",
+      "vendor": "proftpd",
+      "version_extractor": {
+        "max_len": 32,
+        "prefix": "ProFTPD ",
+        "type": "prefixed_token"
+      }
+    },
+    {
+      "confidence": 85,
+      "id": "ftp-pureftpd",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "Pure-FTPd"
+      },
+      "probe": "ftp",
+      "product": "Pure-FTPd",
+      "protocol": "ftp",
+      "source": "corpus-v2",
+      "vendor": "pureftpd"
+    },
+    {
+      "confidence": 80,
+      "id": "ftp-pyftpdlib",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "pyftpdlib"
+      },
+      "probe": "ftp",
+      "product": "pyftpdlib",
+      "protocol": "ftp",
+      "source": "corpus-v2",
+      "vendor": "pyftpdlib",
+      "version_extractor": {
+        "max_len": 32,
+        "prefix": "pyftpdlib ",
+        "type": "prefixed_token"
+      }
+    },
+    {
+      "confidence": 85,
+      "id": "ftp-servu",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "Serv-U"
+      },
+      "probe": "ftp",
+      "product": "Serv-U",
+      "protocol": "ftp",
+      "source": "corpus-v2",
+      "vendor": "solarwinds"
+    },
+    {
+      "confidence": 90,
+      "id": "ftp-vsftpd",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "vsFTPd"
+      },
+      "probe": "ftp",
+      "product": "vsftpd",
+      "protocol": "ftp",
+      "source": "corpus-v2",
+      "vendor": "vsftpd",
+      "version_extractor": {
+        "max_len": 32,
+        "prefix": "vsFTPd ",
+        "type": "prefixed_token"
+      }
+    },
+    {
+      "confidence": 85,
+      "id": "ftp-wuftpd",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "wu-ftpd"
+      },
+      "probe": "ftp",
+      "product": "wu-ftpd",
+      "protocol": "ftp",
+      "source": "corpus-v2",
+      "vendor": "wu-ftpd"
+    }
+  ],
+  "schema_version": 1
+}

@@ -1,0 +1,173 @@
+{
+  "schema_version": 1,
+  "fingerprints": [
+    {
+      "id": "db-cassandra",
+      "protocol": "cassandra",
+      "probe": "cassandra",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Cassandra",
+        "case_insensitive": true
+      },
+      "product": "Cassandra",
+      "vendor": "apache",
+      "confidence": 78,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "db-cockroach-console",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "CockroachDB",
+        "case_insensitive": true
+      },
+      "product": "CockroachDB Console",
+      "vendor": "cockroach",
+      "confidence": 75,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "db-couchbase",
+      "protocol": "couchbase",
+      "probe": "couchbase",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Couchbase",
+        "case_insensitive": true
+      },
+      "product": "Couchbase",
+      "vendor": "couchbase",
+      "confidence": 78,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "db-emqx",
+      "protocol": "mqtt",
+      "probe": "mqtt",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "EMQX",
+        "case_insensitive": true
+      },
+      "product": "EMQX",
+      "vendor": "emqx",
+      "confidence": 82,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "db-hivemq",
+      "protocol": "mqtt",
+      "probe": "mqtt",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "HiveMQ",
+        "case_insensitive": true
+      },
+      "product": "HiveMQ",
+      "vendor": "hivemq",
+      "confidence": 82,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "db-influxdb2",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "InfluxDB v2",
+        "case_insensitive": true
+      },
+      "product": "InfluxDB",
+      "vendor": "influxdata",
+      "confidence": 80,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "db-memcached",
+      "protocol": "memcached",
+      "probe": "memcached",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "VERSION 1.",
+        "case_insensitive": true
+      },
+      "product": "memcached",
+      "vendor": "memcached",
+      "confidence": 85,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "db-mssql",
+      "protocol": "mssql",
+      "probe": "mssql",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Microsoft SQL Server",
+        "case_insensitive": true
+      },
+      "product": "SQL Server",
+      "vendor": "microsoft",
+      "confidence": 85,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "db-nats",
+      "protocol": "nats",
+      "probe": "nats",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "NATS Server",
+        "case_insensitive": true
+      },
+      "product": "NATS",
+      "vendor": "nats",
+      "confidence": 80,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "db-neo4j",
+      "protocol": "bolt",
+      "probe": "bolt",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Neo4j",
+        "case_insensitive": true
+      },
+      "product": "Neo4j",
+      "vendor": "neo4j",
+      "confidence": 78,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "db-rabbitmq-amqp",
+      "protocol": "amqp",
+      "probe": "amqp",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "RabbitMQ",
+        "case_insensitive": true
+      },
+      "product": "RabbitMQ",
+      "vendor": "rabbitmq",
+      "confidence": 80,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "db-scylladb",
+      "protocol": "scylla",
+      "probe": "scylla",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "ScyllaDB",
+        "case_insensitive": true
+      },
+      "product": "ScyllaDB",
+      "vendor": "scylladb",
+      "confidence": 78,
+      "source": "corpus-v3"
+    }
+  ]
+}

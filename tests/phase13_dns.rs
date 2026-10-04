@@ -990,7 +990,7 @@ fn level_speed_and_task_identity_are_semantically_stable() {
             .iter()
             .map(|kind| kind.as_str())
             .collect::<Vec<_>>(),
-        vec!["A", "AAAA", "CNAME", "MX", "NS", "TXT", "PTR"]
+        vec!["A", "AAAA", "CNAME", "MX", "NS", "TXT", "PTR", "SRV"]
     );
     assert_eq!(
         DnsPolicy::new(5, ScanGoal::Recon, SpeedSetting::Numeric(10)).record_types(),

@@ -29,6 +29,14 @@ pub const MAX_EDGE_EVIDENCE: usize = 4;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EntityKind {
+    Username,
+    EmailAddress,
+    Domain,
+    Account,
+    Organization,
+    NetworkEndpoint,
+    Repository,
+    Asn,
     Host,
     IpAddress,
     Hostname,
@@ -47,6 +55,14 @@ pub enum EntityKind {
 impl std::fmt::Display for EntityKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name = match self {
+            Self::Username => "username",
+            Self::EmailAddress => "email_address",
+            Self::Domain => "domain",
+            Self::Account => "account",
+            Self::Organization => "organization",
+            Self::NetworkEndpoint => "network_endpoint",
+            Self::Repository => "repository",
+            Self::Asn => "asn",
             Self::Host => "host",
             Self::IpAddress => "ip_address",
             Self::Hostname => "hostname",
@@ -70,6 +86,14 @@ impl EntityKind {
     /// rejected, never defaulted.
     pub fn parse(text: &str) -> Option<Self> {
         match text {
+            "username" => Some(Self::Username),
+            "email_address" => Some(Self::EmailAddress),
+            "domain" => Some(Self::Domain),
+            "account" => Some(Self::Account),
+            "organization" => Some(Self::Organization),
+            "network_endpoint" => Some(Self::NetworkEndpoint),
+            "repository" => Some(Self::Repository),
+            "asn" => Some(Self::Asn),
             "host" => Some(Self::Host),
             "ip_address" => Some(Self::IpAddress),
             "hostname" => Some(Self::Hostname),
@@ -93,6 +117,13 @@ impl EntityKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EdgeRelation {
+    HasAccount,
+    UsesUsername,
+    LinksTo,
+    ReverseResolvesTo,
+    BelongsToAsn,
+    AnnouncesPrefix,
+    FoundBy,
     HasAddress,
     ResolvesTo,
     ListensOn,
@@ -117,6 +148,13 @@ pub enum EdgeRelation {
 impl std::fmt::Display for EdgeRelation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name = match self {
+            Self::HasAccount => "has_account",
+            Self::UsesUsername => "uses_username",
+            Self::LinksTo => "links_to",
+            Self::ReverseResolvesTo => "reverse_resolves_to",
+            Self::BelongsToAsn => "belongs_to_asn",
+            Self::AnnouncesPrefix => "announces_prefix",
+            Self::FoundBy => "found_by",
             Self::HasAddress => "has_address",
             Self::ResolvesTo => "resolves_to",
             Self::ListensOn => "listens_on",
@@ -141,6 +179,13 @@ impl EdgeRelation {
     /// Strict parse for untrusted (database) input.
     pub fn parse(text: &str) -> Option<Self> {
         match text {
+            "has_account" => Some(Self::HasAccount),
+            "uses_username" => Some(Self::UsesUsername),
+            "links_to" => Some(Self::LinksTo),
+            "reverse_resolves_to" => Some(Self::ReverseResolvesTo),
+            "belongs_to_asn" => Some(Self::BelongsToAsn),
+            "announces_prefix" => Some(Self::AnnouncesPrefix),
+            "found_by" => Some(Self::FoundBy),
             "has_address" => Some(Self::HasAddress),
             "resolves_to" => Some(Self::ResolvesTo),
             "listens_on" => Some(Self::ListensOn),

@@ -31,8 +31,8 @@ fn seed_packs_load_and_match() {
     );
     let http = packs
         .iter()
-        .find(|(path, _)| path.contains("http"))
-        .expect("http seed pack")
+        .find(|(path, _)| path.ends_with("/http.json") || path == "http.json")
+        .expect("core http seed pack")
         .1
         .clone();
     let matched = http

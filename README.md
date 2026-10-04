@@ -110,6 +110,14 @@ retry pacing; it does not change the intended ports or findings.
 by goal defaults. `--all-ports` scans TCP ports 1 through 65535 as one bounded
 port-discovery task, not 65535 scheduler tasks.
 
+`--scan-mode connect|syn|auto` (default `auto`) selects the TCP scan path.
+`auto` uses raw SYN for IPv4 on capable Linux hosts and connect scanning
+otherwise; `syn` without capability falls back to connect with an explicit
+reason instead of failing. Output records requested mode, effective mechanism,
+and fallback reason. Raw SYN is bounded, deadline-aware, and classifies
+SYN+ACK, RST, relevant ICMP unreachable, and silence distinctly. IPv6 raw SYN
+is not implemented and uses an explicitly reported connect fallback.
+
 Default TCP policy:
 
 - level 1: validation-focused unless ports are explicit
@@ -160,17 +168,26 @@ rxscan TARGET --checkpoint scan.rxscan
 ## Current Capabilities
 
 Working: target normalization, scope guard, bounded scheduler, speed governor,
-host discovery, native TCP connect scanning, service probes, TLS observation,
-DNS observation, HTTP probing, crawling, content discovery, contextual GET
-fuzzing, persistence/resume, diff, analysis, reporting, and project graph.
+host discovery (ICMP echo, TCP reachability, active on-link ARP, NDP, local
+neighbor cache, link-scope awareness), native TCP connect scanning and Linux
+IPv4 raw SYN with capability-gated syn/auto selection, service probes
+(SSH/HTTP/TLS/FTP/SMTP/Redis/MySQL/PostgreSQL/SMB/
+RDP/MongoDB/MQTT/generic, no auth), TLS observation, DNS observation
+(A/AAAA/CNAME/MX/NS/TXT/PTR/SRV), HTTP probing with technology
+normalization, crawling, content discovery, contextual GET fuzzing,
+persistence/resume, diff, analysis, reporting, project graph, and per-entity
+project explain.
 
-Partial: adaptive pressure control is deterministic rather than feedback-driven;
-TLS captures handshake and certificate facts but not cipher-suite enumeration;
-DNS has bounded record lookups but no TCP fallback after UDP truncation.
+Partial: raw SYN is Linux IPv4 only; adaptive pacing is applied inside the raw
+SYN engine but remains diagnostic-only for connect and UDP scans; TLS captures
+handshake and certificate facts but not cipher-suite enumeration; DNS has
+bounded record lookups but no TCP fallback after UDP truncation; IPv6 is
+supported across parsing, CIDR, scope, NDP, ICMPv6, TCP connect, UDP, DNS,
+URL, graph, and TLS/SNI paths.
 
-Not implemented: SYN scanning, OS/device fingerprinting,
-browser-assisted inspection, POST workflows, vulnerability assessment,
-prebuilt release artifacts, Windows/macOS support, GUI, plugins, and updater.
+Not implemented: OS/device active fingerprint probes (passive correlation
+only), browser-assisted inspection, POST workflows, prebuilt release
+artifacts, Windows/macOS support, GUI, plugins, and updater.
 
 Permanent boundaries: no automatic exploitation, no destructive actions, and no
 credential brute forcing.

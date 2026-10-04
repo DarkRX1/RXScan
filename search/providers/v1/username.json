@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "pack_version": "2026.10.04-v1",
+  "providers": [
+    {
+      "metadata": {
+        "id": "github",
+        "version": "1",
+        "accepts": ["username"],
+        "produces": ["account"],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 20,
+        "weight": 1,
+        "source_category": "developer",
+        "requires_authentication": false
+      },
+      "platform": "GitHub",
+      "category": "developer",
+      "profile_url": "https://github.com/{username}",
+      "method": "GET",
+      "success_status": [200],
+      "not_found_status": [404],
+      "success": {
+        "required": ["itemprop=\"additionalname\">{username}<"],
+        "any": ["rel=\"canonical\""]
+      },
+      "not_found": {
+        "any": ["page not found"]
+      },
+      "blocked_markers": ["verify you are human", "captcha"],
+      "authentication_url_markers": ["/login"],
+      "max_redirects": 2,
+      "max_body_bytes": 131072
+    },
+    {
+      "metadata": {
+        "id": "gitlab",
+        "version": "1",
+        "accepts": ["username"],
+        "produces": ["account"],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 20,
+        "weight": 1,
+        "source_category": "developer",
+        "requires_authentication": false
+      },
+      "platform": "GitLab",
+      "category": "developer",
+      "profile_url": "https://gitlab.com/{username}",
+      "method": "GET",
+      "success_status": [200],
+      "not_found_status": [404],
+      "success": {
+        "required": ["<title>{username} (@{username})"],
+        "any": ["profile-page"]
+      },
+      "not_found": {
+        "any": ["the page could not be found"]
+      },
+      "blocked_markers": ["verify you are human", "captcha", "access denied"],
+      "authentication_url_markers": ["/users/sign_in"],
+      "max_redirects": 2,
+      "max_body_bytes": 131072
+    },
+    {
+      "metadata": {"id":"codeberg","version":"1","accepts":["username"],"produces":["account"],"contact_class":"public_http","timeout_ms":5000,"requests_per_minute":20,"weight":1,"source_category":"developer","requires_authentication":false},
+      "platform":"Codeberg","category":"developer","profile_url":"https://codeberg.org/{username}","method":"GET","success_status":[200],"not_found_status":[404],
+      "success":{"required":["data-username=\"{username}\""],"any":["rel=\"canonical\""]},"not_found":{"any":["page not found"]},
+      "blocked_markers":["verify you are human","captcha"],"authentication_url_markers":["/user/login"],"max_redirects":2,"max_body_bytes":131072
+    },
+    {
+      "metadata": {"id":"keybase","version":"1","accepts":["username"],"produces":["account"],"contact_class":"public_http","timeout_ms":5000,"requests_per_minute":20,"weight":1,"source_category":"security","requires_authentication":false},
+      "platform":"Keybase","category":"security","profile_url":"https://keybase.io/_/api/1.0/user/lookup.json?username={username}","method":"GET","success_status":[200],"not_found_status":[404],
+      "success":{"required":["\"username\":\"{username}\""],"any":["\"status\":{\"code\":0"]},"not_found":{"any":["\"code\":205"]},
+      "blocked_markers":["rate limit exceeded","captcha"],"authentication_url_markers":[],"max_redirects":1,"max_body_bytes":65536
+    },
+    {
+      "metadata": {"id":"reddit","version":"1","accepts":["username"],"produces":["account"],"contact_class":"public_http","timeout_ms":5000,"requests_per_minute":10,"weight":1,"source_category":"social","requires_authentication":false},
+      "platform":"Reddit","category":"social","profile_url":"https://www.reddit.com/user/{username}/about.json","method":"GET","success_status":[200],"not_found_status":[404],
+      "success":{"required":["\"name\": \"{username}\""],"any":["\"kind\": \"t2\""]},"not_found":{"any":["\"error\": 404"]},
+      "blocked_markers":["whoa there","verify you are human","captcha"],"authentication_url_markers":["/login"],"max_redirects":2,"max_body_bytes":65536
+    },
+    {
+      "metadata": {"id":"hackernews","version":"1","accepts":["username"],"produces":["account"],"contact_class":"public_http","timeout_ms":5000,"requests_per_minute":20,"weight":1,"source_category":"developer","requires_authentication":false},
+      "platform":"Hacker News","category":"developer","profile_url":"https://news.ycombinator.com/user?id={username}","method":"GET","success_status":[200],"not_found_status":[404],
+      "success":{"required":["user: {username}</a>"],"any":["created:"]},"not_found":{"any":["no such user"]},
+      "blocked_markers":["too many requests"],"authentication_url_markers":["/login"],"max_redirects":1,"max_body_bytes":65536
+    },
+    {
+      "metadata": {"id":"devto","version":"1","accepts":["username"],"produces":["account"],"contact_class":"public_http","timeout_ms":5000,"requests_per_minute":20,"weight":1,"source_category":"developer","requires_authentication":false},
+      "platform":"DEV Community","category":"developer","profile_url":"https://dev.to/{username}","method":"GET","success_status":[200],"not_found_status":[404],
+      "success":{"required":["data-profile-username=\"{username}\""],"any":["rel=\"canonical\""]},"not_found":{"any":["this page does not exist"]},
+      "blocked_markers":["verify you are human","captcha"],"authentication_url_markers":["/enter"],"max_redirects":2,"max_body_bytes":131072
+    },
+    {
+      "metadata": {"id":"dockerhub","version":"1","accepts":["username"],"produces":["account"],"contact_class":"public_http","timeout_ms":5000,"requests_per_minute":20,"weight":1,"source_category":"developer","requires_authentication":false},
+      "platform":"Docker Hub","category":"developer","profile_url":"https://hub.docker.com/v2/users/{username}/","method":"GET","success_status":[200],"not_found_status":[404],
+      "success":{"required":["\"username\":\"{username}\""],"any":["\"type\":\"user\""]},"not_found":{"any":["not found"]},
+      "blocked_markers":["rate limit","captcha"],"authentication_url_markers":["/login"],"max_redirects":1,"max_body_bytes":65536
+    },
+    {
+      "metadata": {"id":"npm","version":"1","accepts":["username"],"produces":["account"],"contact_class":"public_http","timeout_ms":5000,"requests_per_minute":20,"weight":1,"source_category":"developer","requires_authentication":false},
+      "platform":"npm","category":"developer","profile_url":"https://www.npmjs.com/~{username}","method":"GET","success_status":[200],"not_found_status":[404],
+      "success":{"required":["data-user-name=\"{username}\""],"any":["rel=\"canonical\""]},"not_found":{"any":["user not found"]},
+      "blocked_markers":["verify you are human","captcha","access denied"],"authentication_url_markers":["/login"],"max_redirects":2,"max_body_bytes":131072
+    },
+    {
+      "metadata": {"id":"pypi","version":"1","accepts":["username"],"produces":["account"],"contact_class":"public_http","timeout_ms":5000,"requests_per_minute":20,"weight":1,"source_category":"developer","requires_authentication":false},
+      "platform":"PyPI","category":"developer","profile_url":"https://pypi.org/user/{username}/","method":"GET","success_status":[200],"not_found_status":[404],
+      "success":{"required":["class=\"author-profile__name\">{username}<"],"any":["rel=\"canonical\""]},"not_found":{"any":["page not found"]},
+      "blocked_markers":["verify you are human","captcha"],"authentication_url_markers":["/account/login"],"max_redirects":2,"max_body_bytes":131072
+    }
+  ]
+}

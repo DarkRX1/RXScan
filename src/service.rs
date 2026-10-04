@@ -52,17 +52,18 @@ pub const PROBE_SMTP: &str = "smtp";
 pub const PROBE_REDIS: &str = "redis";
 pub const PROBE_MYSQL: &str = "mysql";
 pub const PROBE_POSTGRES: &str = "postgres";
+pub const PROBE_SMB: &str = "smb";
+pub const PROBE_RDP: &str = "rdp";
+pub const PROBE_MONGODB: &str = "mongodb";
+pub const PROBE_MQTT: &str = "mqtt";
 pub const PROBE_GENERIC: &str = "generic";
 
-/// Deferred seams (documented, NOT implemented): imap, pop3, ldap, mqtt,
-/// rdp, smb, dns-over-tcp, rpc, ntp, kerberos.
+/// Deferred seams (documented, NOT implemented): imap, pop3, ldap,
+/// dns-over-tcp, rpc, ntp, kerberos.
 pub const DEFERRED_PROTOCOLS: &[&str] = &[
     "imap",
     "pop3",
     "ldap",
-    "mqtt",
-    "rdp",
-    "smb",
     "dns-over-tcp",
     "rpc",
     "ntp",
@@ -118,6 +119,26 @@ pub static PROBE_REGISTRY: &[ProbeSpec] = &[
         id: PROBE_POSTGRES,
         priority: 10,
         likely_ports: &[5432],
+    },
+    ProbeSpec {
+        id: PROBE_SMB,
+        priority: 10,
+        likely_ports: &[445],
+    },
+    ProbeSpec {
+        id: PROBE_RDP,
+        priority: 10,
+        likely_ports: &[3389],
+    },
+    ProbeSpec {
+        id: PROBE_MONGODB,
+        priority: 10,
+        likely_ports: &[27017],
+    },
+    ProbeSpec {
+        id: PROBE_MQTT,
+        priority: 10,
+        likely_ports: &[1883, 8883],
     },
     ProbeSpec {
         id: PROBE_GENERIC,

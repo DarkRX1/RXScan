@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+Host discovery is first-class: local neighbor-cache reads, bounded active ARP
+and NDP on directly connected targets, interface/link-scope awareness, TCP
+SYN/ACK technique identities, and
+corroboration without confidence summing (strongest source wins, capped at
+95). TCP scan modes `connect|syn|auto`, Linux IPv4 raw SYN with capability-
+gated fallback, and the full open/closed/filtered/open|filtered/unknown/error
+state model.
+Deterministic feedback-driven adaptive pacing within scheduler budgets.
+UDP Wave-2 safe probes (TFTP/SIP/IKE/mDNS/SNMP-response-grammar/QUIC
+indicator) alongside DNS/NTP/SSDP. Fingerprint corpus grown from 5 to 265
+rules across 13 packs with per-rule
+self-consistency tests. Read-only SMB/RDP/MongoDB/MQTT identification (no
+auth). DNS SRV with a typed service-discovery relation. Web technology
+normalization with weak-signal caps, emitted per web observation. Canonical
+endpoint/service asset registry. `rxscan project explain` for per-entity
+conclusions, evidence, findings, changes, and discovery chain.
+Coverage-aware vulnerability resolution
+(resolved_by_software_change/dataset_changed/coverage_insufficient/unknown).
+
 ## v0.1.0 (prerelease, unreleased)
 
 First public prerelease candidate of RXScan, covering implementation phases

@@ -336,6 +336,146 @@ fn execute_discovery(
         let icmp_timeout = Duration::from_millis(policy.icmp_timeout_ms).min(remaining);
         let tcp_timeout = Duration::from_millis(policy.tcp_timeout_ms).min(remaining);
 
+        // ARP: neighbor-cache lookup first (free), then one bounded active
+        // probe for on-link IPv4 targets (≤2 requests, no storms).
+        if policy.use_arp {
+            if let IpAddr::V4(v4) = ip {
+                if crate::neighbor::arp_applicable(ip) {
+                    match crate::neighbor::lookup_arp_cache(*v4) {
+                        Some(entry) if entry.complete => {
+                            let record = ProbeRecord::success(
+                                DiscoveryTechnique::Arp,
+                                *ip,
+                                None,
+                                Duration::from_millis(0),
+                                format!("ARP cache entry {} is complete", entry.mac),
+                            );
+                            emit_probe_outcome_event(&mut events, &record, &provenance, &task)?;
+                            all_probes.push(record);
+                            concluded = Some(conclude_state(&all_probes));
+                            break;
+                        }
+                        _ => {
+                            emit_probe_event(
+                                &mut events,
+                                EventKind::ProbeAttempted,
+                                *ip,
+                                None,
+                                DiscoveryTechnique::Arp,
+                                "attempting ARP request (on-link only)",
+                                &provenance,
+                                &task,
+                            )?;
+                            if cancel.is_cancelled() {
+                                return Err(ModuleError::Cancelled);
+                            }
+                            match crate::arp::probe_arp(*v4, icmp_timeout, &cancel) {
+                                crate::arp::ArpOutcome::Alive { mac, latency_ms } => {
+                                    let record = ProbeRecord::success(
+                                        DiscoveryTechnique::Arp,
+                                        *ip,
+                                        None,
+                                        Duration::from_millis(latency_ms),
+                                        format!(
+                                            "ARP reply from {} ({:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
+                                            ip, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+                                        ),
+                                    );
+                                    emit_probe_outcome_event(
+                                        &mut events,
+                                        &record,
+                                        &provenance,
+                                        &task,
+                                    )?;
+                                    all_probes.push(record);
+                                    concluded = Some(conclude_state(&all_probes));
+                                    break;
+                                }
+                                crate::arp::ArpOutcome::Timeout => {
+                                    let record =
+                                        ProbeRecord::timeout(DiscoveryTechnique::Arp, *ip, None);
+                                    emit_probe_outcome_event(
+                                        &mut events,
+                                        &record,
+                                        &provenance,
+                                        &task,
+                                    )?;
+                                    all_probes.push(record);
+                                }
+                                crate::arp::ArpOutcome::Unavailable(reason) => {
+                                    all_probes.push(ProbeRecord::unavailable(
+                                        DiscoveryTechnique::Arp,
+                                        *ip,
+                                        None,
+                                        reason,
+                                    ));
+                                }
+                                crate::arp::ArpOutcome::Cancelled => {
+                                    return Err(ModuleError::Cancelled);
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    all_probes.push(ProbeRecord::unavailable(
+                        DiscoveryTechnique::Arp,
+                        *ip,
+                        None,
+                        "ARP applies to local IPv4 neighbors only",
+                    ));
+                }
+            } else if crate::neighbor::nd_applicable(ip) {
+                emit_probe_event(
+                    &mut events,
+                    EventKind::ProbeAttempted,
+                    *ip,
+                    None,
+                    DiscoveryTechnique::NeighborDiscovery,
+                    "attempting Neighbor Solicitation",
+                    &provenance,
+                    &task,
+                )?;
+                if cancel.is_cancelled() {
+                    return Err(ModuleError::Cancelled);
+                }
+                match crate::ndp::probe_ndp(*ip, icmp_timeout, &cancel) {
+                    crate::ndp::NdpOutcome::Alive { latency_ms, router } => {
+                        let record = ProbeRecord::success(
+                            DiscoveryTechnique::NeighborDiscovery,
+                            *ip,
+                            None,
+                            Duration::from_millis(latency_ms),
+                            format!(
+                                "Neighbor Advertisement from {ip}{}",
+                                if router { " (router)" } else { "" }
+                            ),
+                        );
+                        emit_probe_outcome_event(&mut events, &record, &provenance, &task)?;
+                        all_probes.push(record);
+                        concluded = Some(conclude_state(&all_probes));
+                        break;
+                    }
+                    crate::ndp::NdpOutcome::Timeout => {
+                        let record =
+                            ProbeRecord::timeout(DiscoveryTechnique::NeighborDiscovery, *ip, None);
+                        emit_probe_outcome_event(&mut events, &record, &provenance, &task)?;
+                        all_probes.push(record);
+                    }
+                    crate::ndp::NdpOutcome::Unavailable(reason) => {
+                        all_probes.push(ProbeRecord::unavailable(
+                            DiscoveryTechnique::NeighborDiscovery,
+                            *ip,
+                            None,
+                            reason,
+                        ));
+                    }
+                    crate::ndp::NdpOutcome::Cancelled => {
+                        return Err(ModuleError::Cancelled);
+                    }
+                }
+            }
+        }
+
         // ICMP attempts (bounded 1..=5, stops on success/unavailable).
         if policy.use_icmp {
             emit_probe_event(

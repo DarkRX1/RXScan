@@ -1491,6 +1491,15 @@ impl ProjectDb {
         }
         for (key, old_row) in &old_vulns {
             if !new_vulns.contains_key(key) {
+                let (resolution, confidence) = self
+                    .vuln_resolution(
+                        &old_row.product,
+                        &old_row.matched_version,
+                        &old_row.advisory_id,
+                        &old_row.dataset_version,
+                        scan_new,
+                    )
+                    .unwrap_or(("unknown".to_owned(), 40));
                 changes.push(GraphChange {
                     change_type: ChangeType::Removed,
                     entity_id: format!("vuln:{}:{}", old_row.product, old_row.advisory_id),
@@ -1498,9 +1507,9 @@ impl ProjectDb {
                         "potential {} match for {} {}",
                         old_row.advisory_id, old_row.product, old_row.matched_version
                     ),
-                    new_value: "no longer matched (upgraded or out of range)".to_owned(),
-                    confidence: 70,
-                    evidence: format!("matched in {scan_old}, absent in {scan_new}"),
+                    new_value: format!("no longer matched ({resolution})"),
+                    confidence,
+                    evidence: format!("matched in {scan_old}, absent in {scan_new}: {resolution}"),
                 });
             }
         }
@@ -2569,6 +2578,56 @@ impl ProjectDb {
             );
         }
         Ok(out)
+    }
+
+    fn vuln_resolution(
+        &self,
+        product: &str,
+        matched_version: &str,
+        advisory_id: &str,
+        old_dataset: &str,
+        scan_new: &str,
+    ) -> Result<(String, u8), ProjectDbError> {
+        let inventory = self.software_inventory(scan_new)?;
+        let observed: Vec<&str> = inventory
+            .iter()
+            .filter(|row| row.product.eq_ignore_ascii_case(product))
+            .map(|row| row.version.as_str())
+            .collect();
+        if observed.is_empty() {
+            return Ok(("coverage_insufficient".to_owned(), 30));
+        }
+        if !observed.contains(&matched_version) {
+            return Ok(("resolved_by_software_change".to_owned(), 75));
+        }
+        if self.vuln_dataset_changed(advisory_id, old_dataset, scan_new)? {
+            return Ok(("dataset_changed".to_owned(), 50));
+        }
+        Ok(("unknown".to_owned(), 40))
+    }
+
+    fn vuln_dataset_changed(
+        &self,
+        advisory_id: &str,
+        old_dataset: &str,
+        scan_new: &str,
+    ) -> Result<bool, ProjectDbError> {
+        validate_id(scan_new, "scan")?;
+        if !self.has_vuln_dataset_version() {
+            return Ok(false);
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT dataset_version FROM vulnerability_candidates
+             WHERE scan_run=?1 AND advisory_id=?2",
+        )?;
+        let versions: Vec<String> = stmt
+            .query_map(params![scan_new, advisory_id], |row| row.get(0))?
+            .collect::<Result<_, _>>()
+            .map_err(ProjectDbError::from)?;
+        if versions.is_empty() {
+            return Ok(true);
+        }
+        Ok(versions.iter().any(|version| version != old_dataset))
     }
 
     fn observations_by_entity_scan(

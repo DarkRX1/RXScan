@@ -41,12 +41,21 @@
 //! Exclusions always win. No discovery-derived address (DNS resolution,
 //! CIDR host) may expand scope; each is re-checked before probing.
 //!
-//! # Deferred sub-capabilities
+//! # Link-layer techniques
 //!
-//! ARP (local IPv4) and IPv6 Neighbor Discovery require raw link-layer
-//! access and are documented as deferred. Their technique variants exist so
-//! policy can reference them, but the executor returns `Unavailable` with
-//! structured evidence and never fakes support.
+//! ARP (local IPv4) combines a neighbor-cache read with a bounded active
+//! request (≤2 packets, on-link targets only per the route table). IPv6
+//! Neighbor Discovery sends bounded solicitations (≤2 per interface, known
+//! link-local interfaces only). Both require raw capability; without it the
+//! executor returns `Unavailable` with structured evidence and never fakes
+//! support.
+//!
+//! # Discovery strategy
+//!
+//! Local IPv4 targets lead with ARP (cache then active) plus ICMP/TCP
+//! corroboration; local IPv6 targets lead with NDP plus ICMPv6/TCP
+//! corroboration; routed targets use ICMP echo plus TCP reachability.
+//! Technique selection per address is visible in probe records.
 
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -96,13 +105,17 @@ impl AddressFamily {
     }
 }
 
-/// Discovery technique. `Arp` and `NeighborDiscovery` are deferred: policy
-/// may reference them, but execution returns `Unavailable` (never faked).
+/// Discovery technique. `Arp` combines the local neighbor cache with a
+/// bounded active request (on-link IPv4 only); `NeighborDiscovery` sends
+/// bounded IPv6 solicitations. Both degrade to `Unavailable` without raw
+/// capability, never faked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiscoveryTechnique {
     IcmpEcho,
     TcpConnect,
+    TcpSyn,
+    TcpAck,
     Arp,
     NeighborDiscovery,
 }
@@ -112,6 +125,8 @@ impl std::fmt::Display for DiscoveryTechnique {
         match self {
             Self::IcmpEcho => write!(f, "icmp_echo"),
             Self::TcpConnect => write!(f, "tcp_connect"),
+            Self::TcpSyn => write!(f, "tcp_syn"),
+            Self::TcpAck => write!(f, "tcp_ack"),
             Self::Arp => write!(f, "arp"),
             Self::NeighborDiscovery => write!(f, "neighbor_discovery"),
         }
@@ -270,6 +285,7 @@ pub struct HostDiscoveryPolicy {
     pub level: u8,
     pub use_icmp: bool,
     pub use_tcp: bool,
+    pub use_arp: bool,
     pub tcp_ports: Vec<u16>,
     pub icmp_attempts: u32,
     pub icmp_timeout_ms: u64,
@@ -384,6 +400,7 @@ impl HostDiscoveryPolicy {
             level,
             use_icmp,
             use_tcp,
+            use_arp: effective_level >= 2,
             tcp_ports,
             icmp_attempts: base_icmp_attempts_for_level(effective_level),
             icmp_timeout_ms: timeout,
@@ -394,7 +411,7 @@ impl HostDiscoveryPolicy {
     /// Short policy description for `--explain` and evidence.
     pub fn describe(&self) -> String {
         format!(
-            "discovery {} level {}: icmp {} (x{}, {}ms), tcp {} ({}, {}ms)",
+            "discovery {} level {}: icmp {} (x{}, {}ms), tcp {} ({}, {}ms), arp {}",
             self.mode.as_str(),
             self.level,
             if self.use_icmp { "on" } else { "off" },
@@ -411,28 +428,35 @@ impl HostDiscoveryPolicy {
                     .join(",")
             },
             self.tcp_timeout_ms,
+            if self.use_arp { "cache" } else { "off" },
         )
     }
 }
 
 /// Conclude host state from correlated probe records.
 ///
-/// * Any `Success` => `Alive` (ICMP reply 95, TCP connect 90, TCP RST 85).
+/// * Any `Success` => `Alive` (ICMP echo 95, ARP cache 95, TCP connect 90,
+///   TCP RST 85, TCP SYN/ACK reachability 88).
 /// * Else any `Unreachable` => `Unreachable` (70).
 /// * Else `Unknown` (30, or 20 when every probe was `Unavailable`).
+///
+/// Corroboration is recorded, never summed: when two or more independent
+/// techniques agree on `Alive`, confidence takes the strongest single
+/// source (capped at 95) and the evidence names every corroborating
+/// source.
 ///
 /// Cancelled probes are ignored for state (caller maps cancellation to the
 /// scheduler `Cancelled` terminal state, not a host state).
 pub fn conclude_state(probes: &[ProbeRecord]) -> (HostState, u8, Vec<DiscoveryTechnique>, String) {
     let mut techniques: BTreeSet<DiscoveryTechnique> = BTreeSet::new();
     for probe in probes {
-        // Stable ordering for technique display.
         techniques.insert(probe.technique);
     }
-    // Stable technique order: icmp, tcp, arp, nd.
     let ordered_techniques = [
         DiscoveryTechnique::IcmpEcho,
         DiscoveryTechnique::TcpConnect,
+        DiscoveryTechnique::TcpSyn,
+        DiscoveryTechnique::TcpAck,
         DiscoveryTechnique::Arp,
         DiscoveryTechnique::NeighborDiscovery,
     ]
@@ -440,22 +464,40 @@ pub fn conclude_state(probes: &[ProbeRecord]) -> (HostState, u8, Vec<DiscoveryTe
     .filter(|technique| techniques.contains(technique))
     .collect::<Vec<_>>();
 
-    // Alive: first success in probe order wins for confidence wording.
-    for probe in probes {
-        if let ProbeOutcome::Success { detail, .. } = &probe.outcome {
-            let confidence = if probe.technique == DiscoveryTechnique::IcmpEcho {
-                95
-            } else if detail.contains("refused") || detail.contains("RST") {
-                85
-            } else {
-                90
-            };
-            let evidence = format!(
-                "Host is Alive: {}. Confidence {confidence} via {}.",
-                detail, probe.technique
-            );
-            return (HostState::Alive, confidence, ordered_techniques, evidence);
-        }
+    let mut successes: Vec<&ProbeRecord> = probes
+        .iter()
+        .filter(|probe| matches!(probe.outcome, ProbeOutcome::Success { .. }))
+        .collect();
+    successes.sort_by_key(|probe| probe.technique);
+    if let Some(first) = successes.first() {
+        let confidence = confidence_for_success(first);
+        let sources: Vec<String> = successes
+            .iter()
+            .map(|probe| probe.technique.to_string())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let evidence = match first.outcome {
+            ProbeOutcome::Success { ref detail, .. } => {
+                if sources.len() > 1 {
+                    format!(
+                        "Host is Alive: {detail}. Confidence {confidence} via {} (corroborated by {}).",
+                        first.technique,
+                        sources.join(", "),
+                    )
+                } else {
+                    format!(
+                        "Host is Alive: {detail}. Confidence {confidence} via {}.",
+                        first.technique
+                    )
+                }
+            }
+            _ => format!(
+                "Host is Alive via {}. Confidence {confidence}.",
+                first.technique
+            ),
+        };
+        return (HostState::Alive, confidence, ordered_techniques, evidence);
     }
     for probe in probes {
         if let ProbeOutcome::Unreachable { detail } = &probe.outcome {
@@ -483,8 +525,25 @@ pub fn conclude_state(probes: &[ProbeRecord]) -> (HostState, u8, Vec<DiscoveryTe
     (HostState::Unknown, confidence, ordered_techniques, evidence)
 }
 
+fn confidence_for_success(probe: &ProbeRecord) -> u8 {
+    let detail = match &probe.outcome {
+        ProbeOutcome::Success { detail, .. } => detail.as_str(),
+        _ => "",
+    };
+    match probe.technique {
+        DiscoveryTechnique::IcmpEcho
+        | DiscoveryTechnique::Arp
+        | DiscoveryTechnique::NeighborDiscovery => 95,
+        DiscoveryTechnique::TcpSyn | DiscoveryTechnique::TcpAck => 88,
+        DiscoveryTechnique::TcpConnect if detail.contains("refused") || detail.contains("RST") => {
+            85
+        }
+        DiscoveryTechnique::TcpConnect => 90,
+    }
+    .min(95)
+}
+
 /// Expand a CIDR into bounded, deterministic, scope-checked host addresses.
-///
 /// Iterates `hosts()` lazily (never materializes massive ranges), keeps only
 /// addresses permitted by `scope`, preserves order, and takes at most
 /// `max_hosts`. A scan cap avoids pathological walks when a huge prefix is

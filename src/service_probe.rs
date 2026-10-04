@@ -35,8 +35,9 @@ use crate::model::{
 use crate::plan::{ScanGoal, SpeedSetting};
 use crate::probes::{
     CertFacts, ProbeAttempt, ProbeCtx, match_ssh_identification, parse_cert_facts, probe_ftp,
-    probe_generic, probe_http, probe_http_inner, probe_mysql, probe_postgres, probe_redis,
-    probe_smtp, probe_smtp_inner, probe_ssh, probe_tls, split_220_greeting,
+    probe_generic, probe_http, probe_http_inner, probe_mongodb, probe_mqtt, probe_mysql,
+    probe_postgres, probe_rdp, probe_redis, probe_smb, probe_smtp, probe_smtp_inner, probe_ssh,
+    probe_tls, split_220_greeting,
 };
 use crate::service::{
     MAX_PROBES_PER_PORT, PROBE_HTTP, PROBE_SMTP, ServiceObservation, plan_probes, service_asset_id,
@@ -781,6 +782,10 @@ fn run_plain_probe(probe_id: &str, ctx: &ProbeCtx) -> ProbeAttempt {
         "redis" => probe_redis(ctx),
         "mysql" => probe_mysql(ctx),
         "postgres" => probe_postgres(ctx),
+        "smb" => probe_smb(ctx),
+        "rdp" => probe_rdp(ctx),
+        "mongodb" => probe_mongodb(ctx),
+        "mqtt" => probe_mqtt(ctx),
         _ => probe_generic(ctx),
     }
 }
@@ -796,6 +801,10 @@ fn static_probe_id(name: &str) -> &'static str {
         "redis" => "redis",
         "mysql" => "mysql",
         "postgres" => "postgres",
+        "smb" => "smb",
+        "rdp" => "rdp",
+        "mongodb" => "mongodb",
+        "mqtt" => "mqtt",
         "tls" => "tls",
         _ => "generic",
     }

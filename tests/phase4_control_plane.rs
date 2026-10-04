@@ -1028,4 +1028,10 @@ fn explain_reflects_effective_policy() {
     // Auto honesty shows in explain.
     let auto_plan = compile(&["example.test", "--speed", "auto"]);
     assert!(auto_plan.explain().contains("non-adaptive"));
+    let connect_plan = compile(&["example.test", "--scan-mode", "connect"]);
+    assert!(
+        connect_plan
+            .explain()
+            .contains("mode requested=connect effective=connect")
+    );
 }

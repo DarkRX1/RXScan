@@ -1,38 +1,249 @@
 {
-  "schema_version": 1,
   "fingerprints": [
     {
-      "id": "ssh-dropbear",
-      "protocol": "ssh",
-      "probe": "ssh",
-      "matcher": {
-        "kind": "contains",
-        "pattern": "dropbear",
-        "case_insensitive": true
-      },
-      "product": "Dropbear",
-      "vendor": "openbsd",
       "confidence": 85,
-      "source": "seed-v1"
+      "id": "ssh-aruba",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "Aruba"
+      },
+      "probe": "ssh",
+      "product": "Aruba SSH",
+      "protocol": "ssh",
+      "source": "corpus-v2",
+      "vendor": "aruba"
     },
     {
-      "id": "ssh-openssh",
-      "protocol": "ssh",
-      "probe": "ssh",
+      "confidence": 85,
+      "id": "ssh-cisco",
       "matcher": {
-        "kind": "prefix",
-        "pattern": "SSH-2.0-OpenSSH",
-        "case_insensitive": false
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "Cisco"
       },
-      "product": "OpenSSH",
-      "vendor": "openbsd",
-      "confidence": 90,
+      "probe": "ssh",
+      "product": "Cisco SSH",
+      "protocol": "ssh",
+      "source": "corpus-v2",
+      "vendor": "cisco"
+    },
+    {
+      "confidence": 80,
+      "id": "ssh-cryptlib",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "cryptlib"
+      },
+      "probe": "ssh",
+      "product": "cryptlib",
+      "protocol": "ssh",
+      "source": "corpus-v2",
+      "vendor": "cryptlib"
+    },
+    {
+      "confidence": 85,
+      "id": "ssh-dropbear",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "dropbear"
+      },
+      "probe": "ssh",
+      "product": "Dropbear",
+      "protocol": "ssh",
       "source": "seed-v1",
+      "vendor": "matt-johnston",
       "version_extractor": {
-        "type": "after_delimiter",
-        "delimiter": "OpenSSH_",
-        "max_len": 32
+        "delimiter": "dropbear_",
+        "max_len": 32,
+        "type": "after_delimiter"
       }
+    },
+    {
+      "confidence": 85,
+      "id": "ssh-fortinet",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "FortiOS"
+      },
+      "probe": "ssh",
+      "product": "FortiOS SSH",
+      "protocol": "ssh",
+      "source": "corpus-v2",
+      "vendor": "fortinet"
+    },
+    {
+      "confidence": 80,
+      "id": "ssh-freesshd",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "freeSSHd"
+      },
+      "probe": "ssh",
+      "product": "freeSSHd",
+      "protocol": "ssh",
+      "source": "corpus-v2",
+      "vendor": "freesshd"
+    },
+    {
+      "confidence": 85,
+      "id": "ssh-huawei",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "Huawei"
+      },
+      "probe": "ssh",
+      "product": "Huawei SSH",
+      "protocol": "ssh",
+      "source": "corpus-v2",
+      "vendor": "huawei"
+    },
+    {
+      "confidence": 85,
+      "id": "ssh-juniper",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "Juniper"
+      },
+      "probe": "ssh",
+      "product": "Juniper SSH",
+      "protocol": "ssh",
+      "source": "corpus-v2",
+      "vendor": "juniper"
+    },
+    {
+      "confidence": 80,
+      "id": "ssh-libssh",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "libssh"
+      },
+      "probe": "ssh",
+      "product": "libssh",
+      "protocol": "ssh",
+      "source": "corpus-v2",
+      "vendor": "libssh",
+      "version_extractor": {
+        "delimiter": "libssh_",
+        "max_len": 32,
+        "type": "after_delimiter"
+      }
+    },
+    {
+      "confidence": 80,
+      "id": "ssh-mikrotik",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "RouterOS"
+      },
+      "probe": "ssh",
+      "product": "RouterOS SSH",
+      "protocol": "ssh",
+      "source": "corpus-v2",
+      "vendor": "mikrotik"
+    },
+    {
+      "confidence": 90,
+      "id": "ssh-openssh",
+      "matcher": {
+        "case_insensitive": false,
+        "kind": "prefix",
+        "pattern": "SSH-2.0-OpenSSH"
+      },
+      "probe": "ssh",
+      "product": "OpenSSH",
+      "protocol": "ssh",
+      "source": "seed-v1",
+      "vendor": "openbsd",
+      "version_extractor": {
+        "delimiter": "OpenSSH_",
+        "max_len": 32,
+        "type": "after_delimiter"
+      }
+    },
+    {
+      "confidence": 80,
+      "id": "ssh-paramiko",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "paramiko"
+      },
+      "probe": "ssh",
+      "product": "Paramiko",
+      "protocol": "ssh",
+      "source": "corpus-v2",
+      "vendor": "paramiko",
+      "version_extractor": {
+        "delimiter": "paramiko_",
+        "max_len": 32,
+        "type": "after_delimiter"
+      }
+    },
+    {
+      "confidence": 80,
+      "id": "ssh-romsshell",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "RomSShell"
+      },
+      "probe": "ssh",
+      "product": "RomSShell",
+      "protocol": "ssh",
+      "source": "corpus-v2",
+      "vendor": "allegro"
+    },
+    {
+      "confidence": 75,
+      "id": "ssh-ssh1",
+      "matcher": {
+        "case_insensitive": false,
+        "kind": "prefix",
+        "pattern": "SSH-1."
+      },
+      "probe": "ssh",
+      "product": "SSHv1 speaker",
+      "protocol": "ssh",
+      "source": "corpus-v2",
+      "vendor": null
+    },
+    {
+      "confidence": 80,
+      "id": "ssh-twisted",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "Twisted"
+      },
+      "probe": "ssh",
+      "product": "Twisted Conch",
+      "protocol": "ssh",
+      "source": "corpus-v2",
+      "vendor": "twisted"
+    },
+    {
+      "confidence": 80,
+      "id": "ssh-ubiquiti",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "Ubiquiti"
+      },
+      "probe": "ssh",
+      "product": "Ubiquiti SSH",
+      "protocol": "ssh",
+      "source": "corpus-v2",
+      "vendor": "ubiquiti"
     }
-  ]
+  ],
+  "schema_version": 1
 }

@@ -7,6 +7,12 @@
 //! (`ICMP probe unavailable: insufficient privileges ...`) so TCP fallback
 //! can proceed. Every probe honors timeout, cancellation, bounded retries
 //! (via attempts), and prompt resource cleanup (socket closed on every path).
+//!
+//! Evidence scope: echo request/reply only (IPv4 type 8/0, IPv6 128/129).
+//! Destination-unreachable and time-exceeded classification requires raw
+//! sockets to observe ICMP error messages (ping sockets do not deliver them)
+//! and is therefore not claimed here; ambiguous silence stays `Timeout`,
+//! never host state.
 
 use std::net::IpAddr;
 use std::os::raw::{c_int, c_void};

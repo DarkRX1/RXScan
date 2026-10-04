@@ -1,0 +1,117 @@
+{
+  "schema_version": 1,
+  "fingerprints": [
+    {
+      "id": "ssh-bitvise",
+      "protocol": "ssh",
+      "probe": "ssh",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Bitvise",
+        "case_insensitive": true
+      },
+      "product": "Bitvise",
+      "vendor": "bitvise",
+      "confidence": 85,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "ssh-crusoe",
+      "protocol": "ssh",
+      "probe": "ssh",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Crusoe",
+        "case_insensitive": true
+      },
+      "product": "Crusoe SSH",
+      "vendor": "crusoe",
+      "confidence": 70,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "ssh-flowssh",
+      "protocol": "ssh",
+      "probe": "ssh",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "FlowSsh",
+        "case_insensitive": true
+      },
+      "product": "FlowSsh",
+      "vendor": "bitvise",
+      "confidence": 78,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "ssh-ipssh",
+      "protocol": "ssh",
+      "probe": "ssh",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "IpSsh",
+        "case_insensitive": true
+      },
+      "product": "IpSsh",
+      "vendor": "ipssh",
+      "confidence": 75,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "ssh-mocana",
+      "protocol": "ssh",
+      "probe": "ssh",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Mocana",
+        "case_insensitive": true
+      },
+      "product": "Mocana",
+      "vendor": "mocana",
+      "confidence": 75,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "ssh-openssh-windows",
+      "protocol": "ssh",
+      "probe": "ssh",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "OpenSSH_for_Windows",
+        "case_insensitive": true
+      },
+      "product": "OpenSSH for Windows",
+      "vendor": "microsoft",
+      "confidence": 85,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "ssh-sentry",
+      "protocol": "ssh",
+      "probe": "ssh",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Sentry",
+        "case_insensitive": true
+      },
+      "product": "Sentry SSH",
+      "vendor": "servertech",
+      "confidence": 72,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "ssh-tectia",
+      "protocol": "ssh",
+      "probe": "ssh",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Tectia",
+        "case_insensitive": true
+      },
+      "product": "Tectia",
+      "vendor": "ssh",
+      "confidence": 82,
+      "source": "corpus-v3"
+    }
+  ]
+}

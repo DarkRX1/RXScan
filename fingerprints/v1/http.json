@@ -2,6 +2,20 @@
   "schema_version": 1,
   "fingerprints": [
     {
+      "id": "http-akami-ghost",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "ghost",
+        "case_insensitive": true
+      },
+      "product": "Ghost",
+      "vendor": "ghost",
+      "confidence": 85,
+      "source": "corpus-v2"
+    },
+    {
       "id": "http-apache",
       "protocol": "http",
       "probe": "http",
@@ -12,11 +26,44 @@
       },
       "product": "Apache",
       "vendor": "apache",
-      "confidence": 85,
+      "confidence": 80,
       "source": "seed-v1",
       "version_extractor": {
         "type": "prefixed_token",
         "prefix": "Apache/",
+        "max_len": 32
+      }
+    },
+    {
+      "id": "http-apache-coyote",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Coyote",
+        "case_insensitive": true
+      },
+      "product": "Tomcat",
+      "vendor": "apache",
+      "confidence": 80,
+      "source": "corpus-v2"
+    },
+    {
+      "id": "http-apache-traffic-server",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "ATS/",
+        "case_insensitive": true
+      },
+      "product": "Traffic Server",
+      "vendor": "apache",
+      "confidence": 80,
+      "source": "corpus-v2",
+      "version_extractor": {
+        "type": "prefixed_token",
+        "prefix": "ATS/",
         "max_len": 32
       }
     },
@@ -40,6 +87,315 @@
       }
     },
     {
+      "id": "http-cherokee",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Cherokee",
+        "case_insensitive": true
+      },
+      "product": "Cherokee",
+      "vendor": "cherokee",
+      "confidence": 80,
+      "source": "corpus-v2"
+    },
+    {
+      "id": "http-cloudflare",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "cloudflare",
+        "case_insensitive": true
+      },
+      "product": "Cloudflare",
+      "vendor": "cloudflare",
+      "confidence": 75,
+      "source": "corpus-v2"
+    },
+    {
+      "id": "http-cloudfront",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "CloudFront",
+        "case_insensitive": true
+      },
+      "product": "CloudFront",
+      "vendor": "amazon",
+      "confidence": 75,
+      "source": "corpus-v2"
+    },
+    {
+      "id": "http-drupal",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Drupal",
+        "case_insensitive": true
+      },
+      "product": "Drupal",
+      "vendor": "drupal",
+      "confidence": 85,
+      "source": "corpus-v2"
+    },
+    {
+      "id": "http-envoy",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "envoy",
+        "case_insensitive": true
+      },
+      "product": "Envoy",
+      "vendor": "envoyproxy",
+      "confidence": 80,
+      "source": "corpus-v2"
+    },
+    {
+      "id": "http-express",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Express",
+        "case_insensitive": true
+      },
+      "product": "Express",
+      "vendor": "expressjs",
+      "confidence": 85,
+      "source": "corpus-v2"
+    },
+    {
+      "id": "http-fastly",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Fastly",
+        "case_insensitive": true
+      },
+      "product": "Fastly",
+      "vendor": "fastly",
+      "confidence": 75,
+      "source": "corpus-v2"
+    },
+    {
+      "id": "http-gitlab",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "GitLab",
+        "case_insensitive": true
+      },
+      "product": "GitLab",
+      "vendor": "gitlab",
+      "confidence": 85,
+      "source": "corpus-v2"
+    },
+    {
+      "id": "http-grafana",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Grafana",
+        "case_insensitive": true
+      },
+      "product": "Grafana",
+      "vendor": "grafana",
+      "confidence": 85,
+      "source": "corpus-v2"
+    },
+    {
+      "id": "http-gunicorn",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "gunicorn",
+        "case_insensitive": true
+      },
+      "product": "Gunicorn",
+      "vendor": "gunicorn",
+      "confidence": 80,
+      "source": "corpus-v2",
+      "version_extractor": {
+        "type": "prefixed_token",
+        "prefix": "gunicorn/",
+        "max_len": 32
+      }
+    },
+    {
+      "id": "http-gws",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "gws/",
+        "case_insensitive": true
+      },
+      "product": "Google Web Server",
+      "vendor": "google",
+      "confidence": 75,
+      "source": "corpus-v2"
+    },
+    {
+      "id": "http-haproxy",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "HAProxy",
+        "case_insensitive": true
+      },
+      "product": "HAProxy",
+      "vendor": "haproxy",
+      "confidence": 80,
+      "source": "corpus-v2"
+    },
+    {
+      "id": "http-iis",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Microsoft-IIS",
+        "case_insensitive": true
+      },
+      "product": "IIS",
+      "vendor": "microsoft",
+      "confidence": 80,
+      "source": "corpus-v2",
+      "version_extractor": {
+        "type": "prefixed_token",
+        "prefix": "Microsoft-IIS/",
+        "max_len": 32
+      }
+    },
+    {
+      "id": "http-jenkins",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Jenkins",
+        "case_insensitive": true
+      },
+      "product": "Jenkins",
+      "vendor": "jenkins",
+      "confidence": 85,
+      "source": "corpus-v2"
+    },
+    {
+      "id": "http-jetty",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Jetty",
+        "case_insensitive": true
+      },
+      "product": "Jetty",
+      "vendor": "eclipse",
+      "confidence": 80,
+      "source": "corpus-v2"
+    },
+    {
+      "id": "http-joomla",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Joomla",
+        "case_insensitive": true
+      },
+      "product": "Joomla",
+      "vendor": "joomla",
+      "confidence": 85,
+      "source": "corpus-v2"
+    },
+    {
+      "id": "http-kibana",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "kibana",
+        "case_insensitive": true
+      },
+      "product": "Kibana",
+      "vendor": "elastic",
+      "confidence": 85,
+      "source": "corpus-v2"
+    },
+    {
+      "id": "http-lighttpd",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "lighttpd",
+        "case_insensitive": true
+      },
+      "product": "lighttpd",
+      "vendor": "lighttpd",
+      "confidence": 80,
+      "source": "corpus-v2",
+      "version_extractor": {
+        "type": "prefixed_token",
+        "prefix": "lighttpd/",
+        "max_len": 32
+      }
+    },
+    {
+      "id": "http-litespeed",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "LiteSpeed",
+        "case_insensitive": true
+      },
+      "product": "LiteSpeed",
+      "vendor": "litespeed",
+      "confidence": 80,
+      "source": "corpus-v2"
+    },
+    {
+      "id": "http-minio",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "MinIO",
+        "case_insensitive": true
+      },
+      "product": "MinIO",
+      "vendor": "minio",
+      "confidence": 85,
+      "source": "corpus-v2"
+    },
+    {
+      "id": "http-nextjs",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Next.js",
+        "case_insensitive": true
+      },
+      "product": "Next.js",
+      "vendor": "vercel",
+      "confidence": 85,
+      "source": "corpus-v2"
+    },
+    {
       "id": "http-nginx",
       "protocol": "http",
       "probe": "http",
@@ -57,6 +413,189 @@
         "prefix": "nginx/",
         "max_len": 32
       }
+    },
+    {
+      "id": "http-nodejs",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Node.js",
+        "case_insensitive": true
+      },
+      "product": "Node.js",
+      "vendor": "nodejs",
+      "confidence": 80,
+      "source": "corpus-v2"
+    },
+    {
+      "id": "http-nuxt",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Nuxt",
+        "case_insensitive": true
+      },
+      "product": "Nuxt",
+      "vendor": "nuxt",
+      "confidence": 85,
+      "source": "corpus-v2"
+    },
+    {
+      "id": "http-openresty",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "openresty",
+        "case_insensitive": true
+      },
+      "product": "OpenResty",
+      "vendor": "openresty",
+      "confidence": 80,
+      "source": "corpus-v2"
+    },
+    {
+      "id": "http-prometheus",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Prometheus",
+        "case_insensitive": true
+      },
+      "product": "Prometheus",
+      "vendor": "prometheus",
+      "confidence": 85,
+      "source": "corpus-v2"
+    },
+    {
+      "id": "http-squid",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "squid",
+        "case_insensitive": true
+      },
+      "product": "Squid",
+      "vendor": "squid",
+      "confidence": 80,
+      "source": "corpus-v2",
+      "version_extractor": {
+        "type": "prefixed_token",
+        "prefix": "squid/",
+        "max_len": 32
+      }
+    },
+    {
+      "id": "http-tengine",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Tengine",
+        "case_insensitive": true
+      },
+      "product": "Tengine",
+      "vendor": "alibaba",
+      "confidence": 80,
+      "source": "corpus-v2"
+    },
+    {
+      "id": "http-tornado",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "TornadoServer",
+        "case_insensitive": true
+      },
+      "product": "Tornado",
+      "vendor": "tornadoweb",
+      "confidence": 80,
+      "source": "corpus-v2",
+      "version_extractor": {
+        "type": "prefixed_token",
+        "prefix": "TornadoServer/",
+        "max_len": 32
+      }
+    },
+    {
+      "id": "http-traefik",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Traefik",
+        "case_insensitive": true
+      },
+      "product": "Traefik",
+      "vendor": "traefik",
+      "confidence": 80,
+      "source": "corpus-v2"
+    },
+    {
+      "id": "http-uvicorn",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "uvicorn",
+        "case_insensitive": true
+      },
+      "product": "Uvicorn",
+      "vendor": "encode",
+      "confidence": 80,
+      "source": "corpus-v2"
+    },
+    {
+      "id": "http-varnish",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Varnish",
+        "case_insensitive": true
+      },
+      "product": "Varnish",
+      "vendor": "varnish",
+      "confidence": 80,
+      "source": "corpus-v2"
+    },
+    {
+      "id": "http-werkzeug",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Werkzeug",
+        "case_insensitive": true
+      },
+      "product": "Werkzeug",
+      "vendor": "pallets",
+      "confidence": 80,
+      "source": "corpus-v2",
+      "version_extractor": {
+        "type": "prefixed_token",
+        "prefix": "Werkzeug/",
+        "max_len": 32
+      }
+    },
+    {
+      "id": "http-wordpress",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "WordPress",
+        "case_insensitive": true
+      },
+      "product": "WordPress",
+      "vendor": "wordpress",
+      "confidence": 85,
+      "source": "corpus-v2"
     }
   ]
 }

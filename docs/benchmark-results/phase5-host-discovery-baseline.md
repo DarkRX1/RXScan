@@ -7,7 +7,7 @@
   loopback check (`127.0.0.1` / `::1`) covered separately in tests. No public
   Internet traffic.
 - Command: `cargo run --example phase5_bench`
-- Host: Linux DarkRX 7.0.12 x86_64, rustc 1.98.1
+- Host: Linux x86_64 (generic test machine), rustc 1.98.1
 - Scope: `127.0.0.0/29`, level 3, discover mode, balanced speed
 
 ## Results (controlled local, no superiority claims)

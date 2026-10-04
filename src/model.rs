@@ -454,6 +454,7 @@ pub enum RelationshipKind {
     MailExchangeFor,
     NameServerFor,
     ReverseResolvesTo,
+    ServiceDiscoveredBySrv,
     // Correlation-engine relationships. Every edge carries provenance on
     // the owning event; edges never imply identity equivalence (a shared
     // certificate relates hosts, it does not merge them).

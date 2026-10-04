@@ -109,11 +109,19 @@ impl Drop for OwnedFd {
 }
 
 /// Explicit per-port conclusion. Timeouts stay distinct from closed.
+/// `FilteredOrTimedOut` is the legacy connect-scan label for silence;
+/// new code prefers `OpenOrFiltered` (silence proves neither open nor
+/// closed). `Filtered` requires positive filtered evidence (ICMP
+/// admin-prohibited or equivalent); `Unknown` means no conclusion was
+/// reached within budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PortState {
     Open,
     Closed,
     FilteredOrTimedOut,
+    Filtered,
+    OpenOrFiltered,
+    Unknown,
     Error,
 }
 
@@ -123,8 +131,20 @@ impl std::fmt::Display for PortState {
             Self::Open => write!(f, "open"),
             Self::Closed => write!(f, "closed"),
             Self::FilteredOrTimedOut => write!(f, "filtered_or_timed_out"),
+            Self::Filtered => write!(f, "filtered"),
+            Self::OpenOrFiltered => write!(f, "open_or_filtered"),
+            Self::Unknown => write!(f, "unknown"),
             Self::Error => write!(f, "error"),
         }
+    }
+}
+
+impl PortState {
+    pub fn is_silence(self) -> bool {
+        matches!(
+            self,
+            Self::FilteredOrTimedOut | Self::Filtered | Self::OpenOrFiltered | Self::Unknown
+        )
     }
 }
 
@@ -188,6 +208,21 @@ pub struct ScanOutcome {
 /// Trait for port scanning (real non-blocking + fakes for tests).
 pub trait PortScanner: Send + Sync {
     fn scan(&self, ip: IpAddr, ports: &[u16], config: &ScanConfig) -> ScanOutcome;
+    /// Runtime fallback note (e.g. SYN requested but connect executed).
+    /// `None` when the executed mechanism matches the configured one.
+    fn runtime_note(&self) -> Option<String> {
+        None
+    }
+    /// Actual mechanism used per address (`syn` or `connect`). Defaults to
+    /// connect; scanners with multiple mechanisms override.
+    fn address_mechanisms(&self) -> Vec<(IpAddr, String)> {
+        Vec::new()
+    }
+    /// Adaptive pacing decisions from the most recent scans (bounded).
+    /// Empty when the scanner uses fixed policy windows.
+    fn pacing_log(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Native non-blocking connect scanner (unprivileged baseline, no raw SYN).

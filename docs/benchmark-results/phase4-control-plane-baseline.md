@@ -4,7 +4,7 @@
 - RXScan version: 0.1.0 (Phase 4 control plane)
 - Fixture class: deterministic in-process stub modules, no network I/O
 - Command: `cargo run --example phase4_bench`
-- Host: Linux DarkRX 7.0.12 x86_64, 12 CPUs, rustc 1.98.1
+- Host: Linux x86_64 (generic test machine), rustc 1.98.1
 - Scope: `example.test`, level 3, balanced speed
 
 ## Results (controlled local, no superiority claims)

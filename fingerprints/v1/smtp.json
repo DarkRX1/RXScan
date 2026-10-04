@@ -1,0 +1,150 @@
+{
+  "fingerprints": [
+    {
+      "confidence": 85,
+      "id": "smtp-communigate",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "CommuniGate"
+      },
+      "probe": "smtp",
+      "product": "CommuniGate",
+      "protocol": "smtp",
+      "source": "corpus-v2",
+      "vendor": "communigate"
+    },
+    {
+      "confidence": 85,
+      "id": "smtp-courier",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "Courier"
+      },
+      "probe": "smtp",
+      "product": "Courier MTA",
+      "protocol": "smtp",
+      "source": "corpus-v2",
+      "vendor": "courier"
+    },
+    {
+      "confidence": 85,
+      "id": "smtp-exchange",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "Microsoft ESMTP"
+      },
+      "probe": "smtp",
+      "product": "Exchange",
+      "protocol": "smtp",
+      "source": "corpus-v2",
+      "vendor": "microsoft"
+    },
+    {
+      "confidence": 90,
+      "id": "smtp-exim",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "Exim"
+      },
+      "probe": "smtp",
+      "product": "Exim",
+      "protocol": "smtp",
+      "source": "corpus-v2",
+      "vendor": "exim"
+    },
+    {
+      "confidence": 85,
+      "id": "smtp-haraka",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "Haraka"
+      },
+      "probe": "smtp",
+      "product": "Haraka",
+      "protocol": "smtp",
+      "source": "corpus-v2",
+      "vendor": "haraka"
+    },
+    {
+      "confidence": 85,
+      "id": "smtp-opensmtpd",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "OpenSMTPD"
+      },
+      "probe": "smtp",
+      "product": "OpenSMTPD",
+      "protocol": "smtp",
+      "source": "corpus-v2",
+      "vendor": "openbsd"
+    },
+    {
+      "confidence": 90,
+      "id": "smtp-postfix",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "Postfix"
+      },
+      "probe": "smtp",
+      "product": "Postfix",
+      "protocol": "smtp",
+      "source": "corpus-v2",
+      "vendor": "postfix"
+    },
+    {
+      "confidence": 85,
+      "id": "smtp-qmail",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "qmail"
+      },
+      "probe": "smtp",
+      "product": "qmail",
+      "protocol": "smtp",
+      "source": "corpus-v2",
+      "vendor": "qmail"
+    },
+    {
+      "confidence": 90,
+      "id": "smtp-sendmail",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "Sendmail"
+      },
+      "probe": "smtp",
+      "product": "Sendmail",
+      "protocol": "smtp",
+      "source": "corpus-v2",
+      "vendor": "sendmail",
+      "version_extractor": {
+        "delimiter": "Sendmail ",
+        "max_len": 32,
+        "type": "after_delimiter"
+      }
+    },
+    {
+      "confidence": 85,
+      "id": "smtp-zimbra",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "Zimbra"
+      },
+      "probe": "smtp",
+      "product": "Zimbra",
+      "protocol": "smtp",
+      "source": "corpus-v2",
+      "vendor": "zimbra"
+    }
+  ],
+  "schema_version": 1
+}

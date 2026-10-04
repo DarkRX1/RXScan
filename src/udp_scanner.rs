@@ -20,6 +20,14 @@
 //!   (uncertainty — never called open or closed).
 //! * Unreachable/local failures ⇒ `Error` (not target state).
 //!
+//! # State-model interpretation
+//!
+//! `Open` means open_confirmed (a response was received); a grammar match
+//! adds protocol_response identity on top. `Closed` covers ICMP port
+//! unreachable. `OpenOrFiltered` covers both silent timeout and
+//! administratively filtered without a distinguishing signal. `Error` is a
+//! local failure, never a statement about the target.
+//!
 //! Every attempt honors timeout, cancellation (prompt, ~25ms poll slices),
 //! bounded retries (silence only, at most one retry), overall task
 //! deadline, and immediate FD cleanup.

@@ -244,6 +244,12 @@ pub struct ScanPlan {
     /// Phase 11: optional streamed managed content candidate file.
     #[serde(default)]
     pub content_wordlist: Option<std::path::PathBuf>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub scan_mode: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub scan_mode_requested: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub scan_mode_fallback: String,
 }
 
 #[derive(Debug, Error)]
@@ -454,9 +460,36 @@ impl ScanPlan {
             "Content discovery policy: {}.",
             crate::content::ContentDiscoveryPolicy::new(level, goal, speed).describe()
         ));
+        let requested_mode = cli
+            .scan_mode
+            .as_deref()
+            .map(crate::scan_mode::ScanMode::parse)
+            .transpose()
+            .map_err(|reason| PlanError::InvalidBudget {
+                field: "scan_mode".to_owned(),
+                reason,
+            })?
+            .unwrap_or_default();
+        let mode_resolution =
+            crate::scan_mode::resolve(requested_mode, crate::scan_mode::ModeCapability::probe());
+        reasons.push(format!(
+            "TCP scan mode: requested {}, resolved {} ({}).",
+            mode_resolution.requested,
+            mode_resolution.resolved.as_str(),
+            mode_resolution.reason
+        ));
+        if let Some(fallback) = mode_resolution.fallback() {
+            reasons.push(format!(
+                "Scan-mode fallback: effective mechanism is connect ({fallback}); output records requested_mode, effective_mode, and fallback_reason."
+            ));
+        }
+        reasons.push(
+            "Adaptive pacing: feedback-driven concurrency/timeout/ retry-delay suggestions stay within configured budgets; the scheduler remains authoritative and every adjustment is deterministic and explainable."
+                .to_owned(),
+        );
         let mut skipped = level_skipped;
         skipped.push(
-            "Current execution includes bounded host discovery, TCP connect port scanning, service probing, DNS observations, HTTP/1.1 web observations, crawling, baseline checks, managed content discovery, inert contextual GET query fuzzing where evidence permits, plus passive post-scan intelligence (OS/device correlation, SSH identity, TLS posture, software inventory, offline vulnerability candidates, attention/change summaries in project mode). Not implemented: active OS-fingerprint probes, exhaustive cipher enumeration, SNMP authenticated polling, UPnP device-description fetching (SSDP stays classification-only; LOCATION never fetched), HTTP technology normalization beyond service fingerprints, network-distance estimation beyond honest absence, per-entity project explain CLI, offline vuln re-evaluation CLI, password attacks / exploitation / destructive validation, JavaScript execution / browser automation, POST workflows, distributed scanning."
+            "Current execution includes bounded host discovery (ICMP echo, TCP reachability, local ARP cache, interface/link-scope awareness), TCP port scanning with capability-gated syn/auto mode selection (raw SYN on capable Linux IPv4 hosts, connect otherwise; requested/effective/fallback always recorded), service probing (SSH/HTTP/TLS/FTP/SMTP/Redis/MySQL/PostgreSQL/SMB/RDP/MongoDB/MQTT/generic, no auth), DNS observations (A/AAAA/CNAME/MX/NS/TXT/PTR/SRV), HTTP/1.1 web observations with technology normalization, crawling, baseline checks, managed content discovery, inert contextual GET query fuzzing where evidence permits, plus passive post-scan intelligence (OS/device correlation, SSH identity, TLS posture, software inventory, offline vulnerability candidates, attention/change summaries in project mode) and per-entity project explain. Not implemented: raw SYN on IPv6 or non-Linux platforms, active OS-fingerprint probes, exhaustive cipher enumeration, SNMP authenticated polling, UPnP device-description fetching (SSDP stays classification-only; LOCATION never fetched), network-distance estimation beyond honest absence, password attacks / exploitation / destructive validation, JavaScript execution / browser automation, POST workflows, distributed scanning."
                 .to_owned(),
         );
         Ok(Self {
@@ -482,6 +515,9 @@ impl ScanPlan {
             discovery_mode,
             discovery_ports,
             content_wordlist,
+            scan_mode: mode_resolution.resolved.as_str().to_owned(),
+            scan_mode_requested: mode_resolution.requested.as_str().to_owned(),
+            scan_mode_fallback: mode_resolution.fallback().unwrap_or_default().to_owned(),
         })
     }
     pub fn explain(&self) -> String {
@@ -555,6 +591,11 @@ impl ScanPlan {
                 self.goal,
                 self.tcp_ports.clone(),
                 self.speed,
+            )
+            .with_scan_mode(
+                &self.scan_mode_requested,
+                &self.scan_mode,
+                &self.scan_mode_fallback,
             )
             .describe(),
             crate::service_probe::ServicePolicy::new(self.level, self.goal, self.speed).describe(),

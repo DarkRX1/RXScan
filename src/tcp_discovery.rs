@@ -56,6 +56,9 @@ pub struct TcpScanPolicy {
     pub goal: ScanGoal,
     pub selection: TcpPortSelection,
     pub speed: SpeedSetting,
+    pub requested_mode: String,
+    pub effective_mode: String,
+    pub fallback_reason: String,
 }
 
 impl TcpScanPolicy {
@@ -70,7 +73,22 @@ impl TcpScanPolicy {
             goal,
             selection,
             speed,
+            requested_mode: "auto".to_owned(),
+            effective_mode: "connect".to_owned(),
+            fallback_reason: String::new(),
         }
+    }
+
+    pub fn with_scan_mode(
+        mut self,
+        requested: &str,
+        effective: &str,
+        fallback_reason: &str,
+    ) -> Self {
+        self.requested_mode = requested.to_owned();
+        self.effective_mode = effective.to_owned();
+        self.fallback_reason = fallback_reason.to_owned();
+        self
     }
 
     /// Concrete port list for one task. Explicit/`all` in task params win;
@@ -133,7 +151,7 @@ impl TcpScanPolicy {
             )
         };
         format!(
-            "tcp {} level {} ({:?}): {} [{}], timeout {}ms, concurrency {}, retries {}",
+            "tcp {} level {} ({:?}): {} [{}], timeout {}ms, concurrency {}, retries {}, mode requested={} effective={}{}",
             resolved.source,
             self.level,
             self.goal,
@@ -142,6 +160,13 @@ impl TcpScanPolicy {
             self.per_port_timeout().as_millis(),
             self.concurrency(),
             self.max_retries(),
+            self.requested_mode,
+            self.effective_mode,
+            if self.fallback_reason.is_empty() {
+                String::new()
+            } else {
+                format!(" fallback={}", self.fallback_reason)
+            },
         )
     }
 }
@@ -453,6 +478,8 @@ fn execute_port_scan(
             "policy": policy.describe(),
             "port_source": resolved.source.to_string(),
             "port_count": resolved.ports.len(),
+            "requested_mode": policy.requested_mode,
+            "effective_mode": policy.effective_mode,
             "addresses": ips.iter().map(IpAddr::to_string).collect::<Vec<_>>(),
         }),
         &provenance,
@@ -477,6 +504,11 @@ fn execute_port_scan(
     let mut truncated_any = false;
     let mut unscanned_total = 0usize;
     let mut fd_peak_max = 0usize;
+    let mut pacing_timeouts: u64 = 0;
+    let mut pacing_errors: u64 = 0;
+    let mut pacing_attempted: u64 = 0;
+    let mut pacing_rtt_ms: u64 = 0;
+    let mut pacing_rtt_n: u64 = 0;
 
     for (ip, parent_id) in ips.iter().zip(parent_ids.iter()) {
         // Global + task cancellation both stop new work, but already
@@ -516,6 +548,15 @@ fn execute_port_scan(
         unscanned_total += outcome.unscanned;
         fd_peak_max = fd_peak_max.max(outcome.fd_peak);
         for probe in &outcome.probes {
+            pacing_attempted += 1;
+            if probe.state.is_silence() {
+                pacing_timeouts += 1;
+            } else if probe.state == PortState::Error {
+                pacing_errors += 1;
+            } else {
+                pacing_rtt_ms += probe.latency.as_millis() as u64;
+                pacing_rtt_n += 1;
+            }
             match probe.state {
                 PortState::Open => {
                     *counts.get_mut("open").unwrap() += 1;
@@ -666,16 +707,17 @@ fn execute_port_scan(
                         )?;
                     }
                 }
-                PortState::FilteredOrTimedOut => {
+                PortState::FilteredOrTimedOut | PortState::OpenOrFiltered => {
                     *counts.get_mut("filtered_or_timed_out").unwrap() += 1;
                     if detailed {
+                        let label = probe.state.to_string();
                         push_port_state_asset(
                             &mut assets,
                             parent_id,
                             ip,
                             &target_label,
                             probe,
-                            "filtered_or_timed_out",
+                            &label,
                             started_at,
                             &provenance,
                         );
@@ -688,11 +730,55 @@ fn execute_port_scan(
                                 "address": ip.to_string(),
                                 "transport": "tcp",
                                 "port": probe.port,
-                                "state": "filtered_or_timed_out",
+                                "state": label,
                                 "attempts": probe.attempts,
                             }),
                             &provenance,
                         )?;
+                    }
+                }
+                PortState::Filtered => {
+                    *counts.get_mut("filtered_or_timed_out").unwrap() += 1;
+                    if detailed {
+                        push_port_state_asset(
+                            &mut assets,
+                            parent_id,
+                            ip,
+                            &target_label,
+                            probe,
+                            "filtered",
+                            started_at,
+                            &provenance,
+                        );
+                        push_event(
+                            &mut events,
+                            EventKind::PortTimedOut,
+                            Some(AssetId(port_asset_id(parent_id, "tcp", probe.port))),
+                            serde_json::json!({
+                                "target": target_label,
+                                "address": ip.to_string(),
+                                "transport": "tcp",
+                                "port": probe.port,
+                                "state": "filtered",
+                                "attempts": probe.attempts,
+                            }),
+                            &provenance,
+                        )?;
+                    }
+                }
+                PortState::Unknown => {
+                    *counts.get_mut("filtered_or_timed_out").unwrap() += 1;
+                    if detailed {
+                        push_port_state_asset(
+                            &mut assets,
+                            parent_id,
+                            ip,
+                            &target_label,
+                            probe,
+                            "unknown",
+                            started_at,
+                            &provenance,
+                        );
                     }
                 }
                 PortState::Error => {
@@ -744,6 +830,45 @@ fn execute_port_scan(
     } else {
         None
     };
+    let mechanism_by_address: BTreeMap<String, String> = scanner
+        .address_mechanisms()
+        .into_iter()
+        .map(|(ip, mechanism)| (ip.to_string(), mechanism))
+        .collect();
+    let mut mechanisms: Vec<String> = ips
+        .iter()
+        .map(|ip| {
+            mechanism_by_address
+                .get(&ip.to_string())
+                .cloned()
+                .unwrap_or_else(|| policy.effective_mode.clone())
+        })
+        .collect();
+    mechanisms.sort();
+    mechanisms.dedup();
+    let pacing_sample = crate::pacing::PacingSample {
+        rtt_ms: pacing_rtt_ms / pacing_rtt_n.max(1),
+        timeout_ratio: pacing_timeouts as f64 / pacing_attempted.max(1) as f64,
+        failure_ratio: pacing_errors as f64 / pacing_attempted.max(1) as f64,
+        backlog: unscanned_total,
+        socket_pressure: fd_peak_max as f64 / policy.concurrency().max(1) as f64,
+    };
+    let pacing_bounds = crate::pacing::PacingBounds {
+        min_concurrency: 1,
+        max_concurrency: policy.concurrency().max(1),
+        min_timeout_ms: 100,
+        max_timeout_ms: 10_000,
+        min_delay_ms: 0,
+        max_delay_ms: 1000,
+    };
+    let pacing_decision = crate::pacing::suggest(
+        policy.concurrency(),
+        policy.per_port_timeout(),
+        Duration::from_millis(0),
+        pacing_sample,
+        pacing_bounds,
+    );
+    let pacing_log = scanner.pacing_log();
     push_event(
         &mut events,
         EventKind::PortScanCompleted,
@@ -761,6 +886,23 @@ fn execute_port_scan(
             "fd_peak": fd_peak_max,
             "elapsed_ms": elapsed_ms,
             "time_to_first_open_ms": first_open_ms,
+            "requested_mode": policy.requested_mode,
+            "effective_mode": policy.effective_mode,
+            "fallback_reason": policy.fallback_reason,
+            "mechanisms": mechanisms,
+            "mechanisms_by_address": mechanism_by_address,
+            "runtime_fallback": scanner.runtime_note(),
+            "pacing": {
+                "timeout_ratio": pacing_sample.timeout_ratio,
+                "failure_ratio": pacing_sample.failure_ratio,
+                "rtt_ms": pacing_sample.rtt_ms,
+                "suggested_concurrency": pacing_decision.concurrency,
+                "suggested_timeout_ms": pacing_decision.timeout_ms,
+                "suggested_retry_delay_ms": pacing_decision.retry_delay_ms,
+                "slowed": pacing_decision.slowed,
+                "reason": pacing_decision.reason.as_str(),
+            },
+            "pacing_log": pacing_log,
         }),
         &provenance,
     )?;
@@ -857,6 +999,9 @@ fn finish_empty_scan(
             "elapsed_ms": start_instant.elapsed().as_millis() as u64,
             "note": reason,
             "policy": policy.describe(),
+            "requested_mode": policy.requested_mode,
+            "effective_mode": policy.effective_mode,
+            "fallback_reason": policy.fallback_reason,
         }),
         provenance,
     )?;

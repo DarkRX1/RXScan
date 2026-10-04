@@ -376,6 +376,7 @@ fn execute_web_probe(
             message: "invalid confidence".to_owned(),
             retryable: false,
         })?;
+        let technologies = web_technologies_for(observation);
         let details = BoundedDetails::from_value(
             serde_json::json!({
                 "target": target_label,
@@ -392,6 +393,7 @@ fn execute_web_probe(
                 "title": observation.title,
                 "body_bytes": observation.body_bytes,
                 "body_truncated": observation.body_truncated,
+                "technologies": technologies,
                 "tls": observation.tls_summary,
                 "parent_asset_id": parent_id,
                 "timestamp": started_at.0,
@@ -563,6 +565,37 @@ struct UrlObservation {
     tls_summary: Option<serde_json::Value>,
     cert: Option<crate::probes::CertFacts>,
     port_asset_fallback: Option<String>,
+}
+
+/// Normalize observed web technologies from retained response signals
+/// (Server/Content-Type headers, cookie names, title). Weak single signals
+/// stay capped inside [`crate::web_tech`]; absence yields an empty list.
+fn web_technologies_for(observation: &UrlObservation) -> Vec<serde_json::Value> {
+    let mut headers = std::collections::BTreeMap::new();
+    if let Some(server) = observation.server.as_deref() {
+        headers.insert("server".to_owned(), server.to_owned());
+    }
+    if let Some(content_type) = observation.content_type.as_deref() {
+        headers.insert("content-type".to_owned(), content_type.to_owned());
+    }
+    let cookies: Vec<String> = observation
+        .cookies
+        .iter()
+        .map(|cookie| cookie.name.clone())
+        .collect();
+    if !cookies.is_empty() {
+        headers.insert("set-cookie".to_owned(), cookies.join("; "));
+    }
+    crate::web_tech::identify(&headers, observation.title.as_deref().unwrap_or(""))
+        .into_iter()
+        .map(|tech| {
+            serde_json::json!({
+                "name": tech.name,
+                "category": tech.category.as_str(),
+                "confidence": tech.confidence,
+            })
+        })
+        .collect()
 }
 
 /// Follow one start URL through its bounded redirect chain. Every hop is

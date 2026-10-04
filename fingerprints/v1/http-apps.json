@@ -1,0 +1,565 @@
+{
+  "schema_version": 1,
+  "fingerprints": [
+    {
+      "id": "http-asuswrt",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "AsusWRT",
+        "case_insensitive": true
+      },
+      "product": "AsusWRT",
+      "vendor": "asus",
+      "confidence": 75,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-bookstack",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "BookStack",
+        "case_insensitive": true
+      },
+      "product": "BookStack",
+      "vendor": "bookstack",
+      "confidence": 75,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-directus",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Directus",
+        "case_insensitive": true
+      },
+      "product": "Directus",
+      "vendor": "directus",
+      "confidence": 75,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-dokuwiki",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "DokuWiki",
+        "case_insensitive": true
+      },
+      "product": "DokuWiki",
+      "vendor": "dokuwiki",
+      "confidence": 78,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-emby",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Emby Server",
+        "case_insensitive": true
+      },
+      "product": "Emby",
+      "vendor": "emby",
+      "confidence": 80,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-esxi",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "VMware ESX",
+        "case_insensitive": true
+      },
+      "product": "ESXi",
+      "vendor": "vmware",
+      "confidence": 80,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-fritzbox",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "FRITZ!Box",
+        "case_insensitive": true
+      },
+      "product": "FRITZ!Box",
+      "vendor": "avm",
+      "confidence": 78,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-ghost2",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "ghost/api",
+        "case_insensitive": true
+      },
+      "product": "Ghost CMS",
+      "vendor": "ghost",
+      "confidence": 78,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-gitlab-pages",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "GitLab Pages",
+        "case_insensitive": true
+      },
+      "product": "GitLab Pages",
+      "vendor": "gitlab",
+      "confidence": 72,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-hass",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Home Assistant",
+        "case_insensitive": true
+      },
+      "product": "Home Assistant",
+      "vendor": "home-assistant",
+      "confidence": 82,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-jellyfin",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Jellyfin",
+        "case_insensitive": true
+      },
+      "product": "Jellyfin",
+      "vendor": "jellyfin",
+      "confidence": 82,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-jellyseerr",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Jellyseerr",
+        "case_insensitive": true
+      },
+      "product": "Jellyseerr",
+      "vendor": "jellyseerr",
+      "confidence": 70,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-kodi",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Kodi",
+        "case_insensitive": true
+      },
+      "product": "Kodi",
+      "vendor": "kodi",
+      "confidence": 72,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-matomo",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Matomo",
+        "case_insensitive": true
+      },
+      "product": "Matomo",
+      "vendor": "matomo",
+      "confidence": 78,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-n8n",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "n8n",
+        "case_insensitive": true
+      },
+      "product": "n8n",
+      "vendor": "n8n",
+      "confidence": 78,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-nextcloud",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Nextcloud",
+        "case_insensitive": true
+      },
+      "product": "Nextcloud",
+      "vendor": "nextcloud",
+      "confidence": 85,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-node-red",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Node-RED",
+        "case_insensitive": true
+      },
+      "product": "Node-RED",
+      "vendor": "openjs",
+      "confidence": 78,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-octoprint",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "OctoPrint",
+        "case_insensitive": true
+      },
+      "product": "OctoPrint",
+      "vendor": "octoprint",
+      "confidence": 75,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-openmediavault",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "openmediavault",
+        "case_insensitive": true
+      },
+      "product": "openmediavault",
+      "vendor": "openmediavault",
+      "confidence": 78,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-openwrt",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "OpenWrt LuCI",
+        "case_insensitive": true
+      },
+      "product": "OpenWrt",
+      "vendor": "openwrt",
+      "confidence": 80,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-opnsense",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "OPNsense",
+        "case_insensitive": true
+      },
+      "product": "OPNsense",
+      "vendor": "deciso",
+      "confidence": 82,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-overseerr",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Overseerr",
+        "case_insensitive": true
+      },
+      "product": "Overseerr",
+      "vendor": "overseerr",
+      "confidence": 72,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-owncloud",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "ownCloud",
+        "case_insensitive": true
+      },
+      "product": "ownCloud",
+      "vendor": "owncloud",
+      "confidence": 82,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-pfsense",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "pfSense",
+        "case_insensitive": true
+      },
+      "product": "pfSense",
+      "vendor": "netgate",
+      "confidence": 82,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-pihole",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Pi-hole",
+        "case_insensitive": true
+      },
+      "product": "Pi-hole",
+      "vendor": "pi-hole",
+      "confidence": 82,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-plausible",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Plausible",
+        "case_insensitive": true
+      },
+      "product": "Plausible",
+      "vendor": "plausible",
+      "confidence": 72,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-plex",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Plex Media Server",
+        "case_insensitive": true
+      },
+      "product": "Plex",
+      "vendor": "plex",
+      "confidence": 82,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-prowlarr",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Prowlarr",
+        "case_insensitive": true
+      },
+      "product": "Prowlarr",
+      "vendor": "prowlarr",
+      "confidence": 72,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-proxmox",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Proxmox VE",
+        "case_insensitive": true
+      },
+      "product": "Proxmox",
+      "vendor": "proxmox",
+      "confidence": 82,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-qnap",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "QNAP",
+        "case_insensitive": true
+      },
+      "product": "QNAP",
+      "vendor": "qnap",
+      "confidence": 80,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-radarr",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Radarr",
+        "case_insensitive": true
+      },
+      "product": "Radarr",
+      "vendor": "radarr",
+      "confidence": 75,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-sonarr",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Sonarr",
+        "case_insensitive": true
+      },
+      "product": "Sonarr",
+      "vendor": "sonarr",
+      "confidence": 75,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-strapi",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Strapi",
+        "case_insensitive": true
+      },
+      "product": "Strapi",
+      "vendor": "strapi",
+      "confidence": 78,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-synology-dsm",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Synology DSM",
+        "case_insensitive": true
+      },
+      "product": "Synology DSM",
+      "vendor": "synology",
+      "confidence": 82,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-tautulli",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Tautulli",
+        "case_insensitive": true
+      },
+      "product": "Tautulli",
+      "vendor": "tautulli",
+      "confidence": 72,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-truenas",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "TrueNAS",
+        "case_insensitive": true
+      },
+      "product": "TrueNAS",
+      "vendor": "ixsystems",
+      "confidence": 80,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-umami",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Umami",
+        "case_insensitive": true
+      },
+      "product": "Umami",
+      "vendor": "umami",
+      "confidence": 70,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-unifi",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "UniFi",
+        "case_insensitive": true
+      },
+      "product": "UniFi",
+      "vendor": "ubiquiti",
+      "confidence": 80,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-vcenter",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "vSphere Client",
+        "case_insensitive": true
+      },
+      "product": "vCenter",
+      "vendor": "vmware",
+      "confidence": 80,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-wikijs",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Wiki.js",
+        "case_insensitive": true
+      },
+      "product": "Wiki.js",
+      "vendor": "wikijs",
+      "confidence": 75,
+      "source": "corpus-v3"
+    }
+  ]
+}

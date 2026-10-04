@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "fingerprints": [
+    {
+      "id": "smtp-axigen",
+      "protocol": "smtp",
+      "probe": "smtp",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Axigen",
+        "case_insensitive": true
+      },
+      "product": "Axigen",
+      "vendor": "axigen",
+      "confidence": 75,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "smtp-icewarp",
+      "protocol": "smtp",
+      "probe": "smtp",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "IceWarp",
+        "case_insensitive": true
+      },
+      "product": "IceWarp",
+      "vendor": "icewarp",
+      "confidence": 78,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "smtp-kerio",
+      "protocol": "smtp",
+      "probe": "smtp",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Kerio",
+        "case_insensitive": true
+      },
+      "product": "Kerio Connect",
+      "vendor": "gfi",
+      "confidence": 78,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "smtp-mailenable",
+      "protocol": "smtp",
+      "probe": "smtp",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "MailEnable",
+        "case_insensitive": true
+      },
+      "product": "MailEnable",
+      "vendor": "mailenable",
+      "confidence": 80,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "smtp-mdamon",
+      "protocol": "smtp",
+      "probe": "smtp",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "MDaemon",
+        "case_insensitive": true
+      },
+      "product": "MDaemon",
+      "vendor": "mdaemon",
+      "confidence": 78,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "smtp-powermta",
+      "protocol": "smtp",
+      "probe": "smtp",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "PowerMTA",
+        "case_insensitive": true
+      },
+      "product": "PowerMTA",
+      "vendor": "port25",
+      "confidence": 80,
+      "source": "corpus-v3"
+    }
+  ]
+}

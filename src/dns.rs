@@ -52,6 +52,7 @@ pub enum DnsRecordType {
     Ns,
     Txt,
     Ptr,
+    Srv,
 }
 
 impl DnsRecordType {
@@ -64,6 +65,7 @@ impl DnsRecordType {
             Self::Mx => 15,
             Self::Txt => 16,
             Self::Aaaa => 28,
+            Self::Srv => 33,
         }
     }
 
@@ -76,6 +78,7 @@ impl DnsRecordType {
             Self::Ns => "NS",
             Self::Txt => "TXT",
             Self::Ptr => "PTR",
+            Self::Srv => "SRV",
         }
     }
 }
@@ -139,6 +142,7 @@ impl DnsPolicy {
                 DnsRecordType::Ns,
                 DnsRecordType::Txt,
                 DnsRecordType::Ptr,
+                DnsRecordType::Srv,
             ],
         }
     }
@@ -351,6 +355,33 @@ pub fn canonical_hostname(raw: &str) -> Result<String, String> {
         }
     }
     Ok(host)
+}
+
+/// Canonical DNS owner name as observed on the wire. DNS names are a
+/// superset of hostnames: SRV owner names legitimately contain underscores
+/// (RFC 2782 `_service._proto`). Scope checks apply either way.
+pub fn canonical_dns_owner(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    let rooted = trimmed.strip_suffix('.').unwrap_or(trimmed);
+    let name = rooted.to_ascii_lowercase();
+    if name.is_empty() || name.len() > 253 || name.contains('\0') || name.contains('/') {
+        return Err("invalid hostname".to_owned());
+    }
+    for label in name.split('.') {
+        if label.is_empty() || label.len() > 63 {
+            return Err("invalid hostname label".to_owned());
+        }
+        if label.starts_with('-') || label.ends_with('-') {
+            return Err("invalid hostname label".to_owned());
+        }
+        if !label
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+        {
+            return Err("invalid hostname character".to_owned());
+        }
+    }
+    Ok(name)
 }
 
 pub fn domain_key(name: &str) -> String {
@@ -699,6 +730,7 @@ fn retain_record(
         DnsRecordType::Mx => RelationshipKind::MailExchangeFor,
         DnsRecordType::Ns => RelationshipKind::NameServerFor,
         DnsRecordType::Ptr => RelationshipKind::ReverseResolvesTo,
+        DnsRecordType::Srv => RelationshipKind::ServiceDiscoveredBySrv,
         DnsRecordType::Txt => unreachable!("TXT is handled as informational evidence"),
     };
     let mut event = Event::new(
@@ -1112,6 +1144,21 @@ pub fn parse_dns_response(
                     preference: None,
                 })
             }
+            33 if rdlen >= 7 => {
+                let port = u16_at(packet, offset + 4)?;
+                let mut name_offset = offset + 6;
+                let target = read_name(packet, &mut name_offset)?;
+                if target.is_empty() || name_offset > end {
+                    return Err("malformed srv".to_owned());
+                }
+                Some(DnsRecord {
+                    name,
+                    record_type: DnsRecordType::Srv,
+                    value: target,
+                    ttl,
+                    preference: Some(port),
+                })
+            }
             _ => None,
         };
         if let Some(record) = record {
@@ -1154,7 +1201,7 @@ fn read_name(packet: &[u8], offset: &mut usize) -> Result<String, String> {
             if !jumped {
                 *offset = pos + 1;
             }
-            return canonical_hostname(&labels.join("."));
+            return canonical_dns_owner(&labels.join("."));
         }
         if len > 63 {
             return Err("invalid label length".to_owned());

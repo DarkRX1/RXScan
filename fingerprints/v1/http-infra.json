@@ -1,0 +1,650 @@
+{
+  "schema_version": 1,
+  "fingerprints": [
+    {
+      "id": "http-adminer",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Adminer",
+        "case_insensitive": true
+      },
+      "product": "Adminer",
+      "vendor": "adminer",
+      "confidence": 80,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-argocd",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Argo CD",
+        "case_insensitive": true
+      },
+      "product": "Argo CD",
+      "vendor": "argo",
+      "confidence": 82,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-artifactory",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Artifactory",
+        "case_insensitive": true
+      },
+      "product": "Artifactory",
+      "vendor": "jfrog",
+      "confidence": 82,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-authelia",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Authelia",
+        "case_insensitive": true
+      },
+      "product": "Authelia",
+      "vendor": "authelia",
+      "confidence": 75,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-cadvisor",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "cAdvisor",
+        "case_insensitive": true
+      },
+      "product": "cAdvisor",
+      "vendor": "google",
+      "confidence": 72,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-clickhouse",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "ClickHouse",
+        "case_insensitive": true
+      },
+      "product": "ClickHouse",
+      "vendor": "clickhouse",
+      "confidence": 82,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-consul",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Consul",
+        "case_insensitive": true
+      },
+      "product": "Consul",
+      "vendor": "hashicorp",
+      "confidence": 82,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-couchdb",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "CouchDB",
+        "case_insensitive": true
+      },
+      "product": "CouchDB",
+      "vendor": "apache",
+      "confidence": 85,
+      "source": "corpus-v3",
+      "version_extractor": {
+        "type": "prefixed_token",
+        "prefix": "CouchDB/",
+        "max_len": 32
+      }
+    },
+    {
+      "id": "http-dex",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "dex",
+        "case_insensitive": true
+      },
+      "product": "Dex",
+      "vendor": "dexidp",
+      "confidence": 70,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-docker",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Docker/",
+        "case_insensitive": true
+      },
+      "product": "Docker",
+      "vendor": "docker",
+      "confidence": 85,
+      "source": "corpus-v3",
+      "version_extractor": {
+        "type": "prefixed_token",
+        "prefix": "Docker/",
+        "max_len": 32
+      }
+    },
+    {
+      "id": "http-droneci",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Drone",
+        "case_insensitive": true
+      },
+      "product": "Drone CI",
+      "vendor": "drone",
+      "confidence": 75,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-elasticsearch2",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "elasticsearch",
+        "case_insensitive": true
+      },
+      "product": "Elastic",
+      "vendor": "elastic",
+      "confidence": 78,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-es",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "You Know, for Search",
+        "case_insensitive": true
+      },
+      "product": "Elasticsearch",
+      "vendor": "elastic",
+      "confidence": 85,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-etcd",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "etcdserver",
+        "case_insensitive": true
+      },
+      "product": "etcd",
+      "vendor": "etcd",
+      "confidence": 78,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-gitea",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Gitea",
+        "case_insensitive": true
+      },
+      "product": "Gitea",
+      "vendor": "gitea",
+      "confidence": 85,
+      "source": "corpus-v3",
+      "version_extractor": {
+        "type": "prefixed_token",
+        "prefix": "Gitea version",
+        "max_len": 32
+      }
+    },
+    {
+      "id": "http-haproxy-stats",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "HAProxy Statistics",
+        "case_insensitive": true
+      },
+      "product": "HAProxy Stats",
+      "vendor": "haproxy",
+      "confidence": 78,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-harbor",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Harbor",
+        "case_insensitive": true
+      },
+      "product": "Harbor",
+      "vendor": "vmware",
+      "confidence": 82,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-icinga",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Icinga Web",
+        "case_insensitive": true
+      },
+      "product": "Icinga",
+      "vendor": "icinga",
+      "confidence": 80,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-influxdb",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "InfluxDB",
+        "case_insensitive": true
+      },
+      "product": "InfluxDB",
+      "vendor": "influxdata",
+      "confidence": 82,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-jenkins2",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Jenkins-Agent-Protocols",
+        "case_insensitive": true
+      },
+      "product": "Jenkins CLI",
+      "vendor": "jenkins",
+      "confidence": 78,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-k8s-apiserver",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "APIVersions",
+        "case_insensitive": true
+      },
+      "product": "Kubernetes",
+      "vendor": "kubernetes",
+      "confidence": 70,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-keycloak",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Keycloak",
+        "case_insensitive": true
+      },
+      "product": "Keycloak",
+      "vendor": "redhat",
+      "confidence": 82,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-kibana2",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "elastic/siem",
+        "case_insensitive": true
+      },
+      "product": "Elastic",
+      "vendor": "elastic",
+      "confidence": 70,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-kubelet",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "kubelet",
+        "case_insensitive": true
+      },
+      "product": "kubelet",
+      "vendor": "kubernetes",
+      "confidence": 72,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-longhorn",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Longhorn",
+        "case_insensitive": true
+      },
+      "product": "Longhorn",
+      "vendor": "suse",
+      "confidence": 72,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-minio-console",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "MinIO Console",
+        "case_insensitive": true
+      },
+      "product": "MinIO Console",
+      "vendor": "minio",
+      "confidence": 80,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-mongo-express",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "mongo-express",
+        "case_insensitive": true
+      },
+      "product": "mongo-express",
+      "vendor": "mongo-express",
+      "confidence": 75,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-nagios",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Nagios",
+        "case_insensitive": true
+      },
+      "product": "Nagios",
+      "vendor": "nagios",
+      "confidence": 80,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-nats-monitor",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "NATS Monitoring",
+        "case_insensitive": true
+      },
+      "product": "NATS",
+      "vendor": "nats",
+      "confidence": 75,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-netdata",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Netdata",
+        "case_insensitive": true
+      },
+      "product": "Netdata",
+      "vendor": "netdata",
+      "confidence": 80,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-nexus",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Nexus Repository",
+        "case_insensitive": true
+      },
+      "product": "Nexus",
+      "vendor": "sonatype",
+      "confidence": 82,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-node-exporter",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Node Exporter",
+        "case_insensitive": true
+      },
+      "product": "Node Exporter",
+      "vendor": "prometheus",
+      "confidence": 78,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-openshift",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "OpenShift",
+        "case_insensitive": true
+      },
+      "product": "OpenShift",
+      "vendor": "redhat",
+      "confidence": 78,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-pgadmin",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "pgAdmin",
+        "case_insensitive": true
+      },
+      "product": "pgAdmin",
+      "vendor": "pgadmin",
+      "confidence": 78,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-phpmyadmin",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "phpMyAdmin",
+        "case_insensitive": true
+      },
+      "product": "phpMyAdmin",
+      "vendor": "phpmyadmin",
+      "confidence": 85,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-portainer",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Portainer",
+        "case_insensitive": true
+      },
+      "product": "Portainer",
+      "vendor": "portainer",
+      "confidence": 82,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-prom-alertmanager",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Alertmanager",
+        "case_insensitive": true
+      },
+      "product": "Alertmanager",
+      "vendor": "prometheus",
+      "confidence": 82,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-rabbitmq-mgmt",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "RabbitMQ Management",
+        "case_insensitive": true
+      },
+      "product": "RabbitMQ",
+      "vendor": "rabbitmq",
+      "confidence": 82,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-rancher",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Rancher",
+        "case_insensitive": true
+      },
+      "product": "Rancher",
+      "vendor": "suse",
+      "confidence": 82,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-redis-commander",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Redis Commander",
+        "case_insensitive": true
+      },
+      "product": "Redis Commander",
+      "vendor": "redis-commander",
+      "confidence": 75,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-sonarqube",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "SonarQube",
+        "case_insensitive": true
+      },
+      "product": "SonarQube",
+      "vendor": "sonarsource",
+      "confidence": 85,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-traefik-dash",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Traefik Dashboard",
+        "case_insensitive": true
+      },
+      "product": "Traefik",
+      "vendor": "traefik",
+      "confidence": 75,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-uptime-kuma",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Uptime Kuma",
+        "case_insensitive": true
+      },
+      "product": "Uptime Kuma",
+      "vendor": "uptime-kuma",
+      "confidence": 80,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-vault",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Vault",
+        "case_insensitive": true
+      },
+      "product": "Vault",
+      "vendor": "hashicorp",
+      "confidence": 82,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-zabbix",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Zabbix",
+        "case_insensitive": true
+      },
+      "product": "Zabbix",
+      "vendor": "zabbix",
+      "confidence": 82,
+      "source": "corpus-v3"
+    }
+  ]
+}

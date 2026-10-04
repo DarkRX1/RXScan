@@ -12,12 +12,22 @@
 //!   headers ≤16KiB and body ≤16KiB; redirects observed, never followed.
 //! * `tls`: TLS ClientHello only (rustls); reads the handshake + chain
 //!   ≤32KiB. `https`/`smtps` compositions reuse that session.
-//! * `ftp`: sends NOTHING (passive `220` greeting read, ≤2048B).
+//! * `ftp`: sends NOTHING until a `220` greeting arrives, then one `EHLO`
+//!   (disambiguation), at most one `NOOP` (FTP confirmation), and at most one
+//!   `FEAT` (feature list, incl. AUTH TLS). Never logs in, never transfers.
 //! * `smtp`: reads the `220` greeting, then one `EHLO rxscan.local` (17B);
 //!   capabilities parsed from `250` lines. Never MAIL/AUTH/VRFY/EXPN.
 //! * `redis`: one `PING` (7B: `PING\r\n`); expects `+PONG`.
 //! * `mysql`: sends NOTHING (passive handshake packet read, ≤16KiB).
 //! * `postgres`: one 8-byte SSLRequest; expects a single `S`/`N` byte.
+//! * `smb`: one 104-byte SMB2 NEGOTIATE (NetBIOS + header + body offering
+//!   0x0202 only); expects an SMB2 NEGOTIATE response. No session, no auth.
+//! * `rdp`: one 11-byte X.224 Connection Request; expects a Connection
+//!   Confirm. No credentials, no channels.
+//! * `mongodb`: one bounded OP_MSG `hello` (no auth); expects an OP_MSG
+//!   reply mentioning `ismaster`/`hello`.
+//! * `mqtt`: one bounded v3.1.1 CONNECT (clean session, no credentials,
+//!   no will); expects CONNACK. Never subscribes or publishes.
 //! * `generic`: sends NOTHING (passive banner read ≤2048B, short budget).
 //!
 //! Tests assert fixtures never observe authentication verbs or destructive
@@ -961,10 +971,26 @@ pub fn probe_mail(ctx: &ProbeCtx, probe_id: &'static str) -> ProbeAttempt {
                 } else {
                     crate::service::confidence::CHARACTERISTIC
                 };
-                attempt.evidence = vec![
+                let mut lines = vec![
                     format!("ftp: received greeting {first_line:?}"),
                     "ftp: EHLO rejected (500/502), NOOP accepted (200)".to_owned(),
                 ];
+                // One bounded FEAT on confirmed FTP: feature list only.
+                // Never logs in, never transfers.
+                let feat = b"FEAT\r\n";
+                ProbeCtx::timebox(&stream, 500);
+                if stream.write_all(feat).is_ok() {
+                    attempt.bytes_out += feat.len();
+                    attempt.writes += 1;
+                    let reply = read_smtp_reply(&mut stream, ctx, started);
+                    attempt.bytes_in += reply.len();
+                    let features = parse_ftp_features(&reply);
+                    if !features.is_empty() {
+                        lines.push(format!("ftp: FEAT features {}", features.join(", ")));
+                        attempt.capabilities = features;
+                    }
+                }
+                attempt.evidence = lines;
                 return attempt;
             }
         }
@@ -1041,6 +1067,39 @@ pub(crate) fn probe_smtp_inner(ctx: &ProbeCtx, tls_body: Option<Vec<u8>>) -> Pro
     attempt
 }
 
+/// Parse a FEAT reply (`211-` features, `211 End` terminator) into
+/// uppercased feature tokens, bounded at 16. Non-211 replies yield nothing.
+fn parse_ftp_features(reply: &[u8]) -> Vec<String> {
+    let text = String::from_utf8_lossy(reply);
+    let mut lines = text.lines();
+    let first = lines.next().unwrap_or("").trim();
+    if !first.starts_with("211") {
+        return Vec::new();
+    }
+    let mut features = Vec::new();
+    for line in lines {
+        let line = line.trim();
+        if line.starts_with("211 ") {
+            break;
+        }
+        let token = line
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_ascii_uppercase();
+        if token.is_empty() {
+            continue;
+        }
+        features.push(token);
+        if features.len() >= 16 {
+            break;
+        }
+    }
+    features.sort();
+    features.dedup();
+    features
+}
+
 fn parse_ehlo_capabilities(reply: &[u8]) -> Vec<String> {
     let text = String::from_utf8_lossy(reply);
     let mut capabilities = Vec::new();
@@ -1094,6 +1153,23 @@ pub fn probe_redis(ctx: &ProbeCtx) -> ProbeAttempt {
         attempt.protocol = "redis".to_owned();
         attempt.confidence = crate::service::confidence::CONFIRMED;
         attempt.evidence = vec!["redis: received +PONG to inline PING".to_owned()];
+        // One bounded INFO: read-only facts on open servers only. Auth-gated
+        // servers answered -NOAUTH above and never reach this path.
+        let info = b"INFO server\r\n";
+        ProbeCtx::timebox(&stream, 500);
+        if stream.write_all(info).is_ok() {
+            attempt.bytes_out += info.len();
+            attempt.writes += 1;
+            let (info_bytes, _, _) = read_until(&mut stream, b"redis_version", 1024, ctx, started);
+            attempt.bytes_in += info_bytes.len();
+            if let Some(version) = parse_redis_version(&info_bytes) {
+                attempt.version_hint = Some(version.clone());
+                attempt.product_hint = Some("Redis".to_owned());
+                attempt
+                    .evidence
+                    .push(format!("redis: INFO exposes version {version}"));
+            }
+        }
     } else if line.starts_with("-NOAUTH") || line.starts_with("-WRONGPASS") {
         attempt.protocol = "redis".to_owned();
         attempt.confidence = crate::service::confidence::PROBABLE;
@@ -1108,6 +1184,26 @@ pub fn probe_redis(ctx: &ProbeCtx) -> ProbeAttempt {
 }
 
 // ---------------- MySQL ----------------
+
+/// Bounded scan of an INFO reply for `redis_version:<token>`.
+pub fn parse_redis_version(bytes: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(bytes);
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("redis_version:") {
+            let version = rest.trim();
+            if !version.is_empty()
+                && version.len() <= 32
+                && version.bytes().any(|b| b.is_ascii_digit())
+                && version
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+            {
+                return Some(version.to_owned());
+            }
+        }
+    }
+    None
+}
 
 /// Pure MySQL handshake parser over buffered bytes: 4-byte header (3-byte
 /// LE length + sequence) then payload starting with the protocol byte.
@@ -1189,10 +1285,38 @@ pub fn probe_mysql(ctx: &ProbeCtx) -> ProbeAttempt {
     attempt.version_hint = detected.or(Some(version.clone()));
     attempt.banner = Some(version.chars().take(120).collect());
     attempt.confidence = crate::service::confidence::STRONG;
-    attempt.evidence = vec![format!(
+    let mut lines = vec![format!(
         "mysql: received handshake protocol {protocol} version {version:?}"
     )];
+    if let Some(flags) = mysql_capability_flags(&framing) {
+        lines.push(format!("mysql: capability flags {flags:#06x}"));
+    }
+    attempt.evidence = lines;
     attempt
+}
+
+/// Lower 2 capability-flag bytes after the protocol byte, version string,
+/// and thread id. `None` on short/garbled packets; never classified alone.
+pub fn mysql_capability_flags(framing: &[u8]) -> Option<u16> {
+    if framing.len() < 5 {
+        return None;
+    }
+    let length = (u32::from(framing[0])
+        | (u32::from(framing[1]) << 8)
+        | (u32::from(framing[2]) << 16)) as usize;
+    if framing.len() < 4 + length {
+        return None;
+    }
+    let payload = &framing[4..4 + length];
+    let version_end = payload[1..]
+        .iter()
+        .position(|byte| *byte == 0)
+        .map(|position| position + 1)?;
+    let offset = version_end + 4;
+    if payload.len() < offset + 2 {
+        return None;
+    }
+    Some(u16::from_le_bytes([payload[offset], payload[offset + 1]]))
 }
 
 // ---------------- PostgreSQL ----------------
@@ -1261,6 +1385,479 @@ pub fn probe_postgres(ctx: &ProbeCtx) -> ProbeAttempt {
     attempt.protocol = "postgres".to_owned();
     attempt.confidence = crate::service::confidence::PROBABLE;
     attempt.evidence = vec![detail.to_owned()];
+    attempt
+}
+
+// ---------------- SMB ----------------
+
+/// SMB2 NEGOTIATE request (fixed 64-byte header + 36-byte body). No session
+/// setup, no authentication, no tree connect. A server answers with an
+/// SMB2 NEGOTIATE response (protocol `0xFE 'SMB'`); dialect, signing, and
+/// capabilities are parsed from the fixed response area only.
+pub fn smb2_negotiate_request() -> Vec<u8> {
+    let mut out = vec![0u8; 4 + 64 + 36];
+    out[0] = 0x00;
+    out[1] = 0x00;
+    out[2] = 0x00;
+    out[3] = 100;
+    let base = 4;
+    out[base..base + 4].copy_from_slice(&[0xFE, b'S', b'M', b'B']);
+    out[base + 4..base + 6].copy_from_slice(&64u16.to_le_bytes());
+    out[base + 6..base + 8].copy_from_slice(&0u16.to_le_bytes());
+    out[base + 16..base + 20].copy_from_slice(&1u32.to_le_bytes());
+    out[base + 24..base + 28].copy_from_slice(&0u32.to_le_bytes());
+    let body = base + 64;
+    out[body..body + 2].copy_from_slice(&36u16.to_le_bytes());
+    out[body + 2..body + 4].copy_from_slice(&1u16.to_le_bytes());
+    out[body + 4..body + 6].copy_from_slice(&1u16.to_le_bytes());
+    out[body + 6..body + 8].copy_from_slice(&0u16.to_le_bytes());
+    out[body + 22..body + 24].copy_from_slice(&0x0202u16.to_le_bytes());
+    out
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SmbFacts {
+    pub dialect: String,
+    pub signing_required: bool,
+    pub capabilities: Vec<String>,
+    pub guid: Option<String>,
+    pub capability_flags: Option<u32>,
+}
+
+pub fn parse_smb2_response(bytes: &[u8]) -> Option<SmbFacts> {
+    if bytes.len() < 4 + 64 + 5 {
+        return None;
+    }
+    let base = 4;
+    if bytes[base..base + 4] != [0xFE, b'S', b'M', b'B'] {
+        return None;
+    }
+    // SMB2 header Status (4 bytes at header offset 8) must be SUCCESS.
+    if u32::from_le_bytes([
+        bytes[base + 8],
+        bytes[base + 9],
+        bytes[base + 10],
+        bytes[base + 11],
+    ]) != 0
+    {
+        return None;
+    }
+    let body = base + 64;
+    if bytes.len() < body + 5 {
+        return None;
+    }
+    // NEGOTIATE response: StructureSize u16 (65), SecurityMode byte (bit0
+    // enabled, bit1 required), then packed DialectRevision u16.
+    if u16::from_le_bytes([bytes[body], bytes[body + 1]]) != 65 {
+        return None;
+    }
+    let mode = bytes[body + 2];
+    let dialect = u16::from_le_bytes([bytes[body + 3], bytes[body + 4]]);
+    if !matches!(dialect, 0x0202 | 0x0210 | 0x0300 | 0x0302 | 0x0311) {
+        return None;
+    }
+    // NegotiateContextCount u16 at body+5, ServerGuid 16 bytes at body+7,
+    // Capabilities u32 at body+23. GUID and flags are server-selected facts;
+    // no product/OS inference is drawn from them here.
+    let (guid, capability_flags) = if bytes.len() >= body + 27 {
+        let mut guid_bytes = [0u8; 16];
+        guid_bytes.copy_from_slice(&bytes[body + 7..body + 23]);
+        let flags = u32::from_le_bytes([
+            bytes[body + 23],
+            bytes[body + 24],
+            bytes[body + 25],
+            bytes[body + 26],
+        ]);
+        (Some(hex_bytes(&guid_bytes)), Some(flags))
+    } else {
+        (None, None)
+    };
+    let mut capabilities = if mode & 0x01 != 0 {
+        vec!["signing-enabled".to_owned()]
+    } else {
+        Vec::new()
+    };
+    if let Some(flags) = capability_flags {
+        for (bit, name) in [
+            (0x0000_0001u32, "cap-dfs"),
+            (0x0000_0002, "cap-leasing"),
+            (0x0000_0004, "cap-large-mtu"),
+            (0x0000_0008, "cap-multi-channel"),
+            (0x0000_0010, "cap-persistent-handles"),
+            (0x0000_0020, "cap-directory-leasing"),
+            (0x0000_0040, "cap-encryption"),
+        ] {
+            if flags & bit != 0 {
+                capabilities.push(name.to_owned());
+            }
+        }
+    }
+    Some(SmbFacts {
+        dialect: format!("{dialect:#06x}"),
+        signing_required: mode & 0x02 != 0,
+        capabilities,
+        guid,
+        capability_flags,
+    })
+}
+
+pub fn probe_smb(ctx: &ProbeCtx) -> ProbeAttempt {
+    let started = Instant::now();
+    let mut stream = match ctx.connect() {
+        Ok(stream) => stream,
+        Err(reason) => return ProbeAttempt::miss("smb", format!("smb: {reason}")),
+    };
+    let request = smb2_negotiate_request();
+    ProbeCtx::timebox(&stream, 500);
+    if stream.write_all(&request).is_err() {
+        return ProbeAttempt::miss("smb", "smb: NEGOTIATE write failed");
+    }
+    let mut stash = Vec::new();
+    let (bytes, _) = read_exact_bounded(&mut stream, 128, 2048, ctx, started, &mut stash);
+    let mut attempt = ProbeAttempt::miss("smb", String::new());
+    attempt.bytes_in = bytes.len();
+    attempt.bytes_out = request.len();
+    attempt.writes = 1;
+    match parse_smb2_response(&bytes) {
+        Some(facts) => {
+            attempt.protocol = "smb".to_owned();
+            attempt.protocol_version = Some(format!("smb2 dialect {}", facts.dialect));
+            attempt.product_hint = Some("SMB".to_owned());
+            attempt.capabilities = facts.capabilities;
+            if facts.signing_required {
+                attempt.capabilities.push("signing-required".to_owned());
+            }
+            attempt.confidence = crate::service::confidence::STRONG;
+            let mut line = format!(
+                "smb: NEGOTIATE response dialect {} signing_required={}",
+                facts.dialect, facts.signing_required
+            );
+            if let Some(guid) = facts.guid {
+                line.push_str(&format!(" guid={guid}"));
+            }
+            if let Some(flags) = facts.capability_flags {
+                line.push_str(&format!(" caps={flags:#010x}"));
+            }
+            attempt.evidence = vec![line];
+        }
+        None => {
+            attempt.evidence = vec!["smb: no SMB2 NEGOTIATE response".to_owned()];
+        }
+    }
+    attempt
+}
+
+// ---------------- RDP ----------------
+
+/// X.224 Connection Request with an RDP negotiation request
+/// (requestedProtocols TLS|CredSSP, no credentials). A server answers with a
+/// Connection Confirm carrying a negotiation response; only the confirm type,
+/// selected protocol, and flags are validated.
+pub fn rdp_connection_request() -> Vec<u8> {
+    vec![
+        0x03, 0x00, 0x00, 0x13, 0x0e, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x08, 0x00,
+        0x03, 0x00, 0x00, 0x00,
+    ]
+}
+
+pub fn parse_rdp_confirm(bytes: &[u8]) -> Option<bool> {
+    if bytes.len() < 7 {
+        return None;
+    }
+    if bytes[0] != 0x03 || bytes[1] != 0x00 {
+        return None;
+    }
+    let length = u16::from_be_bytes([bytes[2], bytes[3]]) as usize;
+    if !(7..=2048).contains(&length) {
+        return None;
+    }
+    if bytes.len() < length {
+        return None;
+    }
+    match bytes[5] {
+        0xd0 => Some(true),
+        0x50 => Some(false),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RdpNegotiation {
+    pub selected: u8,
+    pub flags: u8,
+}
+
+pub fn parse_rdp_negotiation(bytes: &[u8]) -> Option<RdpNegotiation> {
+    if bytes.len() < 19 || bytes[5] != 0xd0 || bytes[11] != 0x02 {
+        return None;
+    }
+    let selected = u32::from_le_bytes([bytes[15], bytes[16], bytes[17], bytes[18]]);
+    if selected > 2 {
+        return None;
+    }
+    Some(RdpNegotiation {
+        selected: selected as u8,
+        flags: bytes[12],
+    })
+}
+
+pub fn rdp_selected_name(selected: u8) -> &'static str {
+    match selected {
+        0 => "rdp-security",
+        1 => "tls",
+        2 => "nla",
+        _ => "unknown",
+    }
+}
+
+pub fn probe_rdp(ctx: &ProbeCtx) -> ProbeAttempt {
+    let started = Instant::now();
+    let mut stream = match ctx.connect() {
+        Ok(stream) => stream,
+        Err(reason) => return ProbeAttempt::miss("rdp", format!("rdp: {reason}")),
+    };
+    let request = rdp_connection_request();
+    ProbeCtx::timebox(&stream, 500);
+    if stream.write_all(&request).is_err() {
+        return ProbeAttempt::miss("rdp", "rdp: connection request write failed");
+    }
+    let mut stash = Vec::new();
+    let (header, _) = read_exact_bounded(&mut stream, 4, 4, ctx, started, &mut stash);
+    let mut attempt = ProbeAttempt::miss("rdp", String::new());
+    attempt.bytes_out = request.len();
+    attempt.writes = 1;
+    if header.len() < 4 || header[0] != 0x03 {
+        attempt.evidence = vec!["rdp: no X.224 confirm".to_owned()];
+        return attempt;
+    }
+    let length = u16::from_be_bytes([header[2], header[3]]) as usize;
+    if !(7..=1024).contains(&length) {
+        attempt.evidence = vec!["rdp: implausible TPKT length".to_owned()];
+        return attempt;
+    }
+    let (rest, _) = read_exact_bounded(&mut stream, length - 4, 1024, ctx, started, &mut stash);
+    let mut bytes = header;
+    bytes.extend_from_slice(&rest);
+    attempt.bytes_in = bytes.len();
+    match parse_rdp_confirm(&bytes) {
+        Some(true) => {
+            attempt.protocol = "rdp".to_owned();
+            attempt.product_hint = Some("RDP".to_owned());
+            attempt.confidence = crate::service::confidence::STRONG;
+            let mut lines = vec![
+                "rdp: X.224 Connection Confirm received; closing without authentication".to_owned(),
+            ];
+            if let Some(negotiation) = parse_rdp_negotiation(&bytes) {
+                let name = rdp_selected_name(negotiation.selected);
+                lines.push(format!(
+                    "rdp: negotiated security {} (flags {:#04x})",
+                    name, negotiation.flags
+                ));
+                attempt.capabilities.push(name.to_owned());
+                if negotiation.selected == 1 {
+                    attempt.capabilities.push("tls-available".to_owned());
+                }
+                if negotiation.selected == 2 {
+                    attempt.capabilities.push("nla-required".to_owned());
+                }
+            }
+            attempt.evidence = lines;
+        }
+        Some(false) => {
+            attempt.protocol = "rdp".to_owned();
+            attempt.confidence = crate::service::confidence::PROBABLE;
+            attempt.evidence = vec![
+                "rdp: X.224 error PDU received; RDP speaker, no authentication attempted"
+                    .to_owned(),
+            ];
+        }
+        None => {
+            attempt.evidence = vec!["rdp: no X.224 confirm".to_owned()];
+        }
+    }
+    attempt
+}
+
+// ---------------- MongoDB ----------------
+
+/// MongoDB OP_MSG `hello` (bounded, no auth). Parses only the OP_MSG framing
+/// and the presence of an `ismaster`/`hello` document marker in the reply.
+pub fn mongodb_hello_request() -> Vec<u8> {
+    let doc: &[u8] = b"\x1a\x00\x00\x00\x10ismaster\x00\x01\x00\x00\x00\x00";
+    let body_len = 16 + 4 + doc.len() + 1;
+    let total = 16 + body_len;
+    let mut out = Vec::with_capacity(total);
+    out.extend_from_slice(&(total as u32).to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&2013u32.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&(body_len as u32).to_le_bytes());
+    out.push(0x00);
+    out.extend_from_slice(doc);
+    out.push(0x00);
+    out
+}
+
+pub fn parse_mongodb_reply(bytes: &[u8]) -> Option<()> {
+    if bytes.len() < 36 {
+        return None;
+    }
+    let total = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+    if !(36..=16 * 1024).contains(&total) || bytes.len() < total {
+        return None;
+    }
+    let opcode = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
+    if opcode != 2013 {
+        return None;
+    }
+    let body = &bytes[16..total];
+    if body.windows(8).any(|w| w == b"ismaster") || body.windows(5).any(|w| w == b"hello") {
+        Some(())
+    } else {
+        None
+    }
+}
+
+/// Bounded BSON scan for a `version` string element (`0x02 "version" 0x00
+/// int32 bytes`). Returns the version on strict shape only; never guesses.
+pub fn mongodb_version(body: &[u8]) -> Option<String> {
+    let marker = b"\x02version\x00";
+    let start = body.windows(marker.len()).position(|w| w == marker)?;
+    let len_at = start + marker.len();
+    if body.len() < len_at + 4 {
+        return None;
+    }
+    let len = u32::from_le_bytes([
+        body[len_at],
+        body[len_at + 1],
+        body[len_at + 2],
+        body[len_at + 3],
+    ]) as usize;
+    if len == 0 || len > 65 || body.len() < len_at + 4 + len {
+        return None;
+    }
+    let text = &body[len_at + 4..len_at + 4 + len];
+    if text.last() != Some(&0) {
+        return None;
+    }
+    let version = String::from_utf8_lossy(&text[..len - 1]).to_string();
+    if version.is_empty()
+        || version.len() > 32
+        || !version.bytes().any(|b| b.is_ascii_digit())
+        || !version
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+    {
+        return None;
+    }
+    Some(version)
+}
+
+pub fn probe_mongodb(ctx: &ProbeCtx) -> ProbeAttempt {
+    let started = Instant::now();
+    let mut stream = match ctx.connect() {
+        Ok(stream) => stream,
+        Err(reason) => return ProbeAttempt::miss("mongodb", format!("mongodb: {reason}")),
+    };
+    let request = mongodb_hello_request();
+    ProbeCtx::timebox(&stream, 500);
+    if stream.write_all(&request).is_err() {
+        return ProbeAttempt::miss("mongodb", "mongodb: hello write failed");
+    }
+    let mut stash = Vec::new();
+    let (header, _) = read_exact_bounded(&mut stream, 16, 16, ctx, started, &mut stash);
+    let mut attempt = ProbeAttempt::miss("mongodb", String::new());
+    attempt.bytes_out = request.len();
+    attempt.writes = 1;
+    if header.len() < 16 {
+        attempt.evidence = vec!["mongodb: no OP_MSG reply header".to_owned()];
+        return attempt;
+    }
+    let total = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
+    if !(16..=16 * 1024).contains(&total) {
+        attempt.bytes_in = header.len();
+        attempt.evidence = vec!["mongodb: implausible message length".to_owned()];
+        return attempt;
+    }
+    let (rest, _) =
+        read_exact_bounded(&mut stream, total - 16, 16 * 1024, ctx, started, &mut stash);
+    let mut bytes = header;
+    bytes.extend_from_slice(&rest);
+    attempt.bytes_in = bytes.len();
+    if parse_mongodb_reply(&bytes).is_some() {
+        attempt.protocol = "mongodb".to_owned();
+        attempt.product_hint = Some("MongoDB".to_owned());
+        attempt.confidence = crate::service::confidence::STRONG;
+        let mut lines =
+            vec!["mongodb: OP_MSG hello reply received; closing without authentication".to_owned()];
+        if let Some(version) = mongodb_version(&bytes) {
+            attempt.version_hint = Some(version.clone());
+            lines.push(format!(
+                "mongodb: server version {version} exposed pre-auth"
+            ));
+        }
+        attempt.evidence = lines;
+    } else {
+        attempt.evidence = vec!["mongodb: no OP_MSG hello reply".to_owned()];
+    }
+    attempt
+}
+
+// ---------------- MQTT ----------------
+
+/// MQTT v3.1.1 CONNECT (clean session, 10s keepalive, no credentials, no
+/// will). Only the CONNACK fixed header (0x20) with a one-byte return code
+/// is validated.
+pub fn mqtt_connect_request() -> Vec<u8> {
+    let client = b"rxscan";
+    let mut out = vec![
+        0x10, 0x00, 0x00, 0x04, b'M', b'Q', b'T', b'T', 0x04, 0x02, 0x00, 0x0a,
+    ];
+    out.extend_from_slice(&(client.len() as u16).to_be_bytes());
+    out.extend_from_slice(client);
+    out[1] = (out.len() - 2) as u8;
+    out
+}
+
+pub fn parse_mqtt_connack(bytes: &[u8]) -> Option<u8> {
+    if bytes.len() < 4 || bytes[0] != 0x20 || bytes[1] != 0x02 {
+        return None;
+    }
+    Some(bytes[3])
+}
+
+pub fn probe_mqtt(ctx: &ProbeCtx) -> ProbeAttempt {
+    let started = Instant::now();
+    let mut stream = match ctx.connect() {
+        Ok(stream) => stream,
+        Err(reason) => return ProbeAttempt::miss("mqtt", format!("mqtt: {reason}")),
+    };
+    let request = mqtt_connect_request();
+    ProbeCtx::timebox(&stream, 500);
+    if stream.write_all(&request).is_err() {
+        return ProbeAttempt::miss("mqtt", "mqtt: CONNECT write failed");
+    }
+    let mut stash = Vec::new();
+    let (bytes, _) = read_exact_bounded(&mut stream, 4, 64, ctx, started, &mut stash);
+    let mut attempt = ProbeAttempt::miss("mqtt", String::new());
+    attempt.bytes_in = bytes.len();
+    attempt.bytes_out = request.len();
+    attempt.writes = 1;
+    match parse_mqtt_connack(&bytes) {
+        Some(code) => {
+            attempt.protocol = "mqtt".to_owned();
+            attempt.protocol_version = Some("3.1.1".to_owned());
+            attempt.product_hint = Some("MQTT".to_owned());
+            attempt.confidence = crate::service::confidence::STRONG;
+            attempt.evidence = vec![format!(
+                "mqtt: CONNACK return code {code}; closing without subscribing or publishing"
+            )];
+        }
+        None => {
+            attempt.evidence = vec!["mqtt: no CONNACK".to_owned()];
+        }
+    }
     attempt
 }
 

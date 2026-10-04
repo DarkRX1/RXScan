@@ -77,6 +77,10 @@ pub struct Cli {
     #[arg(short = 'w', long = "wordlist", value_name = "FILE")]
     pub wordlist: Option<std::path::PathBuf>,
 
+    /// TCP scan mode: connect, syn, or auto (privilege/capability gated).
+    #[arg(long = "scan-mode", value_name = "MODE")]
+    pub scan_mode: Option<String>,
+
     /// Print the chosen plan, reasons, budgets, and excluded capabilities.
     #[arg(long)]
     pub explain: bool,

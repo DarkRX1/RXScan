@@ -1,0 +1,509 @@
+{
+  "schema_version": 1,
+  "fingerprints": [
+    {
+      "id": "http-arriscable",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Arris",
+        "case_insensitive": true
+      },
+      "product": "Arris",
+      "vendor": "arris",
+      "confidence": 70,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-avtech",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "AVTech",
+        "case_insensitive": true
+      },
+      "product": "AVTech",
+      "vendor": "avtech",
+      "confidence": 70,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-axis",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Axis",
+        "case_insensitive": true
+      },
+      "product": "Axis Camera",
+      "vendor": "axis",
+      "confidence": 78,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-bosch-cam",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Bosch",
+        "case_insensitive": true
+      },
+      "product": "Bosch Camera",
+      "vendor": "bosch",
+      "confidence": 72,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-brother-printer",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Brother",
+        "case_insensitive": true
+      },
+      "product": "Brother Printer",
+      "vendor": "brother",
+      "confidence": 78,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-canon-printer",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Canon",
+        "case_insensitive": true
+      },
+      "product": "Canon Printer",
+      "vendor": "canon",
+      "confidence": 78,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-cisco-www",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Cisco Systems",
+        "case_insensitive": true
+      },
+      "product": "Cisco",
+      "vendor": "cisco",
+      "confidence": 78,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-dahua",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Dahua",
+        "case_insensitive": true
+      },
+      "product": "Dahua",
+      "vendor": "dahua",
+      "confidence": 82,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-dell-idrac",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "iDRAC",
+        "case_insensitive": true
+      },
+      "product": "iDRAC",
+      "vendor": "dell",
+      "confidence": 80,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-dlink",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "D-Link",
+        "case_insensitive": true
+      },
+      "product": "D-Link",
+      "vendor": "dlink",
+      "confidence": 75,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-edgeos",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "EdgeOS",
+        "case_insensitive": true
+      },
+      "product": "EdgeOS",
+      "vendor": "ubiquiti",
+      "confidence": 75,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-epson-printer",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "EPSON",
+        "case_insensitive": true
+      },
+      "product": "Epson Printer",
+      "vendor": "epson",
+      "confidence": 78,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-geovision",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "GeoVision",
+        "case_insensitive": true
+      },
+      "product": "GeoVision",
+      "vendor": "geovision",
+      "confidence": 72,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-hikvision",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Hikvision",
+        "case_insensitive": true
+      },
+      "product": "Hikvision",
+      "vendor": "hikvision",
+      "confidence": 82,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-hp-ilo",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Integrated Lights-Out",
+        "case_insensitive": true
+      },
+      "product": "iLO",
+      "vendor": "hp",
+      "confidence": 80,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-hp-printer",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "HP LaserJet",
+        "case_insensitive": true
+      },
+      "product": "HP Printer",
+      "vendor": "hp",
+      "confidence": 80,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-huawei-ont",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Huawei Home Gateway",
+        "case_insensitive": true
+      },
+      "product": "Huawei ONT",
+      "vendor": "huawei",
+      "confidence": 72,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-linksys",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Linksys",
+        "case_insensitive": true
+      },
+      "product": "Linksys",
+      "vendor": "linksys",
+      "confidence": 75,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-mikrotik-www",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "MikroTik RouterOS",
+        "case_insensitive": true
+      },
+      "product": "MikroTik",
+      "vendor": "mikrotik",
+      "confidence": 82,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-netgear",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "NETGEAR",
+        "case_insensitive": true
+      },
+      "product": "NETGEAR",
+      "vendor": "netgear",
+      "confidence": 75,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-panasonic-cam",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Panasonic",
+        "case_insensitive": true
+      },
+      "product": "Panasonic Camera",
+      "vendor": "panasonic",
+      "confidence": 72,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-printer-kyocera",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "KYOCERA",
+        "case_insensitive": true
+      },
+      "product": "Kyocera Printer",
+      "vendor": "kyocera",
+      "confidence": 75,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-printer-lexmark",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Lexmark",
+        "case_insensitive": true
+      },
+      "product": "Lexmark Printer",
+      "vendor": "lexmark",
+      "confidence": 75,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-printer-ricoh",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "RICOH",
+        "case_insensitive": true
+      },
+      "product": "Ricoh Printer",
+      "vendor": "ricoh",
+      "confidence": 75,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-printer-xerox",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Xerox",
+        "case_insensitive": true
+      },
+      "product": "Xerox Printer",
+      "vendor": "xerox",
+      "confidence": 75,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-qnap-surv",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "QVR",
+        "case_insensitive": true
+      },
+      "product": "QNAP Surveillance",
+      "vendor": "qnap",
+      "confidence": 72,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-sony-cam",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Sony",
+        "case_insensitive": true
+      },
+      "product": "Sony Camera",
+      "vendor": "sony",
+      "confidence": 72,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-supermicro-ipmi",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "ATEN",
+        "case_insensitive": true
+      },
+      "product": "Supermicro IPMI",
+      "vendor": "supermicro",
+      "confidence": 72,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-synology-cam",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Surveillance Station",
+        "case_insensitive": true
+      },
+      "product": "Synology Surveillance",
+      "vendor": "synology",
+      "confidence": 75,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-tplink",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "TP-Link",
+        "case_insensitive": true
+      },
+      "product": "TP-Link",
+      "vendor": "tplink",
+      "confidence": 75,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-ubiquiti-cam",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "UVC",
+        "case_insensitive": true
+      },
+      "product": "Ubiquiti Camera",
+      "vendor": "ubiquiti",
+      "confidence": 72,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-ubiquiti-unifi2",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "UniFi OS",
+        "case_insensitive": true
+      },
+      "product": "UniFi OS",
+      "vendor": "ubiquiti",
+      "confidence": 78,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-vigor",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Vigor",
+        "case_insensitive": true
+      },
+      "product": "DrayTek Vigor",
+      "vendor": "draytek",
+      "confidence": 75,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-vivotek",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "VIVOTEK",
+        "case_insensitive": true
+      },
+      "product": "VIVOTEK",
+      "vendor": "vivotek",
+      "confidence": 75,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-zte-f660",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "ZTE",
+        "case_insensitive": true
+      },
+      "product": "ZTE",
+      "vendor": "zte",
+      "confidence": 72,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-zyxel",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "ZyXEL",
+        "case_insensitive": true
+      },
+      "product": "ZyXEL",
+      "vendor": "zyxel",
+      "confidence": 75,
+      "source": "corpus-v3"
+    }
+  ]
+}

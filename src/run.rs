@@ -242,11 +242,26 @@ pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
         discovery_policy,
         guard.clone(),
     )));
-    let tcp_policy = TcpScanPolicy::new(plan.level, plan.goal, plan.tcp_ports.clone(), plan.speed);
-    scheduler.register_module(Arc::new(crate::tcp_discovery::TcpDiscoveryModule::new(
-        tcp_policy,
-        guard.clone(),
-    )));
+    let tcp_policy = TcpScanPolicy::new(plan.level, plan.goal, plan.tcp_ports.clone(), plan.speed)
+        .with_scan_mode(
+            &plan.scan_mode_requested,
+            &plan.scan_mode,
+            &plan.scan_mode_fallback,
+        );
+    if plan.scan_mode == "syn" {
+        scheduler.register_module(Arc::new(
+            crate::tcp_discovery::TcpDiscoveryModule::with_scanner(
+                tcp_policy,
+                Arc::new(crate::syn::SynScanner::default()),
+                guard.clone(),
+            ),
+        ));
+    } else {
+        scheduler.register_module(Arc::new(crate::tcp_discovery::TcpDiscoveryModule::new(
+            tcp_policy,
+            guard.clone(),
+        )));
+    }
     let udp_policy = crate::udp_discovery::UdpScanPolicy::new(
         plan.level,
         plan.goal,

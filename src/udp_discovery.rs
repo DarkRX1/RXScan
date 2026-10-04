@@ -692,6 +692,8 @@ fn execute_udp_scan(
     let mut sent_total = 0u64;
     let mut received_total = 0u64;
     let mut retries_total = 0u64;
+    let mut pacing_rtt_ms: u64 = 0;
+    let mut pacing_rtt_n: u64 = 0;
 
     for (ip, parent_id) in ips.iter().zip(parent_ids.iter()) {
         // Preserve partial on deadline (P1/P9): never discard scanned
@@ -733,6 +735,10 @@ fn execute_udp_scan(
         received_total += outcome.datagrams_received;
         retries_total += outcome.retries;
         for probe in &outcome.probes {
+            if matches!(probe.state, UdpPortState::Open | UdpPortState::Closed) {
+                pacing_rtt_ms += probe.latency.as_millis() as u64;
+                pacing_rtt_n += 1;
+            }
             // Scope re-check per probed port is unnecessary (same address
             // checked above); the address itself was permitted.
             match probe.state {
@@ -1005,6 +1011,29 @@ fn execute_udp_scan(
         .iter()
         .map(|record| serde_json::json!({"port": record.port, "service": record.service}))
         .collect();
+    let pacing_total = counts.values().sum::<u64>().max(1);
+    let pacing_sample = crate::pacing::PacingSample {
+        rtt_ms: pacing_rtt_ms / pacing_rtt_n.max(1),
+        timeout_ratio: counts["open_or_filtered"] as f64 / pacing_total as f64,
+        failure_ratio: counts["error"] as f64 / pacing_total as f64,
+        backlog: unscanned_total,
+        socket_pressure: fd_peak_max as f64 / policy.window().max(1) as f64,
+    };
+    let pacing_bounds = crate::pacing::PacingBounds {
+        min_concurrency: 1,
+        max_concurrency: policy.window().max(1),
+        min_timeout_ms: 100,
+        max_timeout_ms: 10_000,
+        min_delay_ms: 0,
+        max_delay_ms: 1000,
+    };
+    let pacing_decision = crate::pacing::suggest(
+        policy.window(),
+        policy.per_attempt_timeout(),
+        Duration::from_millis(0),
+        pacing_sample,
+        pacing_bounds,
+    );
     push_event(
         &mut events,
         EventKind::UdpScanCompleted,
@@ -1025,6 +1054,16 @@ fn execute_udp_scan(
             "datagrams_received": received_total,
             "retries": retries_total,
             "elapsed_ms": elapsed_ms,
+            "pacing": {
+                "timeout_ratio": pacing_sample.timeout_ratio,
+                "failure_ratio": pacing_sample.failure_ratio,
+                "rtt_ms": pacing_sample.rtt_ms,
+                "suggested_concurrency": pacing_decision.concurrency,
+                "suggested_timeout_ms": pacing_decision.timeout_ms,
+                "suggested_retry_delay_ms": pacing_decision.retry_delay_ms,
+                "slowed": pacing_decision.slowed,
+                "reason": pacing_decision.reason.as_str(),
+            },
         }),
         &provenance,
     )?;

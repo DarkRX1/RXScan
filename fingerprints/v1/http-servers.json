@@ -1,0 +1,419 @@
+{
+  "schema_version": 1,
+  "fingerprints": [
+    {
+      "id": "http-abyss",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Abyss",
+        "case_insensitive": true
+      },
+      "product": "Abyss",
+      "vendor": "aprelium",
+      "confidence": 72,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-aiohttp",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "aiohttp",
+        "case_insensitive": true
+      },
+      "product": "aiohttp",
+      "vendor": "aio-libs",
+      "confidence": 75,
+      "source": "corpus-v3",
+      "version_extractor": {
+        "type": "prefixed_token",
+        "prefix": "aiohttp/",
+        "max_len": 32
+      }
+    },
+    {
+      "id": "http-boa",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Boa",
+        "case_insensitive": true
+      },
+      "product": "Boa",
+      "vendor": "boa",
+      "confidence": 75,
+      "source": "corpus-v3",
+      "version_extractor": {
+        "type": "prefixed_token",
+        "prefix": "Boa/",
+        "max_len": 32
+      }
+    },
+    {
+      "id": "http-busybox",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "BusyBox",
+        "case_insensitive": true
+      },
+      "product": "BusyBox httpd",
+      "vendor": "busybox",
+      "confidence": 75,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-cowboy",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Cowboy",
+        "case_insensitive": true
+      },
+      "product": "Cowboy",
+      "vendor": "ninenines",
+      "confidence": 72,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-fastapi",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "FastAPI",
+        "case_insensitive": true
+      },
+      "product": "FastAPI",
+      "vendor": "fastapi",
+      "confidence": 78,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-flask",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Flask",
+        "case_insensitive": true
+      },
+      "product": "Flask",
+      "vendor": "pallets",
+      "confidence": 70,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-glassfish",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "GlassFish",
+        "case_insensitive": true
+      },
+      "product": "GlassFish",
+      "vendor": "oracle",
+      "confidence": 80,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-goahead",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "GoAhead",
+        "case_insensitive": true
+      },
+      "product": "GoAhead",
+      "vendor": "embedthis",
+      "confidence": 75,
+      "source": "corpus-v3",
+      "version_extractor": {
+        "type": "prefixed_token",
+        "prefix": "GoAhead-",
+        "max_len": 32
+      }
+    },
+    {
+      "id": "http-grizzly",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Grizzly",
+        "case_insensitive": true
+      },
+      "product": "Grizzly",
+      "vendor": "oracle",
+      "confidence": 75,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-gwan",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "G-WAN",
+        "case_insensitive": true
+      },
+      "product": "G-WAN",
+      "vendor": "gwan",
+      "confidence": 72,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-hiawatha",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Hiawatha",
+        "case_insensitive": true
+      },
+      "product": "Hiawatha",
+      "vendor": "hiawatha",
+      "confidence": 75,
+      "source": "corpus-v3",
+      "version_extractor": {
+        "type": "prefixed_token",
+        "prefix": "Hiawatha v",
+        "max_len": 32
+      }
+    },
+    {
+      "id": "http-jboss",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "WildFly",
+        "case_insensitive": true
+      },
+      "product": "WildFly",
+      "vendor": "redhat",
+      "confidence": 82,
+      "source": "corpus-v3",
+      "version_extractor": {
+        "type": "prefixed_token",
+        "prefix": "WildFly ",
+        "max_len": 32
+      }
+    },
+    {
+      "id": "http-jetty-runner",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "jetty",
+        "case_insensitive": true
+      },
+      "product": "Jetty",
+      "vendor": "eclipse",
+      "confidence": 80,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-kestrel",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Kestrel",
+        "case_insensitive": true
+      },
+      "product": "Kestrel",
+      "vendor": "microsoft",
+      "confidence": 80,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-netty",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Netty",
+        "case_insensitive": true
+      },
+      "product": "Netty",
+      "vendor": "netty",
+      "confidence": 72,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-passenger",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Phusion Passenger",
+        "case_insensitive": true
+      },
+      "product": "Passenger",
+      "vendor": "phusion",
+      "confidence": 78,
+      "source": "corpus-v3",
+      "version_extractor": {
+        "type": "prefixed_token",
+        "prefix": "Phusion Passenger ",
+        "max_len": 32
+      }
+    },
+    {
+      "id": "http-puma",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Puma",
+        "case_insensitive": true
+      },
+      "product": "Puma",
+      "vendor": "puma",
+      "confidence": 78,
+      "source": "corpus-v3",
+      "version_extractor": {
+        "type": "prefixed_token",
+        "prefix": "puma ",
+        "max_len": 32
+      }
+    },
+    {
+      "id": "http-sanic",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "sanic",
+        "case_insensitive": true
+      },
+      "product": "Sanic",
+      "vendor": "sanic",
+      "confidence": 72,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-starlette",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "starlette",
+        "case_insensitive": true
+      },
+      "product": "Starlette",
+      "vendor": "encode",
+      "confidence": 70,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-thttpd",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "thttpd",
+        "case_insensitive": true
+      },
+      "product": "thttpd",
+      "vendor": "acme",
+      "confidence": 75,
+      "source": "corpus-v3",
+      "version_extractor": {
+        "type": "prefixed_token",
+        "prefix": "thttpd/",
+        "max_len": 32
+      }
+    },
+    {
+      "id": "http-tomcat",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Tomcat",
+        "case_insensitive": true
+      },
+      "product": "Tomcat",
+      "vendor": "apache",
+      "confidence": 82,
+      "source": "corpus-v3",
+      "version_extractor": {
+        "type": "prefixed_token",
+        "prefix": "Tomcat/",
+        "max_len": 32
+      }
+    },
+    {
+      "id": "http-tornado2",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "tornado",
+        "case_insensitive": true
+      },
+      "product": "Tornado",
+      "vendor": "tornadoweb",
+      "confidence": 75,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-undertow",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Undertow",
+        "case_insensitive": true
+      },
+      "product": "Undertow",
+      "vendor": "redhat",
+      "confidence": 78,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-weblogic",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "WebLogic",
+        "case_insensitive": true
+      },
+      "product": "WebLogic",
+      "vendor": "oracle",
+      "confidence": 80,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "http-yaws",
+      "protocol": "http",
+      "probe": "http",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Yaws",
+        "case_insensitive": true
+      },
+      "product": "Yaws",
+      "vendor": "yaws",
+      "confidence": 75,
+      "source": "corpus-v3",
+      "version_extractor": {
+        "type": "prefixed_token",
+        "prefix": "Yaws/",
+        "max_len": 32
+      }
+    }
+  ]
+}

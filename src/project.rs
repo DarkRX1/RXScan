@@ -1221,6 +1221,127 @@ pub fn render_entity(project: &ProjectState, entity_id: &str) -> Result<String, 
     ))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EntityExplanation {
+    pub entity_id: String,
+    pub kind: String,
+    pub identity: String,
+    pub first_scan: String,
+    pub last_scan: String,
+    pub observation_count: usize,
+    pub observation_scan_ids: Vec<String>,
+    pub finding_titles: Vec<String>,
+    pub change_types: Vec<String>,
+    pub neighbor_ids: Vec<String>,
+    pub truncated_neighbors: bool,
+}
+
+pub fn explain_entity(
+    project: &ProjectState,
+    entity_id: &str,
+    limit: usize,
+) -> Result<EntityExplanation, ProjectError> {
+    let limit = limit.clamp(1, 100);
+    let entity = project
+        .entities
+        .get(entity_id)
+        .ok_or_else(|| ProjectError::NotFound(entity_id.to_owned()))?;
+    let mut scan_ids: Vec<String> = entity
+        .observations
+        .iter()
+        .filter_map(|id| project.observations.get(id))
+        .map(|obs| obs.scan_id.0.clone())
+        .collect();
+    scan_ids.sort();
+    scan_ids.dedup();
+    let mut finding_titles: Vec<String> = project
+        .findings
+        .values()
+        .filter(|finding| finding.affected_entity == entity.id)
+        .map(|finding| finding.title.clone())
+        .collect();
+    finding_titles.sort();
+    let mut change_types: Vec<String> = project
+        .changes
+        .values()
+        .filter(|change| change.entity_id.as_deref() == Some(entity.id.as_str()))
+        .map(|change| format!("{:?}", change.change_type))
+        .collect();
+    change_types.sort();
+    change_types.dedup();
+    let mut neighbor_ids: Vec<String> = project
+        .relationships
+        .values()
+        .filter(|rel| rel.from_entity == entity.id || rel.to_entity == entity.id)
+        .map(|rel| {
+            if rel.from_entity == entity.id {
+                rel.to_entity.clone()
+            } else {
+                rel.from_entity.clone()
+            }
+        })
+        .collect();
+    neighbor_ids.sort();
+    neighbor_ids.dedup();
+    let truncated_neighbors = neighbor_ids.len() > limit;
+    neighbor_ids.truncate(limit);
+    Ok(EntityExplanation {
+        entity_id: entity.id.clone(),
+        kind: format!("{:?}", entity.kind),
+        identity: entity.identity.clone(),
+        first_scan: entity.first_scan_id.0.clone(),
+        last_scan: entity.last_scan_id.0.clone(),
+        observation_count: entity.observation_count,
+        observation_scan_ids: scan_ids,
+        finding_titles,
+        change_types,
+        neighbor_ids,
+        truncated_neighbors,
+    })
+}
+
+pub fn render_explanation(explanation: &EntityExplanation) -> String {
+    let mut out = format!(
+        "Conclusion:\n  {} ({})\nConfidence:\n  derived from {} observations across {} scans\nEvidence:\n",
+        explanation.identity,
+        explanation.kind,
+        explanation.observation_count,
+        explanation.observation_scan_ids.len()
+    );
+    for scan in &explanation.observation_scan_ids {
+        out.push_str(&format!("  observed in scan {scan}\n"));
+    }
+    out.push_str("Findings:\n");
+    if explanation.finding_titles.is_empty() {
+        out.push_str("  none\n");
+    }
+    for title in &explanation.finding_titles {
+        out.push_str(&format!("  - {title}\n"));
+    }
+    out.push_str("Changes:\n");
+    if explanation.change_types.is_empty() {
+        out.push_str("  none recorded\n");
+    }
+    for change in &explanation.change_types {
+        out.push_str(&format!("  - {change}\n"));
+    }
+    out.push_str(&format!(
+        "Discovery chain: {} neighbor entities{} first seen {} last seen {}\n",
+        explanation.neighbor_ids.len(),
+        if explanation.truncated_neighbors {
+            " (truncated)"
+        } else {
+            ""
+        },
+        explanation.first_scan,
+        explanation.last_scan,
+    ));
+    for neighbor in &explanation.neighbor_ids {
+        out.push_str(&format!("  - {neighbor}\n"));
+    }
+    out
+}
+
 pub fn render_findings(
     project: &ProjectState,
     entity: Option<&str>,

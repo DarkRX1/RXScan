@@ -1,5 +1,7 @@
 use clap::Parser;
-use rxscan::{analysis, cli::Cli, diff, plan::ScanPlan, project, report, run};
+use rxscan::{
+    analysis, capabilities, cli::Cli, diff, plan::ScanPlan, project, report, run, unknown,
+};
 
 /// Phase 20 stdio contract.
 ///
@@ -100,6 +102,27 @@ fn main() {
         run_project_db(&args);
         return;
     }
+    if args.get(1).is_some_and(|arg| arg == "capabilities") {
+        let json = args.iter().any(|arg| arg == "--json");
+        let report = capabilities::probe();
+        if json {
+            out_line!("{}", serde_json::to_string_pretty(&report).unwrap());
+        } else {
+            out!("{}", capabilities::render_human(&report));
+        }
+        return;
+    }
+    if args.get(1).is_some_and(|arg| arg == "unknown") {
+        run_unknown(&args);
+        return;
+    }
+    if args
+        .get(1)
+        .is_some_and(|arg| arg == "search" || arg == "--username")
+    {
+        run_search(&args);
+        return;
+    }
     let cli = Cli::parse();
     let explain_only = cli.explain;
     if explain_only {
@@ -138,6 +161,298 @@ fn main() {
     }
 }
 
+fn run_search(args: &[String]) {
+    let offset = usize::from(args.get(1).is_some_and(|arg| arg == "search")) + 1;
+    if args.get(offset).is_some_and(|arg| arg == "providers") {
+        let json = args.iter().skip(offset + 1).any(|arg| arg == "--json");
+        if args.iter().skip(offset + 1).any(|arg| arg != "--json") {
+            err!("rxscan search providers: only --json is supported");
+            std::process::exit(2);
+        }
+        let pack = match rxscan::search::embedded_username_pack() {
+            Ok(pack) => pack,
+            Err(error) => {
+                err!("rxscan search providers: {error}");
+                std::process::exit(1);
+            }
+        };
+        if json {
+            let providers = pack
+                .providers
+                .iter()
+                .map(|provider| {
+                    serde_json::json!({
+                        "id": provider.metadata.id,
+                        "name": provider.platform,
+                        "category": provider.category,
+                        "contact_class": provider.metadata.contact_class,
+                        "authentication_required": provider.metadata.requires_authentication,
+                        "fixture_status": "fixture_backed"
+                    })
+                })
+                .collect::<Vec<_>>();
+            out_line!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "pack_version": pack.pack_version,
+                    "active_providers": providers.len(),
+                    "providers": providers
+                }))
+                .unwrap()
+            );
+        } else {
+            out_line!("ID\tNAME\tCATEGORY\tCONTACT\tAUTH\tFIXTURES");
+            for provider in pack.providers {
+                out_line!(
+                    "{}\t{}\t{}\tpublic_http\t{}\tfixture_backed",
+                    provider.metadata.id,
+                    provider.platform,
+                    provider.category,
+                    if provider.metadata.requires_authentication {
+                        "yes"
+                    } else {
+                        "no"
+                    }
+                );
+            }
+        }
+        return;
+    }
+    let mut username: Option<String> = None;
+    let mut json = false;
+    let mut jsonl = false;
+    let mut show_all = false;
+    let mut explain = false;
+    let mut deadline = std::time::Duration::from_secs(30);
+    let mut selected: Option<std::collections::BTreeSet<String>> = None;
+    let mut excluded = std::collections::BTreeSet::<String>::new();
+    let mut categories = std::collections::BTreeSet::<String>::new();
+    let mut project_db: Option<std::path::PathBuf> = None;
+    let mut index = offset;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--username" => {
+                index += 1;
+                username = args.get(index).cloned();
+                if username.is_none() {
+                    err!("rxscan search: --username requires a value");
+                    std::process::exit(2);
+                }
+            }
+            "--json" => json = true,
+            "--jsonl" => jsonl = true,
+            "--all" => show_all = true,
+            "--explain" => explain = true,
+            "--deadline" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    err!("rxscan search: --deadline requires a duration");
+                    std::process::exit(2);
+                };
+                deadline = match rxscan::config::parse_duration_ms(value) {
+                    Ok(ms) => std::time::Duration::from_millis(ms),
+                    Err(error) => {
+                        err!("rxscan search: invalid deadline: {error}");
+                        std::process::exit(2);
+                    }
+                };
+            }
+            "--providers" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    err!("rxscan search: --providers requires a comma-separated list");
+                    std::process::exit(2);
+                };
+                let ids = value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_owned)
+                    .collect::<std::collections::BTreeSet<_>>();
+                selected = Some(ids);
+            }
+            "--exclude-provider" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    err!("rxscan search: --exclude-provider requires a comma-separated list");
+                    std::process::exit(2);
+                };
+                excluded.extend(
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_owned),
+                );
+            }
+            "--category" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    err!("rxscan search: --category requires a comma-separated list");
+                    std::process::exit(2);
+                };
+                categories.extend(
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|category| !category.is_empty())
+                        .map(str::to_owned),
+                );
+            }
+            "--project-db" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    err!("rxscan search: --project-db requires a path");
+                    std::process::exit(2);
+                };
+                project_db = Some(value.into());
+            }
+            "--help" | "-h" => {
+                out_line!(
+                    "rxscan search --username NAME [--providers IDS] [--exclude-provider IDS] [--category CATEGORIES] [--deadline 30s] [--project-db PATH] [--all] [--json|--jsonl] [--explain]\nrxscan search providers [--json]\nrxscan --username NAME [same options]"
+                );
+                return;
+            }
+            unknown => {
+                err!("rxscan search: unknown option '{unknown}'");
+                std::process::exit(2);
+            }
+        }
+        index += 1;
+    }
+    if json && jsonl {
+        err!("rxscan search: --json and --jsonl conflict");
+        std::process::exit(2);
+    }
+    let Some(username) = username else {
+        err!("rxscan search: --username is required");
+        std::process::exit(2);
+    };
+    let pack = match rxscan::search::embedded_username_pack() {
+        Ok(pack) => pack,
+        Err(error) => {
+            err!("rxscan search: {error}");
+            std::process::exit(1);
+        }
+    };
+    let available = pack
+        .providers
+        .iter()
+        .map(|provider| provider.metadata.id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    for requested in selected.iter().flatten().chain(excluded.iter()) {
+        if !available.contains(requested.as_str()) {
+            err!("rxscan search: unknown provider: {requested}");
+            std::process::exit(2);
+        }
+    }
+    let available_categories = pack
+        .providers
+        .iter()
+        .map(|provider| provider.category.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let unknown_categories = categories
+        .iter()
+        .filter(|category| !available_categories.contains(category.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unknown_categories.is_empty() {
+        err!(
+            "rxscan search: unknown categor{}: {}",
+            if unknown_categories.len() == 1 {
+                "y"
+            } else {
+                "ies"
+            },
+            unknown_categories.join(", ")
+        );
+        std::process::exit(2);
+    }
+    let effective = pack
+        .providers
+        .iter()
+        .filter(|provider| {
+            selected
+                .as_ref()
+                .is_none_or(|ids| ids.contains(&provider.metadata.id))
+                && !excluded.contains(&provider.metadata.id)
+                && (categories.is_empty() || categories.contains(&provider.category))
+        })
+        .map(|provider| provider.metadata.id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let selected_count = effective.len();
+    if selected_count == 0 {
+        err!("rxscan search: provider selection matched no providers");
+        std::process::exit(2);
+    }
+    if explain {
+        out_line!("Username search plan");
+        out_line!("seed: username:{username}");
+        out_line!("providers selected: {selected_count}");
+        out_line!(
+            "categories: {}",
+            if categories.is_empty() {
+                "all".to_owned()
+            } else {
+                categories.iter().cloned().collect::<Vec<_>>().join(",")
+            }
+        );
+        out_line!("global concurrency: 4");
+        out_line!("per-host concurrency: 1");
+        out_line!("deadline: {}ms", deadline.as_millis());
+        out_line!("contact class: public_http");
+        out_line!(
+            "project persistence: {}",
+            project_db
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "disabled".to_owned())
+        );
+        out_line!("direct network scanning: disabled");
+        out_line!("network scans: 0");
+        return;
+    }
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    let report = match rxscan::search::execute_username_search(
+        &username,
+        4,
+        1,
+        deadline,
+        Some(&effective),
+        &cancelled,
+    ) {
+        Ok(report) => report,
+        Err(error) => {
+            err!("rxscan search: {error}");
+            std::process::exit(1);
+        }
+    };
+    if let Some(path) = project_db {
+        let mut db = match rxscan::project_db::ProjectDb::open(&path) {
+            Ok(db) => db,
+            Err(error) => {
+                err!("rxscan search: could not open project database: {error}");
+                std::process::exit(1);
+            }
+        };
+        if let Err(error) = rxscan::search::persist_username_report(&mut db, &report) {
+            err!("rxscan search: could not persist search report: {error}");
+            std::process::exit(1);
+        }
+    }
+    if json {
+        out_line!("{}", serde_json::to_string_pretty(&report).unwrap());
+    } else if jsonl {
+        let output = rxscan::search::render_username_human(&report, false);
+        out!("{output}")
+    } else {
+        out!(
+            "{}",
+            rxscan::search::render_username_human(&report, show_all)
+        );
+    }
+}
+
 fn run_project(args: &[String]) {
     let Some(command) = args.get(2).map(String::as_str) else {
         err!(
@@ -148,7 +463,7 @@ fn run_project(args: &[String]) {
     match command {
         "--help" | "-h" => {
             out_line!(
-                "rxscan project create <project.rxproj>\nrxscan project add <project.rxproj> <scan.rxscan>\nrxscan project summary <project.rxproj> [--json]\nrxscan project show <project.rxproj> <entity> [--json]\nrxscan project neighbors <project.rxproj> <entity> [--depth N] [--limit N] [--json|--jsonl]\nrxscan project scans <project.rxproj> [--json]\nrxscan project findings <project.rxproj> [entity] [--limit N] [--json|--jsonl]\nrxscan project changes <project.rxproj> [entity] [--limit N] [--json|--jsonl]\nrxscan project attention <project.rxproj> [entity] [--limit N] [--json|--jsonl]"
+                "rxscan project create <project.rxproj>\nrxscan project add <project.rxproj> <scan.rxscan>\nrxscan project summary <project.rxproj> [--json]\nrxscan project show <project.rxproj> <entity> [--json]\nrxscan project explain <project.rxproj> <entity> [--limit N] [--json]\nrxscan project neighbors <project.rxproj> <entity> [--depth N] [--limit N] [--json|--jsonl]\nrxscan project scans <project.rxproj> [--json]\nrxscan project findings <project.rxproj> [entity] [--limit N] [--json|--jsonl]\nrxscan project changes <project.rxproj> [entity] [--limit N] [--json|--jsonl]\nrxscan project attention <project.rxproj> [entity] [--limit N] [--json|--jsonl]"
             );
         }
         "create" => {
@@ -236,6 +551,49 @@ fn run_project(args: &[String]) {
                 },
                 Err(error) => {
                     err!("rxscan project show: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "explain" => {
+            let (Some(path), Some(entity)) = (args.get(3), args.get(4)) else {
+                err!(
+                    "rxscan project explain: usage: rxscan project explain <project> <entity> [--limit N] [--json]"
+                );
+                std::process::exit(2);
+            };
+            let mut limit = project::DEFAULT_QUERY_LIMIT;
+            let mut json = false;
+            let mut iter = args[5..].iter();
+            while let Some(arg) = iter.next() {
+                match arg.as_str() {
+                    "--limit" => {
+                        let Some(value) = iter.next() else {
+                            err!("rxscan project explain: --limit requires a value");
+                            std::process::exit(2);
+                        };
+                        limit = value.parse().unwrap_or(project::DEFAULT_QUERY_LIMIT);
+                    }
+                    "--json" => json = true,
+                    other => {
+                        err!("rxscan project explain: unsupported option {other}");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            match project::load_project(std::path::Path::new(path)) {
+                Ok(state) => match project::explain_entity(&state, entity, limit) {
+                    Ok(explanation) if json => {
+                        out_line!("{}", serde_json::to_string_pretty(&explanation).unwrap())
+                    }
+                    Ok(explanation) => out_line!("{}", project::render_explanation(&explanation)),
+                    Err(error) => {
+                        err!("rxscan project explain: {error}");
+                        std::process::exit(1);
+                    }
+                },
+                Err(error) => {
+                    err!("rxscan project explain: {error}");
                     std::process::exit(1);
                 }
             }
@@ -848,6 +1206,53 @@ fn run_analyze(args: &[String]) {
         Ok(report) => out_line!("{}", analysis::human_summary(&report)),
         Err(error) => {
             err!("rxscan analyze: {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_unknown(args: &[String]) {
+    let mut limit = unknown::DEFAULT_UNKNOWN_LIMIT;
+    let mut json = false;
+    let mut checkpoint: Option<String> = None;
+    let mut iter = args[2..].iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                out_line!(
+                    "rxscan unknown [--limit N] [--json] <scan.rxscan>\nExport bounded sanitized unknown-service fingerprints for future rule development. Local only; nothing is uploaded."
+                );
+                return;
+            }
+            "--limit" => {
+                let Some(value) = iter.next() else {
+                    err!("rxscan unknown: --limit requires a value");
+                    std::process::exit(2);
+                };
+                limit = value
+                    .parse()
+                    .unwrap_or(unknown::DEFAULT_UNKNOWN_LIMIT)
+                    .min(unknown::MAX_UNKNOWN_LIMIT);
+            }
+            "--json" => json = true,
+            value if checkpoint.is_none() => checkpoint = Some(value.to_owned()),
+            _ => {
+                err!("rxscan unknown: usage: rxscan unknown [--limit N] [--json] <scan.rxscan>");
+                std::process::exit(2);
+            }
+        }
+    }
+    let Some(current) = checkpoint else {
+        err!("rxscan unknown: usage: rxscan unknown [--limit N] [--json] <scan.rxscan>");
+        std::process::exit(2);
+    };
+    match unknown::export_unknown(std::path::Path::new(&current), limit) {
+        Ok(export) if json => {
+            out_line!("{}", serde_json::to_string_pretty(&export).unwrap())
+        }
+        Ok(export) => out!("{}", unknown::render_human(&export)),
+        Err(error) => {
+            err!("rxscan unknown: {error}");
             std::process::exit(1);
         }
     }

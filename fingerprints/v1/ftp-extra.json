@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "fingerprints": [
+    {
+      "id": "ftp-cerberus",
+      "protocol": "ftp",
+      "probe": "ftp",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Cerberus",
+        "case_insensitive": true
+      },
+      "product": "Cerberus FTP",
+      "vendor": "cerberus",
+      "confidence": 80,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "ftp-crushftp",
+      "protocol": "ftp",
+      "probe": "ftp",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "CrushFTP",
+        "case_insensitive": true
+      },
+      "product": "CrushFTP",
+      "vendor": "crushftp",
+      "confidence": 82,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "ftp-raiden",
+      "protocol": "ftp",
+      "probe": "ftp",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "RaidenFTPD",
+        "case_insensitive": true
+      },
+      "product": "RaidenFTPD",
+      "vendor": "raiden",
+      "confidence": 72,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "ftp-titan",
+      "protocol": "ftp",
+      "probe": "ftp",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Titan",
+        "case_insensitive": true
+      },
+      "product": "Titan FTP",
+      "vendor": "southrivertech",
+      "confidence": 82,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "ftp-wing",
+      "protocol": "ftp",
+      "probe": "ftp",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Wing FTP",
+        "case_insensitive": true
+      },
+      "product": "Wing FTP",
+      "vendor": "wftpserver",
+      "confidence": 78,
+      "source": "corpus-v3"
+    },
+    {
+      "id": "ftp-xlight",
+      "protocol": "ftp",
+      "probe": "ftp",
+      "matcher": {
+        "kind": "contains",
+        "pattern": "Xlight",
+        "case_insensitive": true
+      },
+      "product": "Xlight FTP",
+      "vendor": "xlight",
+      "confidence": 75,
+      "source": "corpus-v3"
+    }
+  ]
+}

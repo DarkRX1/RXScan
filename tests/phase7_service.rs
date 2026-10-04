@@ -183,6 +183,14 @@ fn ftp_fixture() -> Fixture {
                     received.lock().unwrap().extend_from_slice(&chunk[..count]);
                     if chunk[..count].starts_with(b"NOOP") {
                         let _ = stream.write_all(b"200 NOOP ok\r\n");
+                        let _ = stream.set_read_timeout(Some(Duration::from_millis(400)));
+                        if let Ok(count) = stream.read(&mut chunk) {
+                            received.lock().unwrap().extend_from_slice(&chunk[..count]);
+                            if chunk[..count].starts_with(b"FEAT") {
+                                let _ =
+                                    stream.write_all(b"211-Features:\r\n AUTH TLS\r\n211 End\r\n");
+                            }
+                        }
                     }
                 }
             }
@@ -901,7 +909,7 @@ fn https_requires_real_http_over_tls_evidence() {
 // ---------- FTP / SMTP / databases ----------
 
 #[test]
-fn ftp_banner_recognition_stays_passive() {
+fn ftp_banner_recognition_uses_read_only_feat() {
     let fixture = ftp_fixture();
     let plan = plan_for_ports(&fixture.port.to_string());
     let guard = Arc::new(PolicyScopeGuard::new(plan.scope.clone()));
@@ -923,9 +931,13 @@ fn ftp_banner_recognition_stays_passive() {
     assert_eq!(observation["protocol"], "ftp");
     assert_eq!(observation["product_hint"], "FixtureFTP");
     assert_eq!(observation["version_hint"], "1.0");
-    // Disambiguation exchange only: one EHLO (rejected) + one NOOP
-    // (accepted). Still no authentication, no file commands.
-    assert_eq!(fixture.received_bytes(), b"EHLO rxscan.local\r\nNOOP\r\n");
+    // Disambiguation exchange only: one EHLO (rejected), one NOOP
+    // (accepted), then the read-only FEAT query. Still no authentication or
+    // file commands.
+    assert_eq!(
+        fixture.received_bytes(),
+        b"EHLO rxscan.local\r\nNOOP\r\nFEAT\r\n"
+    );
 }
 
 #[test]
@@ -1901,8 +1913,12 @@ fn no_authentication_or_destructive_bytes_are_ever_sent() {
     );
     assert!(mysql.received_bytes().is_empty());
     assert!(generic.received_bytes().is_empty());
-    // Mail disambiguation sends exactly EHLO (+NOOP for FTP).
-    assert_eq!(ftp.received_bytes(), b"EHLO rxscan.local\r\nNOOP\r\n");
+    // Mail disambiguation sends exactly EHLO (+NOOP for FTP, +FEAT on
+    // confirmed FTP).
+    assert_eq!(
+        ftp.received_bytes(),
+        b"EHLO rxscan.local\r\nNOOP\r\nFEAT\r\n"
+    );
     // Active probes send exactly their documented payloads.
     assert_eq!(redis.received_bytes(), b"PING\r\n");
     assert_eq!(postgres.received_bytes(), vec![0, 0, 0, 8, 4, 210, 22, 47]);

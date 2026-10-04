@@ -1,0 +1,163 @@
+{
+  "fingerprints": [
+    {
+      "confidence": 85,
+      "id": "db-cockroachdb",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "CockroachDB"
+      },
+      "probe": "postgres",
+      "product": "CockroachDB",
+      "protocol": "postgres",
+      "source": "corpus-v2",
+      "vendor": "cockroach"
+    },
+    {
+      "confidence": 85,
+      "id": "db-dragonfly",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "dragonfly"
+      },
+      "probe": "redis",
+      "product": "Dragonfly",
+      "protocol": "redis",
+      "source": "corpus-v2",
+      "vendor": "dragonfly"
+    },
+    {
+      "confidence": 85,
+      "id": "db-keydb",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "keydb"
+      },
+      "probe": "redis",
+      "product": "KeyDB",
+      "protocol": "redis",
+      "source": "corpus-v2",
+      "vendor": "keydb"
+    },
+    {
+      "confidence": 85,
+      "id": "db-mariadb",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "MariaDB"
+      },
+      "probe": "mysql",
+      "product": "MariaDB",
+      "protocol": "mysql",
+      "source": "corpus-v2",
+      "vendor": "mariadb"
+    },
+    {
+      "confidence": 85,
+      "id": "db-mongodb",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "mongod"
+      },
+      "probe": "mongodb",
+      "product": "MongoDB",
+      "protocol": "mongodb",
+      "source": "corpus-v2",
+      "vendor": "mongodb"
+    },
+    {
+      "confidence": 80,
+      "id": "db-mqtt-mosquitto",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "mosquitto"
+      },
+      "probe": "mqtt",
+      "product": "Mosquitto",
+      "protocol": "mqtt",
+      "source": "corpus-v2",
+      "vendor": "eclipse"
+    },
+    {
+      "confidence": 80,
+      "id": "db-mqtt-verne",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "VerneMQ"
+      },
+      "probe": "mqtt",
+      "product": "VerneMQ",
+      "protocol": "mqtt",
+      "source": "corpus-v2",
+      "vendor": "vernemq"
+    },
+    {
+      "confidence": 85,
+      "id": "db-mysql",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "mysql_native_password"
+      },
+      "probe": "mysql",
+      "product": "MySQL",
+      "protocol": "mysql",
+      "source": "corpus-v2",
+      "vendor": "oracle"
+    },
+    {
+      "confidence": 85,
+      "id": "db-percona",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "Percona"
+      },
+      "probe": "mysql",
+      "product": "Percona Server",
+      "protocol": "mysql",
+      "source": "corpus-v2",
+      "vendor": "percona"
+    },
+    {
+      "confidence": 90,
+      "id": "db-postgres",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "PostgreSQL"
+      },
+      "probe": "postgres",
+      "product": "PostgreSQL",
+      "protocol": "postgres",
+      "source": "corpus-v2",
+      "vendor": "postgresql"
+    },
+    {
+      "confidence": 85,
+      "id": "db-redis",
+      "matcher": {
+        "case_insensitive": true,
+        "kind": "contains",
+        "pattern": "redis_version"
+      },
+      "probe": "redis",
+      "product": "Redis",
+      "protocol": "redis",
+      "source": "corpus-v2",
+      "vendor": "redis",
+      "version_extractor": {
+        "key": "redis_version",
+        "type": "key_value"
+      }
+    }
+  ],
+  "schema_version": 1
+}
