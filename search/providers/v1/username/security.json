@@ -1,0 +1,377 @@
+{
+  "schema_version": 1,
+  "pack_version": "2026.10.05-v4",
+  "providers": [
+    {
+      "metadata": {
+        "id": "bugcrowd",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "security",
+        "requires_authentication": false
+      },
+      "platform": "Bugcrowd",
+      "category": "security",
+      "profile_url": "https://bugcrowd.com/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "bugcrowd.com/{username}"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05. C3: researcher profiles live at /h/{username} but are JS shells with zero server-rendered identity; /{username}/ 301-or-404 distinguishes only weakly (Possible ceiling). Kept at the extensionless URL."
+    },
+    {
+      "metadata": {
+        "id": "hackaday",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "security",
+        "requires_authentication": false
+      },
+      "platform": "Hackaday.io",
+      "category": "security",
+      "profile_url": "https://hackaday.io/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "hackaday.io/{username}"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B)."
+    },
+    {
+      "metadata": {
+        "id": "hackerone",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "security",
+        "requires_authentication": false
+      },
+      "platform": "HackerOne",
+      "category": "security",
+      "profile_url": "https://hackerone.com/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "hackerone.com/{username}"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "live_verified",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05. C3: small profile pages carry URL identity; absent 404s with title marker.",
+      "verified_at": "2026-10-05",
+      "verification_method": "live-probe"
+    },
+    {
+      "metadata": {
+        "id": "keybase",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 20,
+        "weight": 1,
+        "source_category": "security",
+        "requires_authentication": false
+      },
+      "platform": "Keybase",
+      "category": "security",
+      "profile_url": "https://keybase.io/_/api/1.0/user/lookup.json?username={username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "\"username\":\"{username}\""
+        ],
+        "any": [
+          "\"status\":{\"code\":0"
+        ]
+      },
+      "not_found": {
+        "any": [
+          "\"code\":205"
+        ]
+      },
+      "blocked_markers": [
+        "rate limit exceeded",
+        "captcha challenge"
+      ],
+      "authentication_url_markers": [],
+      "max_redirects": 1,
+      "max_body_bytes": 131072,
+      "health_state": "live_verified",
+      "verified_at": "2026-10-05",
+      "verification_method": "live-probe",
+      "username_rules": {
+        "min_length": 1,
+        "max_length": 16,
+        "charset": "alnum_underscore"
+      },
+      "source_notes": "Live 2026-10-05: lookup API public; code 0 + username echo on existing, code 205 on absent. Overlong names (>16) return INPUT_ERROR, hence max_length 16. Typical profile payloads (~120KB) require the raised fetch budget."
+    },
+    {
+      "metadata": {
+        "id": "rootme",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "security",
+        "requires_authentication": false
+      },
+      "platform": "Root-Me",
+      "category": "security",
+      "profile_url": "https://root-me.org/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "root-me.org/{username}"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B)."
+    },
+    {
+      "metadata": {
+        "id": "tryhackme",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "security",
+        "requires_authentication": false
+      },
+      "platform": "TryHackMe",
+      "category": "security",
+      "profile_url": "https://tryhackme.com/p/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "tryhackme.com/p/{username}"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "security checkpoint",
+        "verify you are human"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05. C3: anonymous clients are rate-limited/walled (429 + Vercel security checkpoint) on first contact."
+    },
+    {
+      "metadata": {
+        "id": "virustotal",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "security",
+        "requires_authentication": false
+      },
+      "platform": "VirusTotal",
+      "category": "security",
+      "profile_url": "https://virustotal.com/gui/user/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "virustotal.com/gui/user/{username}"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B)."
+    }
+  ]
+}

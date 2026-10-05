@@ -1,0 +1,316 @@
+{
+  "schema_version": 1,
+  "pack_version": "2026.10.05-v4",
+  "providers": [
+    {
+      "metadata": {
+        "id": "ebay",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "commerce",
+        "requires_authentication": false
+      },
+      "platform": "eBay",
+      "category": "commerce",
+      "profile_url": "https://www.ebay.com/usr/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "ebay.com/usr/{username}"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "error page",
+        "verify you are human"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05. C3: anonymous clients receive an Akamai error page (403) for all requests."
+    },
+    {
+      "metadata": {
+        "id": "etsy",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "commerce",
+        "requires_authentication": false
+      },
+      "platform": "Etsy",
+      "category": "commerce",
+      "profile_url": "https://etsy.com/people/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "etsy.com/people/{username}"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B)."
+    },
+    {
+      "metadata": {
+        "id": "gumroad",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "commerce",
+        "requires_authentication": false
+      },
+      "platform": "Gumroad",
+      "category": "commerce",
+      "profile_url": "https://{username}.gumroad.com",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "{username}.gumroad.com"
+        ],
+        "any": [
+          "gumroad.com"
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B)."
+    },
+    {
+      "metadata": {
+        "id": "kofi",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "commerce",
+        "requires_authentication": false
+      },
+      "platform": "Ko-fi",
+      "category": "commerce",
+      "profile_url": "https://ko-fi.com/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "ko-fi.com/{username}"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B)."
+    },
+    {
+      "metadata": {
+        "id": "patreon",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "commerce",
+        "requires_authentication": false
+      },
+      "platform": "Patreon",
+      "category": "commerce",
+      "profile_url": "https://patreon.com/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "patreon.com/{username}"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": []
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B). C3B: previous \"page not found\" absence marker matched normal creator pages (help text), a false-negative factory; absence is status-driven (404) only."
+    },
+    {
+      "metadata": {
+        "id": "producthunt",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "commerce",
+        "requires_authentication": false
+      },
+      "platform": "Product Hunt",
+      "category": "commerce",
+      "profile_url": "https://www.producthunt.com/@{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "producthunt.com/@{username}"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "just a moment",
+        "verify you are human"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05. C3: anonymous clients receive a Cloudflare challenge for all requests."
+    }
+  ]
+}

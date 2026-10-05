@@ -1,0 +1,35 @@
+{
+  "provider": "metacpan",
+  "cases": [
+    {
+      "name": "found",
+      "status": 200,
+      "body": "href=\"/author/Rx\" metacpan.org",
+      "expected": "confirmed"
+    },
+    {
+      "name": "not-found",
+      "status": 404,
+      "body": "page not found",
+      "expected": "not_found"
+    },
+    {
+      "name": "generic-200",
+      "status": 200,
+      "body": "Welcome to the home page about this directory index of public listings.",
+      "expected": "possible"
+    },
+    {
+      "name": "blocked",
+      "status": 200,
+      "body": "Access restricted: client challenge. Automated clients verify you are human.",
+      "expected": "blocked"
+    },
+    {
+      "name": "captcha-noise",
+      "status": 200,
+      "body": "asset octocaptcha_origin_optimization bundle captchaToken verified",
+      "expected": "possible"
+    }
+  ]
+}

@@ -1,0 +1,689 @@
+{
+  "schema_version": 1,
+  "pack_version": "2026.10.05-v4",
+  "providers": [
+    {
+      "metadata": {
+        "id": "aboutme",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "social",
+        "requires_authentication": false
+      },
+      "platform": "about.me",
+      "category": "social",
+      "profile_url": "https://about.me/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "about.me/{username}"
+        ],
+        "any": []
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "live_verified",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B). C3B: URL identity verified; absent 404s cleanly. No verified bonus marker; confirms at 88.",
+      "verified_at": "2026-10-05",
+      "verification_method": "live-probe"
+    },
+    {
+      "metadata": {
+        "id": "biolink",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "social",
+        "requires_authentication": false
+      },
+      "platform": "Bio Link",
+      "category": "social",
+      "profile_url": "https://bio.link/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "bio.link/{username}"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B)."
+    },
+    {
+      "metadata": {
+        "id": "bluesky",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "social",
+        "requires_authentication": false
+      },
+      "platform": "Bluesky",
+      "category": "social",
+      "profile_url": "https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile?actor={username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        400
+      ],
+      "success": {
+        "required": [
+          "\"handle\":\"{username}\""
+        ],
+        "any": [
+          "\"did\":\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "profile not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "live_verified",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05. C3: moved to the documented public profile API (handle identity); absent serves 400 \"Profile not found\". HTML pages are app shells.",
+      "verified_at": "2026-10-05",
+      "verification_method": "live-probe"
+    },
+    {
+      "metadata": {
+        "id": "goodreads",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "social",
+        "requires_authentication": false
+      },
+      "platform": "Goodreads",
+      "category": "social",
+      "profile_url": "https://goodreads.com/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "goodreads.com/{username}"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B)."
+    },
+    {
+      "metadata": {
+        "id": "instagram",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "social",
+        "requires_authentication": false
+      },
+      "platform": "Instagram",
+      "category": "social",
+      "profile_url": "https://instagram.com/{username}/",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "instagram.com/{username}/"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B)."
+    },
+    {
+      "metadata": {
+        "id": "letterboxd",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "social",
+        "requires_authentication": false
+      },
+      "platform": "Letterboxd",
+      "category": "social",
+      "profile_url": "https://letterboxd.com/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "letterboxd.com/{username}"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B)."
+    },
+    {
+      "metadata": {
+        "id": "linkedin",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "social",
+        "requires_authentication": false
+      },
+      "platform": "LinkedIn",
+      "category": "social",
+      "profile_url": "https://linkedin.com/in/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "linkedin.com/in/{username}"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B)."
+    },
+    {
+      "metadata": {
+        "id": "linktree",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "social",
+        "requires_authentication": false
+      },
+      "platform": "Linktree",
+      "category": "social",
+      "profile_url": "https://linktr.ee/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "linktr.ee/{username}"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "live_verified",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B). C3B: URL + JSON identity markers verified on served page; absent 404s with title marker.",
+      "verified_at": "2026-10-05",
+      "verification_method": "live-probe"
+    },
+    {
+      "metadata": {
+        "id": "pinterest",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "social",
+        "requires_authentication": false
+      },
+      "platform": "Pinterest",
+      "category": "social",
+      "profile_url": "https://www.pinterest.com/{username}/",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "pinterest.com/{username}/"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "disabled",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05. C3: DISABLED. The required URL marker echoes on absent pages (verified false-confirm: absent usernames classified Confirmed). Even repaired, 1.1MB+ shells exceed the fetch budget with no public API. Re-enable only with a verified distinguishing mechanism."
+    },
+    {
+      "metadata": {
+        "id": "reddit",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "social",
+        "requires_authentication": false
+      },
+      "platform": "Reddit",
+      "category": "social",
+      "profile_url": "https://www.reddit.com/user/{username}/about.json",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "\"name\": \"{username}\""
+        ],
+        "any": [
+          "\"kind\": \"t2\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "\"error\": 404"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 65536,
+      "health_state": "needs_review",
+      "source_notes": "Live 2026-10-05: anonymous clients receive a 403 bot wall for existing and absent users alike (status-driven Blocked). Classifier logic is fixture-sound but unobservable live; do not promote without unblocked access.",
+      "username_rules": {
+        "min_length": 1,
+        "max_length": 20,
+        "charset": "alnum_underscore"
+      }
+    },
+    {
+      "metadata": {
+        "id": "telegram",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "social",
+        "requires_authentication": false
+      },
+      "platform": "Telegram",
+      "category": "social",
+      "profile_url": "https://t.me/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "<title>Telegram: View @{username}</title>"
+        ],
+        "any": []
+      },
+      "not_found": {
+        "any": [
+          "<title>Telegram: Contact @{username}</title>"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "live_verified",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B). C3B: title verb distinguishes (View=exists, Contact=absent template); both serve 200. URL-echo markers false-confirmed and were removed.",
+      "verified_at": "2026-10-05",
+      "verification_method": "live-probe"
+    },
+    {
+      "metadata": {
+        "id": "tumblr",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "social",
+        "requires_authentication": false
+      },
+      "platform": "Tumblr",
+      "category": "social",
+      "profile_url": "https://{username}.tumblr.com",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "{username}.tumblr.com"
+        ],
+        "any": [
+          "tumblr.com"
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "checking your browser",
+        "verify you are human"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05. C3: anonymous clients receive a browser-check wall (403) for existing and absent alike."
+    },
+    {
+      "metadata": {
+        "id": "vk",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "social",
+        "requires_authentication": false
+      },
+      "platform": "VK",
+      "category": "social",
+      "profile_url": "https://vk.com/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "vk.com/{username}"
+        ],
+        "any": []
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "live_verified",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B). C3: URL identity verified via mobile redirect chain; absent 404s with title marker. No verified bonus marker; confirms at 88.",
+      "verified_at": "2026-10-05",
+      "verification_method": "live-probe"
+    }
+  ]
+}

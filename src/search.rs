@@ -486,6 +486,7 @@ pub enum SearchStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderMetadata {
     pub id: String,
     pub version: String,
@@ -544,6 +545,7 @@ pub fn task_id(provider: &ProviderMetadata, entity: &SearchEntity) -> String {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MarkerPolicy {
     #[serde(default)]
     pub required: Vec<String>,
@@ -552,6 +554,7 @@ pub struct MarkerPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UsernameProviderDefinition {
     pub metadata: ProviderMetadata,
     pub platform: String,
@@ -575,6 +578,158 @@ pub struct UsernameProviderDefinition {
     pub max_redirects: u8,
     #[serde(default = "default_body_limit")]
     pub max_body_bytes: usize,
+    #[serde(default = "default_health_state")]
+    pub health_state: HealthState,
+    /// Declarative username validity constraints. `None` means no
+    /// provider-specific constraints: the username is queried rather than
+    /// skipped. Rules stay conservative; an uncertain provider leaves this
+    /// unset instead of risking a false skip.
+    #[serde(default)]
+    pub username_rules: Option<UsernameRules>,
+    /// Final-URL substrings that deterministically mean "no such public
+    /// account" for this provider (e.g. a login-wall the provider routes
+    /// unknown usernames to). Checked before authentication-redirect
+    /// handling. Must only be set when verified live; an entry here that
+    /// also fires for genuine auth walls would hide existing accounts.
+    #[serde(default)]
+    pub absence_redirect_markers: Vec<String>,
+    /// Date (`YYYY-MM-DD`) of the last successful live verification.
+    /// Required when `health_state` is `live_verified`; never set it
+    /// without actually checking live behavior.
+    #[serde(default)]
+    pub verified_at: Option<String>,
+    /// How live verification was performed (e.g. `live-probe`). No test
+    /// usernames, machine names, or operator data belong here.
+    #[serde(default)]
+    pub verification_method: Option<String>,
+    /// Maintainer notes: basis for markers/rules, known quirks, why a
+    /// provider is `needs_review` or `disabled`. Public-safe text only.
+    #[serde(default)]
+    pub source_notes: Option<String>,
+}
+
+/// Declarative per-provider username validity constraints.
+///
+/// Before any request is made, a username that cannot be valid on a
+/// provider skips that provider with an explicit reason instead of
+/// generating a doomed request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsernameRules {
+    #[serde(default = "default_username_min_length")]
+    pub min_length: u8,
+    #[serde(default = "default_username_max_length")]
+    pub max_length: u16,
+    #[serde(default)]
+    pub charset: UsernameCharset,
+}
+
+/// Character classes a provider username may use.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsernameCharset {
+    /// No character restriction beyond printable, non-control text.
+    #[default]
+    Any,
+    /// ASCII letters, digits, hyphen, underscore, and dot.
+    AlnumDotHyphenUnderscore,
+    /// ASCII letters, digits, and hyphen.
+    AlnumHyphen,
+    /// ASCII letters, digits, and underscore.
+    AlnumUnderscore,
+}
+
+impl UsernameRules {
+    /// Conservative default: accept anything [`SearchEntity::username`]
+    /// accepts. Providers opt into tighter rules only where justified.
+    pub fn permissive() -> Self {
+        Self {
+            min_length: 1,
+            max_length: 128,
+            charset: UsernameCharset::Any,
+        }
+    }
+
+    /// Returns `Ok(())` when the username may be valid, or `Err(reason)`
+    /// with an explicit skip reason when it cannot be valid.
+    pub fn check(&self, username: &str) -> Result<(), String> {
+        let length = username.chars().count();
+        if length < usize::from(self.min_length) {
+            return Err(format!(
+                "username is shorter than the provider minimum of {}",
+                self.min_length
+            ));
+        }
+        if length > usize::from(self.max_length) {
+            return Err(format!(
+                "username exceeds the provider maximum of {}",
+                self.max_length
+            ));
+        }
+        let charset_ok = match self.charset {
+            UsernameCharset::Any => true,
+            UsernameCharset::AlnumDotHyphenUnderscore => username
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.'),
+            UsernameCharset::AlnumHyphen => username
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-'),
+            UsernameCharset::AlnumUnderscore => username
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_'),
+        };
+        if !charset_ok {
+            return Err("username uses characters the provider does not allow".to_owned());
+        }
+        Ok(())
+    }
+}
+
+/// Explicit skip reason for a provider/username pair, or `None` when the
+/// provider should be queried. Disabled providers are never queried.
+pub fn username_skip_reason(
+    definition: &UsernameProviderDefinition,
+    username: &str,
+) -> Option<String> {
+    if definition.health_state == HealthState::Disabled {
+        return Some("provider is disabled".to_owned());
+    }
+    match &definition.username_rules {
+        Some(rules) => rules.check(username).err(),
+        None => None,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthState {
+    FixtureVerified,
+    LiveVerified,
+    NeedsReview,
+    Disabled,
+}
+
+impl HealthState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            HealthState::FixtureVerified => "fixture_verified",
+            HealthState::LiveVerified => "live_verified",
+            HealthState::NeedsReview => "needs_review",
+            HealthState::Disabled => "disabled",
+        }
+    }
+}
+
+fn default_health_state() -> HealthState {
+    HealthState::FixtureVerified
+}
+
+fn default_username_min_length() -> u8 {
+    1
+}
+
+fn default_username_max_length() -> u16 {
+    128
 }
 
 fn default_method() -> String {
@@ -655,6 +810,78 @@ impl UsernameProviderDefinition {
         if self.success.required.is_empty() {
             return Err(SearchError::InvalidProvider(format!(
                 "provider '{id}' requires a strong success marker; HTTP status alone is insufficient"
+            )));
+        }
+        if let Some(rules) = &self.username_rules {
+            if rules.min_length == 0
+                || usize::from(rules.min_length) > usize::from(rules.max_length)
+                || usize::from(rules.max_length) > 128
+            {
+                return Err(SearchError::InvalidProvider(format!(
+                    "provider '{id}' has impossible username rules"
+                )));
+            }
+        }
+        if self.health_state == HealthState::LiveVerified
+            && self
+                .verified_at
+                .as_ref()
+                .is_none_or(|date| date.trim().is_empty())
+        {
+            return Err(SearchError::InvalidProvider(format!(
+                "provider '{id}' claims live_verified without verification metadata"
+            )));
+        }
+        // Verification metadata must be minimal, well-formed, and consistent:
+        // dates are YYYY-MM-DD, a method never appears without a date, and a
+        // date never appears on a non-live provider.
+        if let Some(date) = self.verified_at.as_deref() {
+            if !is_verification_date(date) {
+                return Err(SearchError::InvalidProvider(format!(
+                    "provider '{id}' has invalid verification date {date:?}"
+                )));
+            }
+            if self.health_state != HealthState::LiveVerified {
+                return Err(SearchError::InvalidProvider(format!(
+                    "provider '{id}' carries verification metadata without live_verified health"
+                )));
+            }
+        }
+        if self.verification_method.is_some() && self.verified_at.is_none() {
+            return Err(SearchError::InvalidProvider(format!(
+                "provider '{id}' carries a verification method without a verification date"
+            )));
+        }
+        if let Some(method) = self.verification_method.as_deref() {
+            if method.trim().is_empty() || method.len() > 64 {
+                return Err(SearchError::InvalidProvider(format!(
+                    "provider '{id}' has invalid verification metadata"
+                )));
+            }
+        }
+        // Top-level category and metadata source_category must agree; drift
+        // here means a miscategorized provider or a bad merge.
+        if self.metadata.source_category != self.category {
+            return Err(SearchError::InvalidProvider(format!(
+                "provider '{id}' has inconsistent categories '{}' vs '{}'",
+                self.metadata.source_category, self.category
+            )));
+        }
+        if self.platform.trim().is_empty() || self.platform.len() > 64 {
+            return Err(SearchError::InvalidProvider(format!(
+                "provider '{id}' has an invalid display name"
+            )));
+        }
+        // Body/redirect budgets stay bounded: zero, unbounded, or over-global
+        // values are rejected rather than silently clamped.
+        if self.max_body_bytes == 0 || self.max_body_bytes > MAX_SEARCH_BODY_BYTES {
+            return Err(SearchError::InvalidProvider(format!(
+                "provider '{id}' has an unbounded body budget"
+            )));
+        }
+        if self.max_redirects > 5 {
+            return Err(SearchError::InvalidProvider(format!(
+                "provider '{id}' has an unbounded redirect policy"
             )));
         }
         Ok(())
@@ -748,6 +975,15 @@ impl SearchProvider for DefinitionProvider {
         &self.definition.metadata
     }
 
+    fn accepts(&self, entity: &SearchEntity) -> bool {
+        if !self.definition.metadata.accepts.contains(&entity.kind) {
+            return false;
+        }
+        // Disabled providers and usernames that cannot be valid on this
+        // provider are skipped (counted, never queried).
+        username_skip_reason(&self.definition, &entity.display_value).is_none()
+    }
+
     fn host_key(&self) -> String {
         url::Url::parse(&self.definition.profile_url)
             .ok()
@@ -786,6 +1022,10 @@ impl SearchProvider for DefinitionProvider {
             ("platform".to_owned(), self.definition.platform.clone()),
             ("profile_url".to_owned(), url.to_string()),
             ("final_url".to_owned(), response.final_url.clone()),
+            (
+                "provider_health".to_owned(),
+                self.definition.health_state.as_str().to_owned(),
+            ),
             ("body_sha256".to_owned(), body_hash),
             ("http_status".to_owned(), response.status.to_string()),
             (
@@ -794,6 +1034,7 @@ impl SearchProvider for DefinitionProvider {
             ),
             ("elapsed_ms".to_owned(), response.elapsed_ms.to_string()),
         ]);
+        let final_url = response.final_url.to_ascii_lowercase();
         let classification = if response.body_truncated {
             SearchClassification::new(
                 SearchStatus::Unknown,
@@ -802,14 +1043,22 @@ impl SearchProvider for DefinitionProvider {
             )
         } else if self
             .definition
+            .absence_redirect_markers
+            .iter()
+            .any(|marker| final_url.contains(&marker.to_ascii_lowercase()))
+        {
+            // Verified provider-specific behavior: unknown usernames land
+            // on this destination instead of a usable profile page.
+            SearchClassification::new(
+                SearchStatus::NotFound,
+                0,
+                "provider redirected to a known absence destination",
+            )
+        } else if self
+            .definition
             .authentication_url_markers
             .iter()
-            .any(|marker| {
-                response
-                    .final_url
-                    .to_ascii_lowercase()
-                    .contains(&marker.to_ascii_lowercase())
-            })
+            .any(|marker| final_url.contains(&marker.to_ascii_lowercase()))
         {
             SearchClassification::new(
                 SearchStatus::AuthenticationRequired,
@@ -1123,6 +1372,633 @@ pub fn validate_definitions(definitions: &[UsernameProviderDefinition]) -> Resul
     Ok(())
 }
 
+/// Convert days since the Unix epoch to a civil (year, month, day) date.
+/// Integer-only Howard Hinnant algorithm; no calendar dependency needed.
+pub fn days_to_civil(days: i64) -> (i32, u32, u32) {
+    let shifted = days + 719468;
+    let era = shifted.div_euclid(146097);
+    let day_of_era = shifted.rem_euclid(146097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = (day_of_year - (153 * month_prime + 2) / 5 + 1) as u32;
+    let month = if month_prime < 10 {
+        month_prime + 3
+    } else {
+        month_prime - 9
+    } as u32;
+    (
+        (if month <= 2 { year + 1 } else { year }) as i32,
+        month,
+        day,
+    )
+}
+
+/// Cutoff date string (`YYYY-MM-DD`) `days` before today, from the system
+/// clock. Used to derive verification staleness without storing it.
+pub fn stale_cutoff(days_back: u64) -> String {
+    let now_days = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() / 86400)
+        .unwrap_or(0) as i64;
+    let (year, month, day) = days_to_civil(now_days.saturating_sub(days_back as i64));
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+/// A verification date is `YYYY-MM-DD` with plausible month/day ranges.
+/// Lexicographic compare stays chronological for this format, which is what
+/// staleness derivation relies on.
+pub fn is_verification_date(date: &str) -> bool {
+    let bytes = date.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return false;
+    }
+    for (index, byte) in bytes.iter().enumerate() {
+        if index == 4 || index == 7 {
+            continue;
+        }
+        if !byte.is_ascii_digit() {
+            return false;
+        }
+    }
+    let month: u32 = date[5..7].parse().unwrap_or(0);
+    let day: u32 = date[8..10].parse().unwrap_or(0);
+    (1..=12).contains(&month) && (1..=31).contains(&day)
+}
+
+/// Derived staleness: a `live_verified` provider whose `verified_at` is
+/// older than `cutoff` (`YYYY-MM-DD`, lexicographic compare is chronological
+/// for ISO dates). Anything else is never "stale": other states are their
+/// own review queues.
+pub fn verification_stale(health: &HealthState, verified_at: Option<&str>, cutoff: &str) -> bool {
+    *health == HealthState::LiveVerified && verified_at.is_some_and(|date| date < cutoff)
+}
+
+/// A provider has meaningful absence handling when at least one of these
+/// holds: a not-found status code, a not-found body marker, or a verified
+/// absence redirect destination. Status codes alone never confirm, but for
+/// absence a stable provider status (e.g. 404) is legitimate evidence.
+pub fn has_absence_handling(definition: &UsernameProviderDefinition) -> bool {
+    !definition.not_found_status.is_empty()
+        || !definition.not_found.required.is_empty()
+        || !definition.not_found.any.is_empty()
+        || !definition.absence_redirect_markers.is_empty()
+}
+
+/// Maintainer-facing corpus lint report. Errors fail the gate; warnings do
+/// not. Everything is deterministic and offline: lint never performs
+/// network requests.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CorpusLintReport {
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
+    pub providers_checked: usize,
+    pub files_checked: usize,
+    pub fixture_complete: usize,
+}
+
+impl CorpusLintReport {
+    pub fn is_clean(&self) -> bool {
+        self.errors.is_empty()
+    }
+}
+
+/// Normalize a profile URL template for suspicious-equivalence checks:
+/// lowercase host, drop a single trailing slash, keep the `{username}`
+/// placeholder verbatim. Two templates that normalize identically resolve
+/// to the same identity endpoint even when they differ in casing or a
+/// trailing slash.
+fn normalized_template(template: &str) -> String {
+    let lowered = template.to_ascii_lowercase();
+    lowered.strip_suffix('/').unwrap_or(&lowered).to_owned()
+}
+
+/// Definition-level checks shared by file lint and the embedded fallback.
+fn lint_definitions(definitions: &[UsernameProviderDefinition], report: &mut CorpusLintReport) {
+    if let Err(error) = validate_definitions(definitions) {
+        report.errors.push(format!("definitions: {error}"));
+    }
+    let mut templates = BTreeMap::new();
+    let mut normalized = BTreeMap::new();
+    for definition in definitions {
+        let id = definition.metadata.id.as_str();
+        if !has_absence_handling(definition) {
+            report.errors.push(format!(
+                "provider '{id}' has no absence handling (no not-found status, marker, or redirect)"
+            ));
+        }
+        if definition.health_state == HealthState::LiveVerified && definition.verified_at.is_none()
+        {
+            report.errors.push(format!(
+                "provider '{id}' claims live_verified without verification metadata"
+            ));
+        }
+        if let Some(date) = definition.verified_at.as_deref() {
+            if !is_verification_date(date) {
+                report.errors.push(format!(
+                    "provider '{id}' has invalid verification date {date:?}"
+                ));
+            }
+        }
+        if definition.verification_method.is_some() && definition.verified_at.is_none() {
+            report.errors.push(format!(
+                "provider '{id}' carries a verification method without a verification date"
+            ));
+        }
+        if definition.verified_at.is_some() && definition.health_state != HealthState::LiveVerified
+        {
+            report.errors.push(format!(
+                "provider '{id}' carries verification metadata without live_verified health"
+            ));
+        }
+        if definition.metadata.source_category != definition.category {
+            report.errors.push(format!(
+                "provider '{id}' has inconsistent categories '{}' vs '{}'",
+                definition.metadata.source_category, definition.category
+            ));
+        }
+        // Unsafe schemes/destinations are validated, but surface a dedicated
+        // lint error so corpus maintenance can distinguish them from generic
+        // validation failures.
+        if !definition.profile_url.starts_with("https://") {
+            report.errors.push(format!(
+                "provider '{id}' uses an unsafe URL scheme (must be https)"
+            ));
+        }
+        if definition.max_body_bytes == 0 || definition.max_body_bytes > MAX_SEARCH_BODY_BYTES {
+            report
+                .errors
+                .push(format!("provider '{id}' has an unbounded body budget"));
+        }
+        if definition.max_redirects > 5 {
+            report
+                .errors
+                .push(format!("provider '{id}' has an unbounded redirect policy"));
+        }
+        if let Some(rules) = &definition.username_rules {
+            if rules.min_length == 0
+                || usize::from(rules.min_length) > usize::from(rules.max_length)
+                || usize::from(rules.max_length) > 128
+            {
+                report
+                    .errors
+                    .push(format!("provider '{id}' has invalid username rules"));
+            }
+        }
+        lint_classifier_markers(definition, report);
+        if let Some(other) = templates.insert(definition.profile_url.as_str(), id) {
+            report.errors.push(format!(
+                "duplicate profile_url template shared by '{other}' and '{id}'"
+            ));
+        } else {
+            let key = normalized_template(&definition.profile_url);
+            if let Some(other) = normalized.insert(key, id) {
+                report.errors.push(format!(
+                    "suspiciously equivalent profile_url template shared by '{other}' and '{id}'"
+                ));
+            }
+        }
+    }
+    report.providers_checked = definitions.len();
+}
+
+fn lint_expected_status(name: &str) -> Option<SearchStatus> {
+    match name {
+        "found" => Some(SearchStatus::Confirmed),
+        "not-found" => Some(SearchStatus::NotFound),
+        "generic-200" => Some(SearchStatus::Possible),
+        "blocked" => Some(SearchStatus::Blocked),
+        _ => None,
+    }
+}
+
+/// Single-token block markers so generic they match ordinary page content
+/// (scripts, footers, bundles). The `captcha` singleton once converted
+/// every live confirmation on eight providers into `Blocked`.
+const BROAD_BLOCK_MARKERS: &[&str] = &[
+    "captcha",
+    "blocked",
+    "denied",
+    "forbidden",
+    "unauthorized",
+    "error",
+    "limit",
+    "sorry",
+    "oops",
+    "robot",
+    "robots",
+    "bot",
+    "bots",
+    "challenge",
+    "verify",
+    "human",
+    "suspicious",
+    "unusual",
+    "restricted",
+];
+
+/// Statically detectable classifier weaknesses: identity-free required
+/// markers, username-echo-only markers (a bare `{username}` reflection
+/// confirms any page that echoes the probe), and overly broad block
+/// markers.
+fn lint_classifier_markers(definition: &UsernameProviderDefinition, report: &mut CorpusLintReport) {
+    let id = definition.metadata.id.as_str();
+    for marker in &definition.success.required {
+        if !marker.contains("{username}") {
+            report.errors.push(format!(
+                "provider '{id}' has a required success marker without identity binding: {marker:?}"
+            ));
+            continue;
+        }
+        // A required marker that is only the echoed username confirms
+        // reflection, not identity. Short-but-bound markers (a tag plus a
+        // username, e.g. `~user<` on SourceHut where `~user` is canonical)
+        // stay warnings: they cannot confirm without the probe username
+        // present, so they are weak rather than FP factories. Only a bare
+        // echo is an error.
+        let structural: String = marker
+            .replace("{username}", "")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        if structural.is_empty() {
+            report.errors.push(format!(
+                "provider '{id}' has an overly broad success marker (username echo without structure): {marker:?}"
+            ));
+        } else if structural.len() < 12 {
+            report.warnings.push(format!(
+                "provider '{id}' has a short success marker that relies on minimal structure: {marker:?}"
+            ));
+        }
+    }
+    for marker in definition
+        .success
+        .any
+        .iter()
+        .chain(definition.not_found.required.iter())
+        .chain(definition.not_found.any.iter())
+    {
+        if marker.trim().is_empty() {
+            report
+                .errors
+                .push(format!("provider '{id}' has an empty classifier marker"));
+        }
+    }
+    for marker in &definition.blocked_markers {
+        if BROAD_BLOCK_MARKERS.contains(&marker.to_ascii_lowercase().as_str())
+            || marker.trim().len() < 4
+        {
+            report.errors.push(format!(
+                "provider '{id}' has an overly broad block marker: {marker:?}"
+            ));
+        } else if !marker.contains(' ') && !marker.contains('-') && !marker.contains('_') {
+            report.warnings.push(format!(
+                "provider '{id}' has a single-token block marker that may match page content: {marker:?}"
+            ));
+        }
+    }
+}
+
+/// Check stored fixtures for every definition. Fixture bodies are
+/// classified with the fixed probe username `Rx`, mirroring the unit-test
+/// matrix. A `generic-200` fixture that classifies as `Confirmed` is
+/// always an error, never a warning.
+fn lint_fixtures(
+    definitions: &[UsernameProviderDefinition],
+    fixture_root: &std::path::Path,
+    report: &mut CorpusLintReport,
+) {
+    let mut complete = 0usize;
+    for definition in definitions {
+        let id = definition.metadata.id.as_str();
+        let cases_path = fixture_root.join(id).join("cases.json");
+        let text = match std::fs::read_to_string(&cases_path) {
+            Ok(text) => text,
+            Err(_) => {
+                report.errors.push(format!(
+                    "provider '{id}' is missing fixture {}",
+                    cases_path.display()
+                ));
+                continue;
+            }
+        };
+        let cases: serde_json::Value = match serde_json::from_str(&text) {
+            Ok(cases) => cases,
+            Err(error) => {
+                report
+                    .errors
+                    .push(format!("provider '{id}' has malformed fixtures: {error}"));
+                continue;
+            }
+        };
+        if cases.get("provider").and_then(serde_json::Value::as_str) != Some(id) {
+            report.errors.push(format!(
+                "provider '{id}' fixture provider field does not match its directory"
+            ));
+            continue;
+        }
+        let empty = Vec::new();
+        let listed = cases
+            .get("cases")
+            .and_then(serde_json::Value::as_array)
+            .unwrap_or(&empty);
+        let mut names = BTreeSet::new();
+        let mut provider_ok = true;
+        for case in listed {
+            let name = case.get("name").and_then(serde_json::Value::as_str);
+            let expected = case.get("expected").and_then(serde_json::Value::as_str);
+            let (Some(name), Some(expected)) = (name, expected) else {
+                report.errors.push(format!(
+                    "provider '{id}' has a fixture case without name/expected"
+                ));
+                provider_ok = false;
+                continue;
+            };
+            names.insert(name.to_owned());
+            // Canonical cases pin their expectation by name; any other
+            // case (e.g. `captcha-noise`) is verified by its `expected`
+            // field exactly like the unit-test matrix does.
+            if let Some(canonical_want) = lint_expected_status(name) {
+                let canonical = match canonical_want {
+                    SearchStatus::Confirmed => "confirmed",
+                    SearchStatus::NotFound => "not_found",
+                    SearchStatus::Possible => "possible",
+                    SearchStatus::Blocked => "blocked",
+                    _ => "",
+                };
+                if expected != canonical {
+                    report.errors.push(format!(
+                        "provider '{id}' fixture '{name}' claims '{expected}', want '{canonical}'"
+                    ));
+                    provider_ok = false;
+                    continue;
+                }
+            }
+            let want = match expected {
+                "confirmed" => SearchStatus::Confirmed,
+                "not_found" => SearchStatus::NotFound,
+                "possible" => SearchStatus::Possible,
+                "blocked" => SearchStatus::Blocked,
+                _ => {
+                    report.errors.push(format!(
+                        "provider '{id}' fixture '{name}' has unknown expectation '{expected}'"
+                    ));
+                    provider_ok = false;
+                    continue;
+                }
+            };
+            let status = case.get("status").and_then(serde_json::Value::as_u64);
+            let body = case.get("body").and_then(serde_json::Value::as_str);
+            let (Some(status), Some(body)) = (status, body) else {
+                report.errors.push(format!(
+                    "provider '{id}' fixture '{name}' lacks status/body"
+                ));
+                provider_ok = false;
+                continue;
+            };
+            let got = definition
+                .classify(
+                    &ProviderResponse {
+                        status: status as u16,
+                        body: body.to_owned(),
+                    },
+                    "Rx",
+                )
+                .status;
+            if got != want {
+                // Any non-confirming fixture that confirms is a
+                // false-positive factory: error, never warning.
+                if want != SearchStatus::Confirmed && got == SearchStatus::Confirmed {
+                    report.errors.push(format!(
+                        "provider '{id}' fixture '{name}' classifies as confirmed"
+                    ));
+                } else {
+                    report.errors.push(format!(
+                        "provider '{id}' fixture '{name}' classifies as {got:?}, want {want:?}"
+                    ));
+                }
+                provider_ok = false;
+            }
+        }
+        for required in ["found", "not-found", "generic-200", "blocked"] {
+            if !names.contains(required) {
+                report.errors.push(format!(
+                    "provider '{id}' is missing the '{required}' fixture"
+                ));
+                provider_ok = false;
+            }
+        }
+        if provider_ok {
+            complete += 1;
+        }
+    }
+    report.fixture_complete = complete;
+    let fixture_dirs = std::fs::read_dir(fixture_root)
+        .map(|entries| {
+            entries
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.path().is_dir())
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    for dir in fixture_dirs {
+        if !definitions
+            .iter()
+            .any(|definition| definition.metadata.id == dir)
+        {
+            // Unknown fixture provider: the directory has no definition.
+            // Report the declared provider field when it differs, so a typo
+            // in either place is visible without failing the gate on a
+            // stray directory alone.
+            let declared = std::fs::read_to_string(fixture_root.join(&dir).join("cases.json"))
+                .ok()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                .and_then(|value| {
+                    value
+                        .get("provider")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                });
+            match declared {
+                Some(provider) if provider != dir => {
+                    report.warnings.push(format!(
+                        "orphaned fixture directory '{dir}' has no provider definition (declares provider '{provider}')"
+                    ));
+                }
+                _ => {
+                    report.warnings.push(format!(
+                        "orphaned fixture directory '{dir}' has no provider definition"
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// Lint a corpus checkout: `corpus_dir` holds per-category pack files and
+/// `fixture_root` holds per-provider fixture directories.
+pub fn lint_corpus_files(
+    corpus_dir: &std::path::Path,
+    fixture_root: &std::path::Path,
+) -> CorpusLintReport {
+    let mut report = CorpusLintReport::default();
+    let entries = match std::fs::read_dir(corpus_dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            report.errors.push(format!(
+                "cannot read corpus directory {}: {error}",
+                corpus_dir.display()
+            ));
+            return report;
+        }
+    };
+    let mut files: Vec<std::path::PathBuf> = entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .collect();
+    files.sort();
+    if files.is_empty() {
+        report
+            .errors
+            .push(format!("no provider files in {}", corpus_dir.display()));
+        return report;
+    }
+    report.files_checked = files.len();
+    let mut schema_version: Option<u64> = None;
+    let mut pack_version: Option<String> = None;
+    let mut definitions: Vec<UsernameProviderDefinition> = Vec::new();
+    let mut ids: BTreeSet<String> = BTreeSet::new();
+    for file in &files {
+        let name = file
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let text = match std::fs::read_to_string(file) {
+            Ok(text) => text,
+            Err(error) => {
+                report
+                    .errors
+                    .push(format!("cannot read provider file '{name}': {error}"));
+                continue;
+            }
+        };
+        let fragment: serde_json::Value = match serde_json::from_str(&text) {
+            Ok(fragment) => fragment,
+            Err(error) => {
+                report
+                    .errors
+                    .push(format!("provider file '{name}' is malformed: {error}"));
+                continue;
+            }
+        };
+        match (
+            fragment
+                .get("schema_version")
+                .and_then(serde_json::Value::as_u64),
+            fragment
+                .get("pack_version")
+                .and_then(serde_json::Value::as_str),
+        ) {
+            (Some(schema), Some(version)) => {
+                if schema != u64::from(PROVIDER_SCHEMA_VERSION) {
+                    report.errors.push(format!(
+                        "provider file '{name}' uses invalid schema_version {schema}"
+                    ));
+                }
+                if version.trim().is_empty() || version.len() > 64 {
+                    report.errors.push(format!(
+                        "provider file '{name}' has an invalid pack version"
+                    ));
+                }
+                if schema_version.is_some_and(|expected| expected != schema)
+                    || pack_version
+                        .as_deref()
+                        .is_some_and(|expected| expected != version)
+                {
+                    report.errors.push(format!(
+                        "provider file '{name}' disagrees on schema/pack version"
+                    ));
+                }
+                schema_version = Some(schema);
+                pack_version = Some(version.to_owned());
+            }
+            _ => {
+                report.errors.push(format!(
+                    "provider file '{name}' lacks schema_version/pack_version"
+                ));
+                continue;
+            }
+        }
+        let providers = fragment
+            .get("providers")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        // Category files must stay consistent: `developer.json` holds
+        // `developer` providers. A mismatch is a miscategorization or a bad
+        // merge, reported as an error rather than silently accepted.
+        let expected_category = name.strip_suffix(".json").unwrap_or(&name).to_owned();
+        let category_known = USERNAME_PROVIDER_CATEGORIES.contains(&expected_category.as_str());
+        for (index, raw) in providers.iter().enumerate() {
+            match serde_json::from_value::<UsernameProviderDefinition>(raw.clone()) {
+                Ok(definition) => {
+                    if !ids.insert(definition.metadata.id.clone()) {
+                        report.errors.push(format!(
+                            "duplicate provider id '{}' (also in '{name}')",
+                            definition.metadata.id
+                        ));
+                    }
+                    if category_known && definition.category != expected_category {
+                        report.errors.push(format!(
+                            "provider '{}' in '{name}' has inconsistent category '{}'",
+                            definition.metadata.id, definition.category
+                        ));
+                    }
+                    definitions.push(definition);
+                }
+                Err(error) => {
+                    report.errors.push(format!(
+                        "provider file '{name}' entry {index} is invalid (unsupported classifier primitive or schema drift): {error}"
+                    ));
+                }
+            }
+        }
+    }
+    if definitions.is_empty() {
+        report
+            .errors
+            .push("merged corpus contains no providers".to_owned());
+    }
+    lint_definitions(&definitions, &mut report);
+    lint_fixtures(&definitions, fixture_root, &mut report);
+    report
+}
+
+/// Lint the embedded pack (definition-level checks). Fixture directories
+/// are not embedded, so fixture checks are skipped with a warning.
+pub fn lint_embedded_pack() -> CorpusLintReport {
+    let mut report = CorpusLintReport::default();
+    match embedded_username_pack() {
+        Ok(pack) => {
+            lint_definitions(&pack.providers, &mut report);
+            report.warnings.push(
+                "fixture checks skipped: no corpus checkout; run from the repository root for full lint"
+                    .to_owned(),
+            );
+        }
+        Err(error) => {
+            report
+                .errors
+                .push(format!("embedded pack is invalid: {error}"));
+        }
+    }
+    report
+}
+
 pub fn add_username_observation_to_graph(
     graph: &mut crate::graph::ScanGraph,
     input: &SearchEntity,
@@ -1213,7 +2089,7 @@ pub struct UsernameSearchReport {
 
 pub fn embedded_username_pack() -> Result<UsernameProviderPack, SearchError> {
     parse_provider_pack(
-        include_str!("../search/providers/v1/username.json"),
+        include_str!(concat!(env!("OUT_DIR"), "/username_pack.json")),
         "embedded username providers",
     )
 }
@@ -1346,7 +2222,7 @@ pub fn persist_username_report(
         classifier: ClassifierProvenance {
             tool_version: crate::project_db::TOOL_VERSION.to_owned(),
             packs: vec![PackProvenance {
-                path: "embedded:search/providers/v1/username.json".to_owned(),
+                path: "embedded:search/providers/v1/username/".to_owned(),
                 schema_version: PROVIDER_SCHEMA_VERSION,
                 rule_count: report.accounting.providers_requested,
             }],
@@ -1459,6 +2335,111 @@ fn count_status(accounting: &SearchAccounting, status: SearchStatus) -> usize {
     accounting.counts.get(&status).copied().unwrap_or_default()
 }
 
+/// Typed JSONL rendering of a username search report.
+///
+/// Every emitted line is one independently valid JSON object using the
+/// codebase `record_type` envelope convention; nothing here can emit ANSI,
+/// banners, or human prose. Record stream:
+///
+/// * `search_start` — run identity, seed, pack version, requested count.
+/// * `observation` — one per completed provider result, in the report's
+///   deterministic order, with provenance for future transforms.
+/// * `search_summary` — exact accounting plus per-status counts.
+///
+/// Providers without an observation (skipped, cancelled, unscanned) appear
+/// only in the summary: no observation object exists for them, and the
+/// renderer does not invent one.
+pub fn render_username_jsonl(report: &UsernameSearchReport) -> String {
+    fn envelope(record_type: &'static str, payload: serde_json::Value) -> String {
+        serde_json::json!({
+            "schema_version": 1,
+            "record_type": record_type,
+            "payload": payload,
+        })
+        .to_string()
+    }
+
+    let mut output = String::new();
+    output.push_str(&envelope(
+        "search_start",
+        serde_json::json!({
+            "run_id": report.run_id,
+            "entity": report.seed.id,
+            "seed_kind": "username",
+            "seed_display": report.seed.display_value,
+            "provider_pack_version": report.provider_pack_version,
+            "providers_requested": report.accounting.providers_requested,
+            "network_scans": report.network_scans,
+            "started_at": report.started_at,
+        }),
+    ));
+    output.push('\n');
+    for result in &report.results {
+        let attribute = |key: &str| result.attributes.get(key).cloned().unwrap_or_default();
+        output.push_str(&envelope(
+            "observation",
+            serde_json::json!({
+                "entity": result.input_entity_id,
+                "provider_id": result.provider_id,
+                "definition_version": result.provider_version,
+                "provider_health": attribute("provider_health"),
+                "status": result.status,
+                "confidence": result.confidence,
+                "profile_url": attribute("profile_url"),
+                "final_url": attribute("final_url"),
+                "contact_class": result.contact_class,
+                "evidence": result.evidence,
+                "task_id": result.task_id,
+                "timestamp": result.timestamp,
+            }),
+        ));
+        output.push('\n');
+    }
+    let mut counts = serde_json::Map::new();
+    for status in [
+        SearchStatus::Confirmed,
+        SearchStatus::Probable,
+        SearchStatus::Possible,
+        SearchStatus::NotFound,
+        SearchStatus::Unknown,
+        SearchStatus::RateLimited,
+        SearchStatus::Blocked,
+        SearchStatus::AuthenticationRequired,
+        SearchStatus::Error,
+        SearchStatus::Cancelled,
+        SearchStatus::Unscanned,
+    ] {
+        // Serde snake_case keeps word boundaries (`rate_limited`), unlike
+        // lowercase Debug (`ratelimited`).
+        let key = match serde_json::to_value(status) {
+            Ok(serde_json::Value::String(key)) => key,
+            _ => format!("{status:?}").to_ascii_lowercase(),
+        };
+        counts.insert(
+            key,
+            serde_json::Value::from(count_status(&report.accounting, status)),
+        );
+    }
+    output.push_str(&envelope(
+        "search_summary",
+        serde_json::json!({
+            "run_id": report.run_id,
+            "providers_requested": report.accounting.providers_requested,
+            "providers_completed": report.accounting.providers_completed,
+            "skipped": report.accounting.skipped,
+            "cancelled": report.accounting.cancelled,
+            "unscanned": report.accounting.unscanned,
+            "truncated": report.accounting.truncated,
+            "status_counts": counts,
+            "network_scans": report.network_scans,
+            "started_at": report.started_at,
+            "completed_at": report.completed_at,
+        }),
+    ));
+    output.push('\n');
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1518,6 +2499,12 @@ mod tests {
             authentication_url_markers: vec!["/login".to_owned()],
             max_redirects: 2,
             max_body_bytes: 64 * 1024,
+            health_state: HealthState::FixtureVerified,
+            username_rules: None,
+            absence_redirect_markers: Vec::new(),
+            verified_at: None,
+            verification_method: None,
+            source_notes: None,
         }
     }
 
@@ -1616,6 +2603,542 @@ mod tests {
     }
 
     #[test]
+    fn username_rules_skip_with_explicit_reason() {
+        let permissive = UsernameRules::permissive();
+        assert!(permissive.check("exampleuser").is_ok());
+        // Absent rules never skip.
+        assert!(username_skip_reason(&definition(), "exampleuser").is_none());
+
+        let mut constrained = definition();
+        constrained.username_rules = Some(UsernameRules {
+            min_length: 3,
+            max_length: 8,
+            charset: UsernameCharset::AlnumHyphen,
+        });
+        assert!(username_skip_reason(&constrained, "rx").is_some());
+        assert!(username_skip_reason(&constrained, "toolongusername").is_some());
+        assert!(username_skip_reason(&constrained, "bad_name!").is_some());
+        assert!(username_skip_reason(&constrained, "ok-name").is_none());
+
+        // Disabled providers are always skipped with a reason.
+        let mut disabled = definition();
+        disabled.health_state = HealthState::Disabled;
+        assert_eq!(
+            username_skip_reason(&disabled, "exampleuser").as_deref(),
+            Some("provider is disabled")
+        );
+
+        // Impossible rules are rejected at validation time.
+        let mut impossible = definition();
+        impossible.username_rules = Some(UsernameRules {
+            min_length: 9,
+            max_length: 8,
+            charset: UsernameCharset::Any,
+        });
+        assert!(impossible.validate().is_err());
+        let mut unbounded = definition();
+        unbounded.username_rules = Some(UsernameRules {
+            min_length: 1,
+            max_length: 500,
+            charset: UsernameCharset::Any,
+        });
+        assert!(unbounded.validate().is_err());
+    }
+
+    #[test]
+    fn corpus_lint_catches_duplicates_missing_fixtures_and_orphans() {
+        let root =
+            std::env::temp_dir().join(format!("rxscan_lint_{}_{}", std::process::id(), "dupcase"));
+        let corpus = root.join("search/providers/v1/username");
+        let fixtures = root.join("search/fixtures/username");
+        std::fs::create_dir_all(&corpus).unwrap();
+        std::fs::create_dir_all(fixtures.join("lonely")).unwrap();
+        let mut first = definition();
+        first.metadata.id = "lint-a".to_owned();
+        let mut second = definition();
+        second.metadata.id = "lint-a".to_owned();
+        let fragment = serde_json::json!({
+            "schema_version": 1,
+            "pack_version": "lint-v1",
+            "providers": [first, second],
+        });
+        std::fs::write(corpus.join("developer.json"), fragment.to_string()).unwrap();
+        let report = lint_corpus_files(&corpus, &fixtures);
+        assert!(!report.is_clean());
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("duplicate provider id"))
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("missing fixture"))
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("lonely"))
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn corpus_lint_rejects_generic200_confirming_fixture() {
+        let root =
+            std::env::temp_dir().join(format!("rxscan_lint_{}_{}", std::process::id(), "fp200"));
+        let corpus = root.join("search/providers/v1/username");
+        let fixtures = root.join("search/fixtures/username");
+        std::fs::create_dir_all(&corpus).unwrap();
+        std::fs::create_dir_all(fixtures.join("lint-b")).unwrap();
+        let mut only = definition();
+        only.metadata.id = "lint-b".to_owned();
+        let fragment = serde_json::json!({
+            "schema_version": 1,
+            "pack_version": "lint-v1",
+            "providers": [only],
+        });
+        std::fs::write(corpus.join("developer.json"), fragment.to_string()).unwrap();
+        // The generic-200 body carries the required marker: must be caught.
+        let cases = serde_json::json!({
+            "provider": "lint-b",
+            "cases": [
+                {"name": "found", "status": 200, "body": "data-profile=\"rx\" rel=\"canonical\"", "expected": "confirmed"},
+                {"name": "not-found", "status": 404, "body": "profile not found", "expected": "not_found"},
+                {"name": "generic-200", "status": 200, "body": "data-profile=\"rx\" rel=\"canonical\"", "expected": "possible"},
+                {"name": "blocked", "status": 200, "body": "captcha challenge", "expected": "blocked"},
+            ],
+        });
+        std::fs::write(fixtures.join("lint-b/cases.json"), cases.to_string()).unwrap();
+        let report = lint_corpus_files(&corpus, &fixtures);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("generic-200") && error.contains("confirmed")),
+            "unexpected report: {report:?}"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn embedded_corpus_passes_lint_definitions() {
+        let report = lint_embedded_pack();
+        let definition_errors: Vec<&String> = report
+            .errors
+            .iter()
+            .filter(|error| !error.contains("fixture"))
+            .collect();
+        assert!(
+            definition_errors.is_empty(),
+            "embedded definition lint errors: {definition_errors:?}"
+        );
+    }
+
+    fn jsonl_report() -> UsernameSearchReport {
+        let seed = SearchEntity::username("ExampleUser", 1_700_000_000).unwrap();
+        let observation =
+            |provider: &str, status: SearchStatus, confidence: u8| SearchObservation {
+                provider_id: provider.to_owned(),
+                provider_version: "1".to_owned(),
+                task_id: format!("task-{provider}"),
+                input_entity_id: seed.id.clone(),
+                contact_class: ContactClass::PublicHttp,
+                status,
+                confidence,
+                timestamp: 1_700_000_000,
+                evidence: vec!["synthetic evidence".to_owned()],
+                attributes: BTreeMap::from([
+                    ("platform".to_owned(), provider.to_owned()),
+                    (
+                        "profile_url".to_owned(),
+                        format!("https://example.test/{provider}/exampleuser"),
+                    ),
+                    (
+                        "final_url".to_owned(),
+                        format!("https://example.test/{provider}/exampleuser"),
+                    ),
+                    ("provider_health".to_owned(), "needs_review".to_owned()),
+                ]),
+            };
+        let results = vec![
+            observation("zeta", SearchStatus::Confirmed, 94),
+            observation("alpha", SearchStatus::Blocked, 0),
+        ];
+        let mut counts = BTreeMap::new();
+        counts.insert(SearchStatus::Confirmed, 1);
+        counts.insert(SearchStatus::Blocked, 1);
+        UsernameSearchReport {
+            schema_version: 1,
+            run_id: "search_run_fixture".to_owned(),
+            seed,
+            provider_pack_version: "fixture-v1".to_owned(),
+            accounting: SearchAccounting {
+                providers_requested: 3,
+                providers_completed: 2,
+                skipped: 1,
+                cancelled: 0,
+                unscanned: 0,
+                counts,
+                truncated: false,
+            },
+            results,
+            graph: crate::graph::ScanGraph::default(),
+            network_scans: 0,
+            started_at: 1_700_000_000,
+            completed_at: 1_700_000_001,
+        }
+    }
+
+    #[test]
+    fn username_jsonl_lines_parse_independently_and_reconcile() {
+        let report = jsonl_report();
+        let text = render_username_jsonl(&report);
+        assert!(!text.contains('\x1b'), "JSONL must never contain ANSI");
+        assert!(!text.contains("RXSCAN"));
+        assert!(!text.contains("Username search"));
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 4, "start + 2 observations + summary");
+        let records: Vec<serde_json::Value> = lines
+            .iter()
+            .map(|line| serde_json::from_str(line).expect("every line parses"))
+            .collect();
+        let kinds: Vec<&str> = records
+            .iter()
+            .map(|record| record["record_type"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "search_start",
+                "observation",
+                "observation",
+                "search_summary"
+            ]
+        );
+        for record in &records {
+            assert_eq!(record["schema_version"], 1);
+        }
+        // Observation provenance for future transforms.
+        let first = &records[1]["payload"];
+        for field in [
+            "entity",
+            "provider_id",
+            "provider_health",
+            "status",
+            "confidence",
+            "profile_url",
+            "contact_class",
+            "evidence",
+            "definition_version",
+            "timestamp",
+        ] {
+            assert!(first.get(field).is_some(), "missing {field}");
+        }
+        assert_eq!(first["provider_health"], "needs_review");
+        // Deterministic ordering: report order preserved, render stable.
+        assert_eq!(records[1]["payload"]["provider_id"], "zeta");
+        assert_eq!(records[2]["payload"]["provider_id"], "alpha");
+        assert_eq!(render_username_jsonl(&report), text);
+        // Summary accounting reconciles exactly.
+        let summary = &records[3]["payload"];
+        assert_eq!(
+            summary["providers_requested"].as_u64().unwrap(),
+            summary["providers_completed"].as_u64().unwrap()
+                + summary["skipped"].as_u64().unwrap()
+                + summary["cancelled"].as_u64().unwrap()
+                + summary["unscanned"].as_u64().unwrap()
+        );
+        assert_eq!(summary["network_scans"], 0);
+        let status_counts = summary["status_counts"].as_object().unwrap();
+        let counted: u64 = status_counts.values().map(|v| v.as_u64().unwrap()).sum();
+        assert_eq!(counted, summary["providers_completed"].as_u64().unwrap());
+    }
+
+    #[test]
+    fn username_jsonl_has_no_machine_output_pollution() {
+        // Phase C3 gate: every stdout line in JSONL mode is independently
+        // valid JSON; no ANSI, no banner, no human headings/tables, no
+        // decorative separators. Stderr diagnostics never mix into stdout
+        // (the renderer returns a pure string; the CLI writes diagnostics
+        // to stderr).
+        let report = jsonl_report();
+        let text = render_username_jsonl(&report);
+        let ansi_count = text.matches('\x1b').count();
+        assert_eq!(ansi_count, 0, "ANSI count must be 0");
+        let banner_count = text.matches("RXSCAN").count() + text.matches("RxScan").count();
+        assert_eq!(banner_count, 0, "banner count must be 0");
+        for heading in [
+            "Username search",
+            "All provider outcomes",
+            "Summary",
+            "providers requested",
+            "───",
+            "---",
+            "===",
+            "TABLE",
+        ] {
+            assert!(
+                !text.contains(heading),
+                "human heading {heading:?} must not appear in JSONL"
+            );
+        }
+        // Every line parses independently with serde_json.
+        let mut invalid = 0usize;
+        for line in text.lines() {
+            if serde_json::from_str::<serde_json::Value>(line).is_err() {
+                invalid += 1;
+            }
+        }
+        assert_eq!(invalid, 0, "invalid JSONL lines must be 0");
+        assert!(!text.is_empty() && text.ends_with('\n'));
+    }
+
+    #[test]
+    fn username_jsonl_ordering_is_deterministic() {
+        // Rendering the same report twice yields byte-identical output, and
+        // observation order follows the report's deterministic provider
+        // order (the scheduler sorts by provider_id).
+        let report = jsonl_report();
+        assert_eq!(
+            render_username_jsonl(&report),
+            render_username_jsonl(&report)
+        );
+        let text = render_username_jsonl(&report);
+        let lines: Vec<&str> = text.lines().collect();
+        let ids: Vec<String> = lines[1..lines.len() - 1]
+            .iter()
+            .map(|line| {
+                serde_json::from_str::<serde_json::Value>(line).unwrap()["payload"]["provider_id"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        // jsonl_report uses insertion order [zeta, alpha]; rendering
+        // preserves report order byte-for-byte (scheduler order is enforced
+        // at schedule time, not re-sorted at render time).
+        assert_eq!(ids, ["zeta", "alpha"]);
+    }
+
+    #[test]
+    fn verification_dates_are_validated() {
+        assert!(is_verification_date("2026-10-05"));
+        assert!(!is_verification_date("2026-13-01"));
+        assert!(!is_verification_date("2026-00-10"));
+        assert!(!is_verification_date("not-a-date"));
+        assert!(!is_verification_date("2026/10/05"));
+        assert!(!is_verification_date(""));
+        let mut dated = definition();
+        dated.health_state = HealthState::LiveVerified;
+        dated.verified_at = Some("2026-13-40".to_owned());
+        assert!(dated.validate().is_err());
+        let mut stray = definition();
+        stray.verified_at = Some("2026-10-05".to_owned());
+        assert!(stray.validate().is_err());
+        let mut method_only = definition();
+        method_only.verification_method = Some("live-probe".to_owned());
+        assert!(method_only.validate().is_err());
+    }
+
+    #[test]
+    fn corpus_rejects_suspicious_url_equivalence_and_category_drift() {
+        let mut first = definition();
+        first.metadata.id = "lint-x".to_owned();
+        first.profile_url = "https://example.test/{username}".to_owned();
+        let mut second = definition();
+        second.metadata.id = "lint-y".to_owned();
+        second.profile_url = "https://EXAMPLE.test/{username}/".to_owned();
+        let mut report = CorpusLintReport::default();
+        lint_definitions(&[first, second], &mut report);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.contains("suspiciously equivalent")),
+            "expected equivalence error, got {report:?}"
+        );
+        let mut drifted = definition();
+        drifted.metadata.id = "lint-z".to_owned();
+        drifted.category = "social".to_owned();
+        drifted.metadata.source_category = "developer".to_owned();
+        assert!(drifted.validate().is_err());
+    }
+
+    #[test]
+    fn scheduler_scales_to_thousand_mock_providers_with_exact_accounting() {
+        // 1000 in-memory providers (no network): proves provider count never
+        // equals concurrency, ordering stays stable, and accounting is exact.
+        let base = definition().metadata;
+        for count in [100usize, 250, 500, 1000] {
+            let providers: Vec<Box<dyn SearchProvider>> = (0..count)
+                .map(|index| {
+                    Box::new(FixtureProvider {
+                        metadata: ProviderMetadata {
+                            id: format!("scale-{index:04}"),
+                            ..base.clone()
+                        },
+                        status: if index % 10 == 0 {
+                            SearchStatus::Confirmed
+                        } else {
+                            SearchStatus::NotFound
+                        },
+                    }) as Box<dyn SearchProvider>
+                })
+                .collect();
+            let entity = SearchEntity::username("Rx", 1).unwrap();
+            let mut scheduler = SearchScheduler {
+                max_providers: count,
+                max_concurrency: 8,
+                max_per_host: 2,
+                deadline: Instant::now() + Duration::from_secs(30),
+                rate_limiter: RateLimiter::new(0),
+            };
+            let started = Instant::now();
+            let (results, accounting) = scheduler.run(&providers, &entity, &AtomicBool::new(false));
+            let wall = started.elapsed();
+            assert_eq!(accounting.providers_requested, count);
+            assert_eq!(
+                accounting.accounted(),
+                count,
+                "accounting must reconcile at {count}"
+            );
+            assert_eq!(accounting.providers_completed, count);
+            assert!(
+                results
+                    .windows(2)
+                    .all(|pair| pair[0].provider_id <= pair[1].provider_id),
+                "ordering must stay deterministic at {count}"
+            );
+            eprintln!("scale: providers={count} wall={wall:?}");
+            assert!(
+                wall < Duration::from_secs(30),
+                "scheduler stalled at {count}"
+            );
+        }
+    }
+
+    #[test]
+    fn short_deadline_preserves_partial_results_at_scale() {
+        // A deliberately expired deadline contacts nothing but still
+        // accounts exactly; a zero-remaining deadline never drains providers.
+        let base = definition().metadata;
+        let providers: Vec<Box<dyn SearchProvider>> = (0..200)
+            .map(|index| {
+                Box::new(FixtureProvider {
+                    metadata: ProviderMetadata {
+                        id: format!("deadline-{index:03}"),
+                        ..base.clone()
+                    },
+                    status: SearchStatus::Confirmed,
+                }) as Box<dyn SearchProvider>
+            })
+            .collect();
+        let entity = SearchEntity::username("Rx", 1).unwrap();
+        let mut scheduler = SearchScheduler {
+            max_providers: 200,
+            max_concurrency: 8,
+            max_per_host: 2,
+            deadline: Instant::now(),
+            rate_limiter: RateLimiter::new(0),
+        };
+        let (results, accounting) = scheduler.run(&providers, &entity, &AtomicBool::new(false));
+        assert!(results.is_empty());
+        assert_eq!(accounting.accounted(), 200);
+        assert!(accounting.truncated);
+    }
+
+    #[test]
+    fn cancelled_mass_search_retains_completed_work() {
+        let base = definition().metadata;
+        let providers: Vec<Box<dyn SearchProvider>> = (0..100)
+            .map(|index| {
+                Box::new(FixtureProvider {
+                    metadata: ProviderMetadata {
+                        id: format!("cancel-{index:03}"),
+                        ..base.clone()
+                    },
+                    status: SearchStatus::NotFound,
+                }) as Box<dyn SearchProvider>
+            })
+            .collect();
+        let entity = SearchEntity::username("Rx", 1).unwrap();
+        let cancelled = AtomicBool::new(true);
+        let mut scheduler = SearchScheduler {
+            max_providers: 100,
+            max_concurrency: 8,
+            max_per_host: 2,
+            deadline: Instant::now() + Duration::from_secs(30),
+            rate_limiter: RateLimiter::new(0),
+        };
+        let (results, accounting) = scheduler.run(&providers, &entity, &cancelled);
+        assert!(results.is_empty());
+        assert_eq!(accounting.cancelled, 100);
+        assert_eq!(accounting.accounted(), 100);
+    }
+
+    #[test]
+    fn captcha_noise_in_page_content_never_blocks() {
+        // Regression: the bare `captcha` block marker once matched ordinary
+        // script/bundle tokens (e.g. `octocaptcha_*` on GitHub) and turned
+        // every live confirmation into `Blocked`. Innocent captcha-adjacent
+        // content must stay unblocked on all providers.
+        let pack = embedded_username_pack().unwrap();
+        let noise = "asset octocaptcha_origin_optimization bundle captchaToken verified";
+        for provider in &pack.providers {
+            let status = provider
+                .classify(
+                    &ProviderResponse {
+                        status: 200,
+                        body: noise.to_owned(),
+                    },
+                    "exampleuser",
+                )
+                .status;
+            assert_ne!(
+                status,
+                SearchStatus::Blocked,
+                "{} treats captcha noise as a block page",
+                provider.metadata.id
+            );
+        }
+    }
+
+    #[test]
+    fn civil_date_math_and_staleness_are_derived() {
+        assert_eq!(days_to_civil(0), (1970, 1, 1));
+        assert_eq!(days_to_civil(20361), (2025, 9, 30));
+        assert_eq!(days_to_civil(20366), (2025, 10, 5));
+        assert_eq!(days_to_civil(-1), (1969, 12, 31));
+        assert!(verification_stale(
+            &HealthState::LiveVerified,
+            Some("2025-01-01"),
+            "2025-10-05"
+        ));
+        assert!(!verification_stale(
+            &HealthState::LiveVerified,
+            Some("2025-10-05"),
+            "2025-10-05"
+        ));
+        assert!(!verification_stale(
+            &HealthState::NeedsReview,
+            None,
+            "2025-10-05"
+        ));
+        assert!(!verification_stale(
+            &HealthState::LiveVerified,
+            None,
+            "2025-10-05"
+        ));
+        let cutoff = stale_cutoff(180);
+        assert_eq!(cutoff.len(), 10);
+        assert!(cutoff < stale_cutoff(0));
+    }
+
+    #[test]
     fn provider_pack_parser_is_versioned_and_bounded() {
         let json = serde_json::json!({
             "schema_version": 1,
@@ -1650,7 +3173,7 @@ mod tests {
             expected: String,
         }
         let pack = embedded_username_pack().unwrap();
-        assert_eq!(pack.providers.len(), 10);
+        assert_eq!(pack.providers.len(), 100);
         for provider in pack.providers {
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("search/fixtures/username")
@@ -1865,6 +3388,297 @@ mod tests {
         result
     }
 
+    /// Serve one canned response per connection on loopback.
+    fn serve_many(
+        responses: Vec<Vec<u8>>,
+        connections: usize,
+    ) -> (std::net::SocketAddr, std::thread::JoinHandle<usize>) {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let mut served = 0usize;
+            for _ in 0..connections {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut request = [0u8; 4096];
+                let _ = stream.read(&mut request);
+                let body = &responses[served % responses.len()];
+                if stream.write_all(body).is_err() {
+                    break;
+                }
+                served += 1;
+            }
+            served
+        });
+        (address, handle)
+    }
+
+    #[test]
+    fn absence_redirect_beats_auth_wall_with_evidence() {
+        // Chain: profile URL 302s to a login wall that matches BOTH the
+        // absence and the authentication markers. Absence must win.
+        use std::io::{Read as _, Write as _};
+        let wall = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let wall_address = wall.local_addr().unwrap();
+        let wall_handle = std::thread::spawn(move || {
+            let (mut stream, _) = wall.accept().unwrap();
+            let mut request = [0u8; 2048];
+            let _ = stream.read(&mut request);
+            let body = b"sign in to continue";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                String::from_utf8_lossy(body)
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let gate = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let gate_address = gate.local_addr().unwrap();
+        let gate_handle = std::thread::spawn(move || {
+            let (mut stream, _) = gate.accept().unwrap();
+            let mut request = [0u8; 2048];
+            let _ = stream.read(&mut request);
+            let response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://{wall_address}/signin-wall\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let mut definition = definition();
+        definition.profile_url = format!("http://{gate_address}/{{username}}");
+        definition.absence_redirect_markers = vec!["/signin-wall".to_owned()];
+        definition.authentication_url_markers = vec!["/signin-wall".to_owned()];
+        let provider = DefinitionProvider {
+            definition,
+            client: Arc::new(local_test_client()),
+        };
+        let seed = SearchEntity::username("Rx", 1).unwrap();
+        let cancelled = AtomicBool::new(false);
+        let observation = provider
+            .search(
+                &SearchContext {
+                    deadline: Instant::now() + Duration::from_secs(5),
+                    cancelled: &cancelled,
+                },
+                &seed,
+            )
+            .unwrap();
+        gate_handle.join().unwrap();
+        wall_handle.join().unwrap();
+        assert_eq!(observation.status, SearchStatus::NotFound);
+        assert!(
+            observation
+                .evidence
+                .iter()
+                .any(|evidence| evidence.contains("absence destination")),
+            "evidence: {:?}",
+            observation.evidence
+        );
+    }
+
+    #[test]
+    fn retry_after_survives_rate_limit_classification() {
+        let body = b"slow down";
+        let response = format!(
+            "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 120\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            String::from_utf8_lossy(body)
+        )
+        .into_bytes();
+        let (url, server) = fixture_http(response);
+        let mut definition = definition();
+        definition.profile_url = url;
+        let provider = DefinitionProvider {
+            definition,
+            client: Arc::new(local_test_client()),
+        };
+        let seed = SearchEntity::username("Rx", 1).unwrap();
+        let cancelled = AtomicBool::new(false);
+        let observation = provider
+            .search(
+                &SearchContext {
+                    deadline: Instant::now() + Duration::from_secs(5),
+                    cancelled: &cancelled,
+                },
+                &seed,
+            )
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(observation.status, SearchStatus::RateLimited);
+        assert_eq!(
+            observation
+                .attributes
+                .get("retry_after")
+                .map(String::as_str),
+            Some("120")
+        );
+    }
+
+    #[test]
+    fn cancelled_in_flight_search_counts_cancelled() {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 2048];
+            let _ = stream.read(&mut request);
+            std::thread::sleep(Duration::from_millis(400));
+            let body = b"too late";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                String::from_utf8_lossy(body)
+            );
+            let _ = stream.write_all(response.as_bytes());
+        });
+        let mut definition = definition();
+        definition.profile_url = format!("http://{address}/{{username}}");
+        let provider = DefinitionProvider {
+            definition,
+            client: Arc::new(local_test_client()),
+        };
+        let seed = SearchEntity::username("Rx", 1).unwrap();
+        let cancelled = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let handle = scope.spawn(|| {
+                provider.search(
+                    &SearchContext {
+                        deadline: Instant::now() + Duration::from_secs(10),
+                        cancelled: &cancelled,
+                    },
+                    &seed,
+                )
+            });
+            std::thread::sleep(Duration::from_millis(50));
+            cancelled.store(true, Ordering::Release);
+            assert!(matches!(
+                handle.join().unwrap(),
+                Err(SearchError::Cancelled)
+            ));
+        });
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn connection_failure_is_error_never_absence() {
+        // Nothing listens here: refused connections must error, never read
+        // as "account does not exist".
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = probe.local_addr().unwrap();
+        drop(probe);
+        let mut definition = definition();
+        definition.profile_url = format!("http://{address}/{{username}}");
+        let provider = DefinitionProvider {
+            definition,
+            client: Arc::new(local_test_client()),
+        };
+        let seed = SearchEntity::username("Rx", 1).unwrap();
+        let cancelled = AtomicBool::new(false);
+        assert!(matches!(
+            provider.search(
+                &SearchContext {
+                    deadline: Instant::now() + Duration::from_secs(5),
+                    cancelled: &cancelled,
+                },
+                &seed,
+            ),
+            Err(SearchError::Http(_))
+        ));
+    }
+
+    /// Deterministic local benchmark at scale `count`: one loopback
+    /// request per mock provider. Returns wall time and served request
+    /// count. No public network involved.
+    fn bench_mock_search(count: usize) -> (std::time::Duration, usize) {
+        let found = b"<meta data-profile=\"rx\" rel=\"canonical\">";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            found.len(),
+            String::from_utf8_lossy(found)
+        )
+        .into_bytes();
+        // Every mock provider points at a shared loopback server. The
+        // response carries the shared fixture markers, so all confirm.
+        let client = Arc::new(local_test_client());
+        let (address, server) = serve_many(vec![response], count);
+        let entity = SearchEntity::username("Rx", 1).unwrap();
+        let started = Instant::now();
+        let mut scheduler = SearchScheduler {
+            max_providers: count,
+            max_concurrency: 8,
+            max_per_host: 2,
+            deadline: Instant::now() + Duration::from_secs(60),
+            rate_limiter: RateLimiter::new(0),
+        };
+        let base = definition();
+        let pointed: Vec<Box<dyn SearchProvider>> = (0..count)
+            .map(|index| {
+                let mut item = base.clone();
+                item.metadata.id = format!("bench-{index:04}");
+                item.profile_url = format!("http://{address}/bench-{index:04}/{{username}}");
+                Box::new(DefinitionProvider {
+                    definition: item,
+                    client: client.clone(),
+                }) as Box<dyn SearchProvider>
+            })
+            .collect();
+        let (results, accounting) = scheduler.run(&pointed, &entity, &AtomicBool::new(false));
+        let wall = started.elapsed();
+        let served = server.join().unwrap();
+        assert_eq!(served, pointed.len(), "one request per provider");
+        assert_eq!(accounting.providers_requested, pointed.len());
+        assert_eq!(accounting.accounted(), pointed.len());
+        assert_eq!(accounting.providers_completed, pointed.len());
+        assert!(
+            results
+                .windows(2)
+                .all(|pair| pair[0].provider_id <= pair[1].provider_id),
+            "result ordering stays deterministic under concurrency"
+        );
+        (wall, served)
+    }
+
+    #[test]
+    fn mock_scale_benchmark_matrix() {
+        // Scheduler/concurrency scale at milestone sizes against loopback.
+        for count in [50, 100] {
+            let (wall, served) = bench_mock_search(count);
+            assert!(
+                wall < Duration::from_secs(60),
+                "{count} loopback providers took {wall:?}"
+            );
+            eprintln!("bench: mock{count}_wall={wall:?} mock{count}_requests={served}");
+        }
+
+        let pack_started = Instant::now();
+        let pack = embedded_username_pack().unwrap();
+        let pack_elapsed = pack_started.elapsed();
+        let validate_started = Instant::now();
+        validate_definitions(&pack.providers).unwrap();
+        let validate_elapsed = validate_started.elapsed();
+        let classify_started = Instant::now();
+        let mut classified = 0usize;
+        for provider in &pack.providers {
+            for body in [
+                format!(
+                    "{} {}",
+                    provider.success.required.join(" "),
+                    provider.success.any.join(" ")
+                ),
+                "generic directory listing".to_owned(),
+            ] {
+                let _ = provider.classify(&ProviderResponse { status: 200, body }, "exampleuser");
+                classified += 1;
+            }
+        }
+        let classify_elapsed = classify_started.elapsed();
+        eprintln!(
+            "bench: pack_load={pack_elapsed:?} validate={validate_elapsed:?} classify_all={classify_elapsed:?}({classified} cases)"
+        );
+    }
+
     #[test]
     fn redirect_limits_and_destinations_are_revalidated() {
         assert!(matches!(
@@ -1892,8 +3706,10 @@ mod tests {
             (401, SearchStatus::AuthenticationRequired),
             (403, SearchStatus::Blocked),
             (404, SearchStatus::NotFound),
+            (410, SearchStatus::Unknown),
             (429, SearchStatus::RateLimited),
             (500, SearchStatus::Unknown),
+            (503, SearchStatus::Unknown),
         ] {
             assert_eq!(
                 provider

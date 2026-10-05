@@ -1,0 +1,645 @@
+{
+  "schema_version": 1,
+  "pack_version": "2026.10.05-v4",
+  "providers": [
+    {
+      "metadata": {
+        "id": "bandcamp",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "media",
+        "requires_authentication": false
+      },
+      "platform": "Bandcamp",
+      "category": "media",
+      "profile_url": "https://{username}.bandcamp.com",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "{username}.bandcamp.com"
+        ],
+        "any": [
+          "bandcamp.com"
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B). C3B: absent subdomains 303 to the signup page echoing the name (false-confirm risk); the signup destination is the verified absence signal. ~300KB pages exceed the fetch budget (confirmation ceiling).",
+      "absence_redirect_markers": [
+        "bandcamp.com/signup"
+      ]
+    },
+    {
+      "metadata": {
+        "id": "kick",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "media",
+        "requires_authentication": false
+      },
+      "platform": "Kick",
+      "category": "media",
+      "profile_url": "https://kick.com/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "kick.com/{username}"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B)."
+    },
+    {
+      "metadata": {
+        "id": "lastfm",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "media",
+        "requires_authentication": false
+      },
+      "platform": "Last.fm",
+      "category": "media",
+      "profile_url": "https://www.last.fm/user/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "last.fm/user/{username}"
+        ],
+        "any": [
+          "\"name\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "client challenge",
+        "verify you are human"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05. C3: anonymous clients receive a Fastly client-challenge interstitial (200) for all requests."
+    },
+    {
+      "metadata": {
+        "id": "medium",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "media",
+        "requires_authentication": false
+      },
+      "platform": "Medium",
+      "category": "media",
+      "profile_url": "https://medium.com/@{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "medium.com/@{username}"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "just a moment",
+        "verify you are human"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05. C3: anonymous clients receive a Cloudflare challenge for all requests."
+    },
+    {
+      "metadata": {
+        "id": "mixcloud",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "media",
+        "requires_authentication": false
+      },
+      "platform": "Mixcloud",
+      "category": "media",
+      "profile_url": "https://mixcloud.com/{username}/",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "mixcloud.com/{username}/"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B)."
+    },
+    {
+      "metadata": {
+        "id": "odysee",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "media",
+        "requires_authentication": false
+      },
+      "platform": "Odysee",
+      "category": "media",
+      "profile_url": "https://odysee.com/@{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "odysee.com/@{username}"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B)."
+    },
+    {
+      "metadata": {
+        "id": "rumble",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "media",
+        "requires_authentication": false
+      },
+      "platform": "Rumble",
+      "category": "media",
+      "profile_url": "https://rumble.com/user/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "rumble.com/user/{username}"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B)."
+    },
+    {
+      "metadata": {
+        "id": "soundcloud",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "media",
+        "requires_authentication": false
+      },
+      "platform": "SoundCloud",
+      "category": "media",
+      "profile_url": "https://soundcloud.com/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "soundcloud.com/{username}"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "live_verified",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05. C3: profile JSON markers verified on served page; absent 404s cleanly.",
+      "verified_at": "2026-10-05",
+      "verification_method": "live-probe"
+    },
+    {
+      "metadata": {
+        "id": "tiktok",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "media",
+        "requires_authentication": false
+      },
+      "platform": "TikTok",
+      "category": "media",
+      "profile_url": "https://www.tiktok.com/@{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "tiktok.com/@{username}"
+        ],
+        "any": [
+          "\"uniqueId\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05."
+    },
+    {
+      "metadata": {
+        "id": "twitch",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "media",
+        "requires_authentication": false
+      },
+      "platform": "Twitch",
+      "category": "media",
+      "profile_url": "https://www.twitch.tv/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "<link rel=\"canonical\" href=\"https://www.twitch.tv/{username}\""
+        ],
+        "any": [
+          "og:url\" content=\"https://www.twitch.tv/{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "user not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "captcha challenge"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 262144,
+      "health_state": "needs_review",
+      "username_rules": {
+        "min_length": 1,
+        "max_length": 25,
+        "charset": "alnum_underscore"
+      },
+      "source_notes": "Live 2026-10-05: channel pages self-canonicalize when the channel exists (absent pages carry no canonical tag), but the surrounding shell is otherwise identical JS. Single-observation signal; re-verify before promoting. Typical full pages are large; responses beyond the fetch budget classify as Unknown rather than risk partial-body evidence. Tool-observed requests receive a block page while a reference client receives the channel shell; the canonical-URL signal is therefore not tool-observable."
+    },
+    {
+      "metadata": {
+        "id": "vimeo",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "media",
+        "requires_authentication": false
+      },
+      "platform": "Vimeo",
+      "category": "media",
+      "profile_url": "https://vimeo.com/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "<link rel=\"canonical\" href=\"https://vimeo.com/{username}\""
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": []
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "live_verified",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05. C3: canonical URL verified on served page (410 tombstones resolve, unknown slugs 404 identically). Absence is status-driven.",
+      "verified_at": "2026-10-05",
+      "verification_method": "live-probe"
+    },
+    {
+      "metadata": {
+        "id": "youtube",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "media",
+        "requires_authentication": false
+      },
+      "platform": "YouTube",
+      "category": "media",
+      "profile_url": "https://www.youtube.com/@{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "app-argument=https://www.youtube.com/@{username}"
+        ],
+        "any": [
+          "youtube.com"
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "captcha challenge"
+      ],
+      "authentication_url_markers": [
+        "accounts.google.com"
+      ],
+      "max_redirects": 3,
+      "max_body_bytes": 262144,
+      "health_state": "needs_review",
+      "username_rules": {
+        "min_length": 1,
+        "max_length": 30,
+        "charset": "any"
+      },
+      "source_notes": "Live 2026-10-05: consent redirect chain (302/303, region-dependent) sits exactly at the redirect budget; raised to 3 for headroom. Handle signal is consent-flow-adjacent; absent serves a real 404. Re-verify before promoting. Typical full pages are large; responses beyond the fetch budget classify as Unknown rather than risk partial-body evidence. Watch/channel shells (~1.9MB) exceed the fetch budget."
+    }
+  ]
+}

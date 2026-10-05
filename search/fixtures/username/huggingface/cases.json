@@ -1,0 +1,35 @@
+{
+  "provider": "huggingface",
+  "cases": [
+    {
+      "name": "found",
+      "status": 200,
+      "body": "<link rel=\"canonical\" href=\"https://huggingface.co/Rx\" <title>Rx (",
+      "expected": "confirmed"
+    },
+    {
+      "name": "not-found",
+      "status": 404,
+      "body": "404 \u2013 hugging face",
+      "expected": "not_found"
+    },
+    {
+      "name": "generic-200",
+      "status": 200,
+      "body": "Welcome to the home page about this directory index of public listings.",
+      "expected": "possible"
+    },
+    {
+      "name": "blocked",
+      "status": 200,
+      "body": "Access restricted: verify you are human. Automated clients captcha challenge.",
+      "expected": "blocked"
+    },
+    {
+      "name": "captcha-noise",
+      "status": 200,
+      "body": "asset octocaptcha_origin_optimization bundle captchaToken verified",
+      "expected": "possible"
+    }
+  ]
+}

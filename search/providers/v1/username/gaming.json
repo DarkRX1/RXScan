@@ -1,0 +1,535 @@
+{
+  "schema_version": 1,
+  "pack_version": "2026.10.05-v4",
+  "providers": [
+    {
+      "metadata": {
+        "id": "boardgamegeek",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "gaming",
+        "requires_authentication": false
+      },
+      "platform": "BoardGameGeek",
+      "category": "gaming",
+      "profile_url": "https://boardgamegeek.com/user/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "boardgamegeek.com/user/{username}"
+        ],
+        "any": [
+          "boardgamegeek.com"
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "just a moment",
+        "verify you are human"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05. C3: anonymous clients receive a Cloudflare challenge for all requests."
+    },
+    {
+      "metadata": {
+        "id": "challonge",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "gaming",
+        "requires_authentication": false
+      },
+      "platform": "Challonge",
+      "category": "gaming",
+      "profile_url": "https://challonge.com/users/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "challonge.com/users/{username}"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B)."
+    },
+    {
+      "metadata": {
+        "id": "chess-com",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "gaming",
+        "requires_authentication": false
+      },
+      "platform": "Chess.com",
+      "category": "gaming",
+      "profile_url": "https://api.chess.com/pub/player/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "\"username\":\"{username}\""
+        ],
+        "any": [
+          "\"url\":\"https://www.chess.com/member/{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "captcha challenge"
+      ],
+      "authentication_url_markers": [],
+      "max_redirects": 1,
+      "max_body_bytes": 65536,
+      "health_state": "live_verified",
+      "verified_at": "2026-10-05",
+      "verification_method": "live-probe",
+      "username_rules": {
+        "min_length": 1,
+        "max_length": 25,
+        "charset": "any"
+      },
+      "source_notes": "Live 2026-10-05: documented public player API carries username identity; absent serves 404 with \"not found\" message. Previous HTML canonical markers were correct but typical pages fit the fetch budget only marginally; the API is deterministic and small."
+    },
+    {
+      "metadata": {
+        "id": "faceit",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "gaming",
+        "requires_authentication": false
+      },
+      "platform": "FACEIT",
+      "category": "gaming",
+      "profile_url": "https://faceit.com/en/players/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "faceit.com/en/players/{username}"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B)."
+    },
+    {
+      "metadata": {
+        "id": "gamejolt",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "gaming",
+        "requires_authentication": false
+      },
+      "platform": "Game Jolt",
+      "category": "gaming",
+      "profile_url": "https://gamejolt.com/@{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "gamejolt.com/@{username}"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B)."
+    },
+    {
+      "metadata": {
+        "id": "itchio",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "gaming",
+        "requires_authentication": false
+      },
+      "platform": "itch.io",
+      "category": "gaming",
+      "profile_url": "https://itch.io/profile/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "<title>{username} - itch.io"
+        ],
+        "any": [
+          "{username}</a>"
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "live_verified",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B). C3B: title + profile-link identity verified; absent 404s with title marker.",
+      "verified_at": "2026-10-05",
+      "verification_method": "live-probe"
+    },
+    {
+      "metadata": {
+        "id": "lichess",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "gaming",
+        "requires_authentication": false
+      },
+      "platform": "Lichess",
+      "category": "gaming",
+      "profile_url": "https://lichess.org/api/user/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "\"id\":\"{username}\""
+        ],
+        "any": [
+          "\"username\":"
+        ]
+      },
+      "not_found": {
+        "any": [
+          "\"error\":\"not found\""
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [],
+      "max_redirects": 1,
+      "max_body_bytes": 65536,
+      "health_state": "live_verified",
+      "verified_at": "2026-10-05",
+      "verification_method": "live-probe",
+      "source_notes": "Live 2026-10-05: documented public user API; id is the lowercased username (case-safe required marker). Absent serves 404 {\"error\":\"Not found\"}. HTML pages were not evaluated; definition uses the API."
+    },
+    {
+      "metadata": {
+        "id": "moddb",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "gaming",
+        "requires_authentication": false
+      },
+      "platform": "Mod DB",
+      "category": "gaming",
+      "profile_url": "https://moddb.com/members/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "moddb.com/members/{username}"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B)."
+    },
+    {
+      "metadata": {
+        "id": "speedrun",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "gaming",
+        "requires_authentication": false
+      },
+      "platform": "speedrun.com",
+      "category": "gaming",
+      "profile_url": "https://www.speedrun.com/users/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "speedrun.com/users/{username}"
+        ],
+        "any": [
+          "\"name\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "just a moment",
+        "verify you are human"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05. C3: anonymous clients receive a Cloudflare challenge for all requests."
+    },
+    {
+      "metadata": {
+        "id": "steam",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "gaming",
+        "requires_authentication": false
+      },
+      "platform": "Steam Community",
+      "category": "gaming",
+      "profile_url": "https://steamcommunity.com/id/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "steamcommunity.com/id/{username}"
+        ],
+        "any": [
+          "steamcommunity.com/id/{username}/badges"
+        ]
+      },
+      "not_found": {
+        "any": [
+          "profile could not be found"
+        ]
+      },
+      "blocked_markers": [
+        "captcha challenge",
+        "age check"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "live_verified",
+      "verified_at": "2026-10-05",
+      "verification_method": "live-probe",
+      "source_notes": "Live 2026-10-05: custom-URL profiles serve 200 with id-bound subpage links; absent serves 200 carrying \"The specified profile could not be found.\" (custom-404-as-200), caught by the absence marker."
+    }
+  ]
+}

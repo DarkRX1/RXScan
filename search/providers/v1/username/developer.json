@@ -1,0 +1,1484 @@
+{
+  "schema_version": 1,
+  "pack_version": "2026.10.05-v4",
+  "providers": [
+    {
+      "metadata": {
+        "id": "bitbucket",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "developer",
+        "requires_authentication": false
+      },
+      "platform": "Bitbucket",
+      "category": "developer",
+      "profile_url": "https://bitbucket.org/{username}/",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "\"nickname\": \"{username}\""
+        ],
+        "any": [
+          "bitbucket.org"
+        ]
+      },
+      "not_found": {
+        "any": [
+          "workspace was not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "captcha challenge"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Live 2026-10-05: anonymous HTML workspace pages 404 even for large public workspaces; the workspaces API answers for public slugs but personal-username mapping is unverified. Mechanism exists for interactive clients but is not plain-HTTP observable; do not promote without a verifiable public case. Tool-observed responses vary between a styled 404 and challenge-injected variants, so anonymous results are nondeterministic; status/absence handling verified only for the stable 404 form."
+    },
+    {
+      "metadata": {
+        "id": "codeberg",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 20,
+        "weight": 1,
+        "source_category": "developer",
+        "requires_authentication": false
+      },
+      "platform": "Codeberg",
+      "category": "developer",
+      "profile_url": "https://codeberg.org/api/v1/users/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "\"login\":\"{username}\""
+        ],
+        "any": [
+          "\"html_url\":\"https://codeberg.org/{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "does not exist"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [],
+      "max_redirects": 1,
+      "max_body_bytes": 65536,
+      "health_state": "live_verified",
+      "verified_at": "2026-10-05",
+      "verification_method": "live-probe",
+      "source_notes": "Live 2026-10-05: Forgejo user API is public without auth; login field is the identity signal. HTML user pages were unverifiable (org/user namespace ambiguity); definition moved to the documented API."
+    },
+    {
+      "metadata": {
+        "id": "codeforces",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "developer",
+        "requires_authentication": false
+      },
+      "platform": "Codeforces",
+      "category": "developer",
+      "profile_url": "https://codeforces.com/profile/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "<title>{username} - Codeforces</title>"
+        ],
+        "any": [
+          "codeforces.com/profile/{username}"
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05. C3: title identity verified; ~400KB pages exceed the fetch budget (confirmation ceiling). Absent 302s to the homepage (weak-possible ceiling, never confirms)."
+    },
+    {
+      "metadata": {
+        "id": "codesandbox",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "developer",
+        "requires_authentication": false
+      },
+      "platform": "CodeSandbox",
+      "category": "developer",
+      "profile_url": "https://codesandbox.io/u/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "codesandbox.io/u/{username}"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B)."
+    },
+    {
+      "metadata": {
+        "id": "codewars",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "developer",
+        "requires_authentication": false
+      },
+      "platform": "Codewars",
+      "category": "developer",
+      "profile_url": "https://codewars.com/users/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "codewars.com/users/{username}"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B)."
+    },
+    {
+      "metadata": {
+        "id": "crates-io",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "developer",
+        "requires_authentication": false
+      },
+      "platform": "crates.io",
+      "category": "developer",
+      "profile_url": "https://crates.io/api/v1/users/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "\"login\":\"{username}\""
+        ],
+        "any": [
+          "\"avatar\":\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [],
+      "max_redirects": 1,
+      "max_body_bytes": 65536,
+      "health_state": "live_verified",
+      "verified_at": "2026-10-05",
+      "verification_method": "live-probe",
+      "source_notes": "Live 2026-10-05: /users/{name} HTML route is gone (404 for all); the v1 user API is public and carries login identity. Definition moved to the API."
+    },
+    {
+      "metadata": {
+        "id": "devto",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 20,
+        "weight": 1,
+        "source_category": "developer",
+        "requires_authentication": false
+      },
+      "platform": "DEV Community",
+      "category": "developer",
+      "profile_url": "https://dev.to/api/users/by_username?url={username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "\"username\":\"{username}\""
+        ],
+        "any": [
+          "\"type_of\":\"user\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "\"error\":\"not found\""
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "captcha challenge"
+      ],
+      "authentication_url_markers": [],
+      "max_redirects": 1,
+      "max_body_bytes": 65536,
+      "health_state": "live_verified",
+      "verified_at": "2026-10-05",
+      "verification_method": "live-probe",
+      "source_notes": "Live 2026-10-05: documented public user API carries username identity; absent serves 404 {\"error\":\"not found\"}. Previous HTML canonical markers were correct but profile pages (~670KB) exceed the fetch budget, so the definition uses the API."
+    },
+    {
+      "metadata": {
+        "id": "dockerhub",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 20,
+        "weight": 1,
+        "source_category": "developer",
+        "requires_authentication": false
+      },
+      "platform": "Docker Hub",
+      "category": "developer",
+      "profile_url": "https://hub.docker.com/v2/users/{username}/",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "\"username\":\"{username}\""
+        ],
+        "any": [
+          "\"type\":\"user\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "not found"
+        ]
+      },
+      "blocked_markers": [
+        "rate limit exceeded",
+        "captcha challenge"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 1,
+      "max_body_bytes": 65536,
+      "health_state": "live_verified",
+      "verified_at": "2026-10-05",
+      "verification_method": "live-probe",
+      "source_notes": "Live 2026-10-05: /v2/users API public; username field echoes on existing (verified with individual user account), 404 {\"message\":\"User not found\"} on absent. Org slugs redirect to /v2/orgs and do not false-confirm."
+    },
+    {
+      "metadata": {
+        "id": "exercism",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "developer",
+        "requires_authentication": false
+      },
+      "platform": "Exercism",
+      "category": "developer",
+      "profile_url": "https://exercism.org/profiles/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "<title>{username}"
+        ],
+        "any": [
+          "<title>{username}"
+        ]
+      },
+      "not_found": {
+        "any": []
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 196608,
+      "health_state": "live_verified",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05. C3: title is the echo-safe identity signal. Absence is status-driven (404); no verified absence text. Fetch budget raised to 192KiB: profile pages measured near 146KiB.",
+      "verified_at": "2026-10-05",
+      "verification_method": "live-probe"
+    },
+    {
+      "metadata": {
+        "id": "freecodecamp",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "developer",
+        "requires_authentication": false
+      },
+      "platform": "freeCodeCamp",
+      "category": "developer",
+      "profile_url": "https://freecodecamp.org/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "freecodecamp.org/{username}"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B)."
+    },
+    {
+      "metadata": {
+        "id": "github",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 20,
+        "weight": 1,
+        "source_category": "developer",
+        "requires_authentication": false
+      },
+      "platform": "GitHub",
+      "category": "developer",
+      "profile_url": "https://github.com/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "<link rel=\"canonical\" href=\"https://github.com/{username}\""
+        ],
+        "any": [
+          "itemprop=\"additionalname\">"
+        ]
+      },
+      "not_found": {
+        "any": [
+          "not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 262144,
+      "health_state": "live_verified",
+      "verified_at": "2026-10-05",
+      "verification_method": "live-probe",
+      "username_rules": {
+        "min_length": 1,
+        "max_length": 39,
+        "charset": "alnum_hyphen"
+      },
+      "source_notes": "Live 2026-10-05: profile serves 200 with canonical profile URL; absent serves bare 404. Previous required marker failed on whitespace in vcard markup; bare \"captcha\" block marker matched normal pages (octocaptcha_*) and is removed. Typical full pages are large; responses beyond the fetch budget classify as Unknown rather than risk partial-body evidence."
+    },
+    {
+      "metadata": {
+        "id": "gitlab",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 20,
+        "weight": 1,
+        "source_category": "developer",
+        "requires_authentication": false
+      },
+      "platform": "GitLab",
+      "category": "developer",
+      "profile_url": "https://gitlab.com/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "<meta content=\"https://gitlab.com/{username}\" property=\"og:url\">"
+        ],
+        "any": [
+          "/users/{username}/activity"
+        ]
+      },
+      "not_found": {
+        "any": []
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "live_verified",
+      "verified_at": "2026-10-05",
+      "verification_method": "live-probe",
+      "absence_redirect_markers": [
+        "/users/sign_in"
+      ],
+      "source_notes": "Live 2026-10-05: public profiles serve 200 with og:url identity; unknown usernames deterministically 302 to /users/sign_in (Cloudflare-walled), which is the absence signal, not an auth gate. Previous title-based marker is stale."
+    },
+    {
+      "metadata": {
+        "id": "glitch",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "developer",
+        "requires_authentication": false
+      },
+      "platform": "Glitch",
+      "category": "developer",
+      "profile_url": "https://glitch.com/@{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "glitch.com/@{username}"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B)."
+    },
+    {
+      "metadata": {
+        "id": "hackerearth",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "developer",
+        "requires_authentication": false
+      },
+      "platform": "HackerEarth",
+      "category": "developer",
+      "profile_url": "https://hackerearth.com/@{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "hackerearth.com/@{username}"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B)."
+    },
+    {
+      "metadata": {
+        "id": "hackernews",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 20,
+        "weight": 1,
+        "source_category": "developer",
+        "requires_authentication": false
+      },
+      "platform": "Hacker News",
+      "category": "developer",
+      "profile_url": "https://news.ycombinator.com/user?id={username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "<title>Profile: {username} |"
+        ],
+        "any": [
+          "user?id={username}"
+        ]
+      },
+      "not_found": {
+        "any": [
+          "no such user"
+        ]
+      },
+      "blocked_markers": [
+        "too many requests"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 1,
+      "max_body_bytes": 65536,
+      "health_state": "live_verified",
+      "verified_at": "2026-10-05",
+      "verification_method": "live-probe",
+      "username_rules": {
+        "min_length": 1,
+        "max_length": 15,
+        "charset": "any"
+      },
+      "source_notes": "Live 2026-10-05: existing serves 200 with title/canonical identity; absent serves 200 with \"No such user.\" text (custom-404-as-200), caught by the absence marker. Previous \"user: {username}</a>\" marker did not match real markup."
+    },
+    {
+      "metadata": {
+        "id": "huggingface",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "developer",
+        "requires_authentication": false
+      },
+      "platform": "Hugging Face",
+      "category": "developer",
+      "profile_url": "https://huggingface.co/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "<link rel=\"canonical\" href=\"https://huggingface.co/{username}\""
+        ],
+        "any": [
+          "<title>{username} ("
+        ]
+      },
+      "not_found": {
+        "any": [
+          "404 \u2013 hugging face"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "captcha challenge"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 262144,
+      "health_state": "live_verified",
+      "verified_at": "2026-10-05",
+      "verification_method": "live-probe",
+      "source_notes": "Live 2026-10-05: canonical link is the identity signal (bare URL echo appears on 404 pages too, so the canonical form is required). Absent serves titled 404 page. Typical full pages are large; responses beyond the fetch budget classify as Unknown rather than risk partial-body evidence. Profile pages (~420KB) exceed the fetch budget."
+    },
+    {
+      "metadata": {
+        "id": "launchpad",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "developer",
+        "requires_authentication": false
+      },
+      "platform": "Launchpad",
+      "category": "developer",
+      "profile_url": "https://launchpad.net/~{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "launchpad.net/~{username}"
+        ],
+        "any": []
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "live_verified",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B). C3B: og:url-style URL identity verified on served page (note: some historic handles 404). No verified bonus marker; confirms at 88.",
+      "verified_at": "2026-10-05",
+      "verification_method": "live-probe"
+    },
+    {
+      "metadata": {
+        "id": "metacpan",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "developer",
+        "requires_authentication": false
+      },
+      "platform": "MetaCPAN",
+      "category": "developer",
+      "profile_url": "https://metacpan.org/author/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "href=\"/author/{username}\""
+        ],
+        "any": [
+          "metacpan.org"
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "client challenge",
+        "verify you are human"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05. C3: anonymous clients receive a Fastly client-challenge interstitial (200) for all requests."
+    },
+    {
+      "metadata": {
+        "id": "npm",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 20,
+        "weight": 1,
+        "source_category": "developer",
+        "requires_authentication": false
+      },
+      "platform": "npm",
+      "category": "developer",
+      "profile_url": "https://www.npmjs.com/~{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "data-user-name=\"{username}\""
+        ],
+        "any": [
+          "rel=\"canonical\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "user not found"
+        ]
+      },
+      "blocked_markers": [
+        "just a moment",
+        "verify you are human"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Live 2026-10-05: Cloudflare \"Just a moment\" challenge for all anonymous requests (status 403 or challenge 200). Unobservable live; do not promote without unblocked access."
+    },
+    {
+      "metadata": {
+        "id": "nuget",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 15000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "developer",
+        "requires_authentication": false
+      },
+      "platform": "NuGet",
+      "category": "developer",
+      "profile_url": "https://www.nuget.org/profiles/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "nuget.org/profiles/{username}"
+        ],
+        "any": []
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "live_verified",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05. C3: profile URL identity verified on served page; absent 404s with title marker. No verified bonus marker; confirms at 88. Fetch timeout raised to 15000ms: 113KB profile pages observed near 4.5s.",
+      "verified_at": "2026-10-05",
+      "verification_method": "live-probe"
+    },
+    {
+      "metadata": {
+        "id": "observable",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "developer",
+        "requires_authentication": false
+      },
+      "platform": "Observable",
+      "category": "developer",
+      "profile_url": "https://observablehq.com/@{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "observablehq.com/@{username}"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B)."
+    },
+    {
+      "metadata": {
+        "id": "openhub",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "developer",
+        "requires_authentication": false
+      },
+      "platform": "Open Hub",
+      "category": "developer",
+      "profile_url": "https://openhub.net/accounts/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "openhub.net/accounts/{username}"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B)."
+    },
+    {
+      "metadata": {
+        "id": "pypi",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 20,
+        "weight": 1,
+        "source_category": "developer",
+        "requires_authentication": false
+      },
+      "platform": "PyPI",
+      "category": "developer",
+      "profile_url": "https://pypi.org/user/{username}/",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "class=\"author-profile__name\">{username}<"
+        ],
+        "any": [
+          "rel=\"canonical\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "client challenge",
+        "verify you are human"
+      ],
+      "authentication_url_markers": [
+        "/account/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Live 2026-10-05: Fastly \"Client Challenge\" interstitial served as 200 for all anonymous requests; without the challenge marker every lookup would read Possible. Unobservable live."
+    },
+    {
+      "metadata": {
+        "id": "replit",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "developer",
+        "requires_authentication": false
+      },
+      "platform": "Replit",
+      "category": "developer",
+      "profile_url": "https://replit.com/@{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "replit.com/@{username}"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05. C3: anonymous profile views redirect to /login (auth wall); handles 404 as API JSON. Unobservable without login."
+    },
+    {
+      "metadata": {
+        "id": "rubygems",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "developer",
+        "requires_authentication": false
+      },
+      "platform": "RubyGems",
+      "category": "developer",
+      "profile_url": "https://rubygems.org/profiles/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "<title>Profile of {username} |"
+        ],
+        "any": [
+          ">{username}</h2>"
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "captcha challenge"
+      ],
+      "authentication_url_markers": [
+        "/sign_in"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 262144,
+      "health_state": "live_verified",
+      "verified_at": "2026-10-05",
+      "verification_method": "live-probe",
+      "source_notes": "Live 2026-10-05: profile title is the identity signal; absent serves titled 404 page. Previous URL-fragment markers never matched real pages. Typical full pages are large; responses beyond the fetch budget classify as Unknown rather than risk partial-body evidence. Rubygems owners API was evaluated and rejected: gem payloads carry no username-bound identity. Profile pages (~360KB) exceed the budget."
+    },
+    {
+      "metadata": {
+        "id": "sourceforge",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "developer",
+        "requires_authentication": false
+      },
+      "platform": "SourceForge",
+      "category": "developer",
+      "profile_url": "https://sourceforge.net/u/{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "sourceforge.net/u/{username}"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B)."
+    },
+    {
+      "metadata": {
+        "id": "sourcehut",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "developer",
+        "requires_authentication": false
+      },
+      "platform": "SourceHut",
+      "category": "developer",
+      "profile_url": "https://sr.ht/~{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "~{username}<"
+        ],
+        "any": [
+          "sr.ht"
+        ]
+      },
+      "not_found": {
+        "any": [
+          "no such user"
+        ]
+      },
+      "blocked_markers": [
+        "captcha challenge",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "live_verified",
+      "verified_at": "2026-10-05",
+      "verification_method": "live-probe",
+      "source_notes": "Live 2026-10-05: ~user pages serve 200 with title/header identity after a trailing-slash 308; absent 308s to a 404. Markers confirmed on both paths."
+    },
+    {
+      "metadata": {
+        "id": "stackblitz",
+        "version": "1",
+        "accepts": [
+          "username"
+        ],
+        "produces": [
+          "account"
+        ],
+        "contact_class": "public_http",
+        "timeout_ms": 5000,
+        "requests_per_minute": 10,
+        "weight": 1,
+        "source_category": "developer",
+        "requires_authentication": false
+      },
+      "platform": "StackBlitz",
+      "category": "developer",
+      "profile_url": "https://stackblitz.com/@{username}",
+      "method": "GET",
+      "success_status": [
+        200
+      ],
+      "not_found_status": [
+        404
+      ],
+      "success": {
+        "required": [
+          "stackblitz.com/@{username}"
+        ],
+        "any": [
+          "\"username\":\"{username}\""
+        ]
+      },
+      "not_found": {
+        "any": [
+          "page not found"
+        ]
+      },
+      "blocked_markers": [
+        "verify you are human",
+        "rate limit exceeded"
+      ],
+      "authentication_url_markers": [
+        "/login"
+      ],
+      "max_redirects": 2,
+      "max_body_bytes": 131072,
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B)."
+    }
+  ]
+}

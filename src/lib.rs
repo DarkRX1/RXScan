@@ -49,6 +49,7 @@ pub mod target;
 pub mod tcp_discovery;
 pub mod tcp_probe;
 pub mod tcp_scanner;
+pub mod terminal;
 pub mod tls;
 pub mod udp_discovery;
 pub mod udp_probes;

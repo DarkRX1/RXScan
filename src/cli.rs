@@ -4,7 +4,12 @@ use crate::plan::SpeedSetting;
 
 /// Operator-facing scanner controls.
 #[derive(Debug, Clone, Parser)]
-#[command(name = "rxscan", version, about = "Reactive Recon Scanner")]
+#[command(
+    name = "rxscan",
+    version,
+    about = "Reactive Recon Scanner",
+    long_about = "Major workflows:\n  rxscan <target>                           Network recon (default)\n  rxscan search --username NAME             Username account discovery\n  rxscan search username NAME               Username (positional format)\n  rxscan search providers                   List username search providers\n  rxscan search stats                       Show corpus statistics\n  rxscan search lint                        Validate the search corpus\n  rxscan capabilities                       Probe tool capabilities\n  rxscan --username NAME                    Alias for rxscan search --username NAME"
+)]
 pub struct Cli {
     /// A target: IPv4, IPv6, hostname, URL, CIDR, or '-' for standard input.
     #[arg(value_name = "TARGET", allow_hyphen_values = true)]
@@ -131,6 +136,12 @@ pub struct Cli {
     /// Output format. Only `jsonl` is supported for scan streams.
     #[arg(long, value_name = "FORMAT")]
     pub format: Option<String>,
+
+    /// Terminal color mode: `auto` (default, TTY only), `always`, or
+    /// `never`. `NO_COLOR` disables color unless `always` is given.
+    /// Never affects machine-readable output.
+    #[arg(long, value_name = "MODE", value_parser = ["auto", "always", "never"])]
+    pub color: Option<String>,
 }
 
 fn parse_goal(value: &str) -> Result<String, String> {
