@@ -56,7 +56,7 @@ fn search_stats_human_is_generated_not_hardcoded() {
         !stdout.contains('\x1b'),
         "piped output defaults to plain text"
     );
-    assert!(stdout.contains("RXScan Search Corpus"));
+    assert!(stdout.contains("SEARCH CORPUS"));
     assert!(stdout.contains("Providers loaded       100"));
     assert!(stdout.contains("Live verified          31"));
     assert!(stdout.contains("Disabled               1"));
@@ -259,9 +259,15 @@ fn forced_color_shows_startup_mark_while_json_stays_clean() {
     let (code, stdout, _) = run_cli(&["search", "stats", "--color", "always"]);
     assert_eq!(code, 0);
     assert!(stdout.contains("RXSCAN"));
+    assert!(stdout.contains('\x1b'), "forced color must emit ANSI");
+    // Piped human output keeps its workflow header structurally but stays
+    // plain (no ANSI) without `--color always`.
     let (code, stdout, _) = run_cli(&["search", "providers"]);
     assert_eq!(code, 0);
-    assert!(!stdout.contains("RXSCAN"), "mark stays hidden when piped");
+    assert!(
+        stdout.contains("RXSCAN"),
+        "workflow header stays structural"
+    );
     assert!(!stdout.contains('\x1b'));
 }
 

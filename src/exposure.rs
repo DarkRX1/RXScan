@@ -1109,57 +1109,108 @@ pub fn explain_exposure(kind: IdentifierKind, providers: &[Box<dyn ExposureProvi
 // Rendering: human (semantic terminal styles), JSON, typed JSONL.
 // ---------------------------------------------------------------------------
 
-/// Compact human rendering. Styled only when `color` is true; machine
-/// output never passes through here.
+/// Designed human rendering: workflow header, findings, and a summary
+/// bar. Styled only when `color` is true; machine output never passes
+/// through here. Fixed 80-column layout; see [`render_human_caps`].
 pub fn render_human(report: &ExposureReport, color: bool, ascii: bool) -> String {
-    use crate::terminal::{Style, paint};
+    render_human_caps(
+        report,
+        crate::terminal::TerminalCapabilities {
+            color,
+            ascii,
+            width: 80,
+            tty: false,
+        },
+    )
+}
+
+/// Capabilities-aware exposure renderer (responsive + styled).
+pub fn render_human_caps(
+    report: &ExposureReport,
+    caps: crate::terminal::TerminalCapabilities,
+) -> String {
+    use crate::terminal::{
+        Style, footer_block, key_value, paint, section_heading, workflow_header,
+    };
+    let color = caps.color;
+    let ascii = caps.ascii;
     let mut out = String::new();
-    out.push_str(&paint(color, Style::Heading, "EXPOSURE INTELLIGENCE"));
+    out.push_str(&workflow_header(
+        caps,
+        "EXPOSURE",
+        Some(crate::terminal::WorkflowMode::Passive),
+    ));
+    out.push('\n');
+    out.push('\n');
+    out.push_str(&section_heading(caps, "Findings"));
     out.push('\n');
     if report.exposures.is_empty() {
-        out.push_str(&paint(
-            color,
-            Style::Success,
-            "  no exposures reported by configured providers",
+        out.push('\n');
+        out.push_str(&format!(
+            "  {}\n",
+            paint(
+                color,
+                Style::Success,
+                "no exposures reported by configured providers"
+            )
         ));
-        out.push('\n');
-    }
-    for exposure in &report.exposures {
-        let title = format!(
-            "  {:<11} via {}",
-            exposure.exposure_type.as_str().to_ascii_uppercase(),
-            exposure.source
-        );
-        out.push_str(&paint(color, Style::Warning, &title));
-        out.push('\n');
-        if let Some(name) = &exposure.source_name {
-            out.push_str(&format!("    source      {name}\n"));
-        }
-        if !exposure.exposed_fields.is_empty() {
-            let fields: Vec<&str> = exposure
-                .exposed_fields
-                .iter()
-                .map(|field| field.as_str())
-                .collect();
-            let glyph = if ascii { "*" } else { "·" };
+    } else {
+        for exposure in &report.exposures {
+            out.push('\n');
             out.push_str(&format!(
-                "    exposed     {}\n",
-                fields.join(&format!(" {glyph} "))
+                "  {} {}\n",
+                paint(
+                    color,
+                    Style::Warning,
+                    &exposure.exposure_type.as_str().to_ascii_uppercase()
+                ),
+                paint(color, Style::Muted, &format!("via {}", exposure.source)),
             ));
-        }
-        if exposure.credential_material_exposed || exposure.session_material_exposed {
-            out.push_str(&paint(color, Style::Danger, "    credentials NOT RETAINED"));
+            if let Some(name) = &exposure.source_name {
+                out.push_str(&key_value(caps, "Source", name, 11));
+                out.push('\n');
+            }
+            if !exposure.exposed_fields.is_empty() {
+                let fields: Vec<&str> = exposure
+                    .exposed_fields
+                    .iter()
+                    .map(|field| field.as_str())
+                    .collect();
+                let glyph = if ascii { "*" } else { "·" };
+                out.push_str(&key_value(
+                    caps,
+                    "Exposed",
+                    &fields.join(&format!(" {glyph} ")),
+                    11,
+                ));
+                out.push('\n');
+            }
+            if exposure.credential_material_exposed || exposure.session_material_exposed {
+                out.push_str(&format!(
+                    "  {}\n",
+                    paint(color, Style::Error, "! credentials NOT RETAINED")
+                ));
+            }
+            if let Some(family) = &exposure.malware_family {
+                out.push_str(&key_value(caps, "Malware", family, 11));
+                out.push('\n');
+            }
+            out.push_str(&key_value(
+                caps,
+                "Confidence",
+                &format!("{}%", exposure.confidence),
+                11,
+            ));
             out.push('\n');
         }
-        if let Some(family) = &exposure.malware_family {
-            out.push_str(&format!("    malware     {family}\n"));
-        }
-        out.push_str(&format!("    confidence  {}%\n", exposure.confidence));
     }
-    out.push_str(&format!(
-        "  providers: {} checked, {} matched · secrets stored: 0\n",
+    out.push('\n');
+    let recap = format!(
+        "{} checked  ·  {} matched  ·  secrets stored: 0",
         report.accounting.providers_requested, report.accounting.exposures_found,
-    ));
+    );
+    out.push_str(&footer_block(caps, &paint(color, Style::Secondary, &recap)));
+    out.push('\n');
     out
 }
 

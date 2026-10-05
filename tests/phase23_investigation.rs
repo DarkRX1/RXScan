@@ -323,9 +323,20 @@ fn investigation_structured_output_is_clean_and_reconciles() {
     assert_eq!(kinds.last().unwrap(), "investigation_summary");
     assert_eq!(investigate::render_jsonl(&report), jsonl);
     // Human: bounded, no ANSI, truncation surfaced when present.
+    // Default passive is concise (footer only); operational detail lives
+    // in --explain but network visibility is never hidden when enabled.
     let human = investigate::render_human(&report, false, false, true);
     assert!(!human.contains('\x1b'));
-    assert!(human.contains("0 network scans"));
+    assert!(
+        human.contains("passive"),
+        "default keeps compact footer: {human}"
+    );
+    assert!(
+        !human.contains("0 network scans"),
+        "passive default omits operational line: {human}"
+    );
+    let explained = investigate::render_human_explain(&report, false, false, true);
+    assert!(explained.contains("0 network scans"));
 }
 
 #[test]

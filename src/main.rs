@@ -83,6 +83,12 @@ fn main() {
             std::process::exit(2);
         }
     };
+    // Accept a global `--color MODE` before the subcommand
+    // (`rxscan --color always search ...`): relocate color flags to the end
+    // so subcommand dispatch sees the workflow first. Color resolution
+    // scans all args and manual parsers accept `--color` anywhere, so the
+    // relocation preserves semantics (relative color-flag order kept).
+    let args = normalize_global_color(args);
     if args.get(1).is_some_and(|arg| arg == "diff") {
         run_diff(&args);
         return;
@@ -104,12 +110,14 @@ fn main() {
         return;
     }
     if args.get(1).is_some_and(|arg| arg == "capabilities") {
+        validate_color_flags("capabilities", &args);
         let json = args.iter().any(|arg| arg == "--json");
         let report = capabilities::probe();
         if json {
             out_line!("{}", serde_json::to_string_pretty(&report).unwrap());
         } else {
-            out!("{}", capabilities::render_human(&report));
+            let caps = resolve_human_caps(&args);
+            out!("{}", capabilities::render_human_caps(&report, caps));
         }
         return;
     }
@@ -156,43 +164,34 @@ fn main() {
         }
         return;
     }
-    // Compact RXScan identity for interactive human scans only. Computed
-    // before `cli` moves into the executor; printed only on the human
-    // stdout path below, never for JSONL streams or piped output (unless
-    // --color always forces interactive rendering).
-    let scan_mark: Option<String> = {
+    // Human capabilities resolve once from `--color` + TTY + environment.
+    // The scan report carries its own `RXSCAN / RECON` header; no separate
+    // startup mark is printed.
+    let scan_caps: rxscan::terminal::TerminalCapabilities = {
         let mode = match cli.color.as_deref() {
             Some("always") => rxscan::terminal::ColorMode::Always,
             Some("never") => rxscan::terminal::ColorMode::Never,
             _ => rxscan::terminal::ColorMode::Auto,
         };
         let tty = rxscan::terminal::stdout_is_tty();
-        if tty || mode == rxscan::terminal::ColorMode::Always {
-            let color =
-                rxscan::terminal::color_enabled(mode, rxscan::terminal::no_color_env(), tty);
-            Some(rxscan::terminal::startup_mark(color))
-        } else {
-            None
+        rxscan::terminal::TerminalCapabilities {
+            color: rxscan::terminal::color_enabled(mode, rxscan::terminal::no_color_env(), tty),
+            ascii: !rxscan::terminal::unicode_supported(),
+            width: rxscan::terminal::terminal_width(),
+            tty,
         }
     };
     match run::execute(cli) {
         Ok(report) => {
             // If JSONL went to stdout via --format jsonl, the JSONL is already
             // on stdout; still print the human summary to stderr to keep
-            // stdout pure JSONL.
+            // stdout pure JSONL. Default human output is concise and
+            // findings-first; `--explain` (plan) and JSONL carry engineering
+            // detail. No tutorial footer after every invocation.
             if report.jsonl_bytes > 0 && report.output_path.is_none() {
-                err!("{}", run::human_summary(&report));
+                err!("{}", run::human_summary_caps(&report, scan_caps, None));
             } else {
-                if let Some(mark) = &scan_mark {
-                    out_line!("{mark}");
-                }
-                out_line!("{}", run::human_summary(&report));
-                if report.output_path.is_none() {
-                    out_line!("Run with --explain to inspect the effective scan plan.");
-                    out_line!(
-                        "Service probing uses bounded native handshakes (no auth); use --output <path> for typed JSONL."
-                    );
-                }
+                out_line!("{}", run::human_summary_caps(&report, scan_caps, None));
             }
         }
         Err(error) => {
@@ -202,10 +201,91 @@ fn main() {
     }
 }
 
+/// Relocate `--color` flags to the end of `args` so a global color flag
+/// may precede the subcommand. Preserves the relative order of color
+/// flags; all other args keep their order.
+fn normalize_global_color(args: Vec<String>) -> Vec<String> {
+    let mut rest: Vec<String> = Vec::with_capacity(args.len());
+    let mut colors: Vec<String> = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--color" {
+            colors.push(arg.clone());
+            if let Some(next) = args.get(index + 1) {
+                if !next.starts_with('-') {
+                    colors.push(next.clone());
+                    index += 1;
+                }
+            }
+        } else if arg.starts_with("--color=") {
+            colors.push(arg.clone());
+        } else {
+            rest.push(arg.clone());
+        }
+        index += 1;
+    }
+    // Program name stays first; color flags trail the command.
+    if rest.is_empty() {
+        return args;
+    }
+    let mut out = Vec::with_capacity(args.len());
+    out.push(rest[0].clone());
+    out.extend(rest.into_iter().skip(1));
+    out.extend(colors);
+    out
+}
+
+/// Strict `--color` validation for manual subcommand paths: only `auto`,
+/// `always`, and `never` are accepted. Anything else (e.g. `--color green`)
+/// is a usage error (exit 2). `--color` selects *whether* to style, never
+/// the palette; the theme owns the palette internally.
+fn validate_color_flags(command: &str, args: &[String]) {
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if arg == "--color" {
+            if !args
+                .get(index + 1)
+                .is_some_and(|value| matches!(value.as_str(), "auto" | "always" | "never"))
+            {
+                err!("rxscan {command}: --color requires one of auto, always, never");
+                std::process::exit(2);
+            }
+            index += 1;
+        } else if let Some(value) = arg.strip_prefix("--color=") {
+            if !matches!(value, "auto" | "always" | "never") {
+                err!("rxscan {command}: --color must be one of auto, always, never");
+                std::process::exit(2);
+            }
+        }
+        index += 1;
+    }
+}
+
+/// Resolve human-output capabilities from `--color` + environment.
+///
+/// Human output uses ANSI only when appropriate: `--color always` forces
+/// it, `--color never` disables it, `auto` (default) enables it on an
+/// interactive TTY unless `NO_COLOR` is set. Machine output (JSON/JSONL)
+/// never passes through here.
+fn resolve_human_caps(args: &[String]) -> rxscan::terminal::TerminalCapabilities {
+    let mode = rxscan::terminal::parse_color_mode(args);
+    let tty = rxscan::terminal::stdout_is_tty();
+    rxscan::terminal::TerminalCapabilities {
+        color: rxscan::terminal::color_enabled(mode, rxscan::terminal::no_color_env(), tty),
+        ascii: !rxscan::terminal::unicode_supported(),
+        width: rxscan::terminal::terminal_width(),
+        tty,
+    }
+}
+
 /// Print the compact RXScan startup mark for interactive human output.
 ///
-/// Hidden for `--json`/`--jsonl` and when stdout is not a TTY unless the
-/// operator forced color with `--color always`.
+/// Legacy helper; new renderers carry their own `RXSCAN / <WORKFLOW>`
+/// header so this is no longer emitted on primary workflows. Kept for
+/// compatibility with leaf diagnostics that have no dedicated header yet.
+#[allow(dead_code)]
 fn maybe_search_startup_mark(args: &[String], machine_output: bool) {
     if machine_output {
         return;
@@ -434,8 +514,11 @@ fn run_search_stats(args: &[String], offset: usize) {
         );
         return;
     }
-    maybe_search_startup_mark(args, false);
-    out_line!("RXScan Search Corpus");
+    let caps = resolve_human_caps(args);
+    out_line!(
+        "{}",
+        rxscan::terminal::workflow_header(caps, "SEARCH CORPUS", None)
+    );
     out_line!("");
     out_line!("Providers loaded       {}", pack.providers.len());
     out_line!("Enabled                {enabled}");
@@ -579,8 +662,11 @@ fn run_search_lint(args: &[String], offset: usize) {
     if json {
         out_line!("{}", serde_json::to_string_pretty(&report).unwrap());
     } else {
-        maybe_search_startup_mark(args, false);
-        out_line!("RXScan Corpus Lint");
+        let caps = resolve_human_caps(args);
+        out_line!(
+            "{}",
+            rxscan::terminal::workflow_header(caps, "CORPUS LINT", None)
+        );
         out_line!("");
         out_line!("providers checked    {}", report.providers_checked);
         out_line!("files checked        {}", report.files_checked);
@@ -666,7 +752,6 @@ fn run_search(args: &[String]) {
                     })
             })
             .collect();
-        maybe_search_startup_mark(args, json);
         if json {
             let providers = shown
                 .iter()
@@ -693,6 +778,14 @@ fn run_search(args: &[String]) {
                 .unwrap()
             );
         } else {
+            let caps = resolve_human_caps(args);
+            out_line!(
+                "{}",
+                rxscan::terminal::workflow_header(caps, "SEARCH PROVIDERS", None)
+            );
+            out_line!("");
+            // Tab-separated rows stay machine-greppable; the header carries
+            // the visual identity and honors --color.
             out_line!("ID\tNAME\tCATEGORY\tCONTACT\tAUTH\tHEALTH");
             for provider in shown {
                 out_line!(
@@ -833,7 +926,7 @@ fn run_search(args: &[String]) {
             }
             "--help" | "-h" => {
                 out_line!(
-                    "rxscan search --username NAME [--providers IDS] [--exclude-provider IDS] [--category CATEGORIES] [--deadline 30s] [--project-db PATH] [--all] [--color MODE] [--json|--jsonl] [--explain]\nrxscan search username NAME [same options]\nrxscan search providers [--json] [--health STATE] [--category CAT] [--stale] [--color MODE]\nrxscan search stats [--json] [--color MODE]\nrxscan search lint [--json] [--corpus-root DIR] [--color MODE]\nrxscan --username NAME [same options]"
+                    "RXSCAN\nReconnaissance / Evidence Engine\n\nUSAGE\n  rxscan search --username NAME [options]\n  rxscan search username NAME [options]\n\nWORKFLOWS\n  search         Public-source search\n\nEXAMPLES\n  rxscan search --username exampleuser\n  rxscan search --username exampleuser --all\n\nOPTIONS\n  --username NAME            Target username (or `search username NAME`)\n  --providers IDS            Comma-separated provider allowlist\n  --exclude-provider IDS     Comma-separated provider denylist\n  --category CATEGORIES      Comma-separated category filter\n  --deadline 30s             Per-search deadline\n  --project-db PATH          Persist the report to a project database\n  --all                      Include negative (not-found) results\n  --color MODE               auto (TTY only), always, or never\n  --json | --jsonl           Machine output (never styled)\n  --explain                  Show the search plan without contacting providers\n\nLEAF COMMANDS\n  rxscan search providers [--json] [--health STATE] [--category CAT] [--stale] [--color MODE]\n  rxscan search stats [--json] [--color MODE]\n  rxscan search lint [--json] [--corpus-root DIR] [--color MODE]\n  rxscan --username NAME [same options]"
                 );
                 return;
             }
@@ -988,9 +1081,7 @@ fn run_search(args: &[String]) {
     } else if jsonl {
         out!("{}", rxscan::search::render_username_jsonl(&report));
     } else {
-        let mode = rxscan::terminal::parse_color_mode(args);
-        let tty = rxscan::terminal::stdout_is_tty();
-        let color = rxscan::terminal::color_enabled(mode, rxscan::terminal::no_color_env(), tty);
+        let caps = resolve_human_caps(args);
         let rows = search_report_rows(&report);
         let summary = rxscan::terminal::SearchSummary {
             requested: report.accounting.providers_requested,
@@ -1002,14 +1093,13 @@ fn run_search(args: &[String]) {
         };
         out!(
             "{}",
-            rxscan::terminal::render_search_report(
+            rxscan::terminal::render_search_report_caps(
                 &report.seed.display_value,
                 report.accounting.providers_requested,
                 &rows,
-                summary,
+                &summary,
                 show_all,
-                color,
-                !rxscan::terminal::unicode_supported(),
+                caps,
             )
         );
     }
@@ -1967,6 +2057,7 @@ fn run_investigate(args: &[String]) {
     // Transform listing: `rxscan investigate transforms [--json]`.
     if args.get(2).is_some_and(|arg| arg == "transforms") {
         let json = args[3..].iter().any(|a| a == "--json");
+        validate_color_flags("investigate transforms", args);
         for arg in &args[3..] {
             if arg != "--json" && !arg.starts_with("--color") {
                 err!("rxscan investigate transforms: only --json and --color are supported");
@@ -1980,8 +2071,11 @@ fn run_investigate(args: &[String]) {
                 serde_json::to_string_pretty(&registry.infos()).unwrap()
             );
         } else {
-            maybe_search_startup_mark(args, false);
-            out_line!("RXScan Investigation Transforms");
+            let caps = resolve_human_caps(args);
+            out_line!(
+                "{}",
+                rxscan::terminal::workflow_header(caps, "INVESTIGATE TRANSFORMS", None)
+            );
             out_line!("");
             for info in registry.infos() {
                 out_line!(
@@ -2295,7 +2389,7 @@ fn run_investigate(args: &[String]) {
             }
             "--help" | "-h" => {
                 out_line!(
-                    "rxscan investigate --username NAME [--depth 0-{}] [--deadline 60s] [--max-entities N] [--max-relationships N] [--max-http-requests N] [--max-dns-queries N] [--max-providers N] [--providers IDS] [--exclude-provider IDS] [--category CATS] [--project-db PATH] [--exposure] [--exposure-dataset PATH] [--network] [--scope CIDR-OR-HOST] [--exclude CIDR-OR-HOST] [--max-network-pivots N] [--all] [--color MODE] [--json|--jsonl] [--explain]\nrxscan investigate --domain NAME [same options]\nrxscan investigate --url URL [same options]\nrxscan investigate transforms [--json]\n\nPassive by default: never port scans discovered infrastructure. DNS queries are DnsQuery, not DirectNetwork. Exposure lookups that send identifiers to third parties run only with --exposure. Direct network pivots run only with explicit --network and valid --scope.",
+                    "RXSCAN\nReconnaissance / Evidence Engine\n\nUSAGE\n  rxscan investigate --username NAME [options]\n  rxscan investigate --domain NAME [options]\n  rxscan investigate --url URL [options]\n\nWORKFLOWS\n  investigate    Evidence investigation\n\nEXAMPLES\n  rxscan investigate --username exampleuser\n  rxscan investigate --username exampleuser --depth 3\n\nOPTIONS\n  --depth 0-{}               Graph-transform depth (default 2)\n  --deadline 60s             Global investigation deadline\n  --max-entities N           Entity budget\n  --max-relationships N      Relationship budget\n  --max-http-requests N      HTTP budget\n  --max-dns-queries N        DNS budget\n  --providers IDS            Provider allowlist\n  --project-db PATH          Persist to a project database\n  --exposure                 Opt-in defensive exposure enrichment\n  --network --scope CIDR     Explicit authorized network pivots\n  --all                      Show complete (untruncated) detail\n  --color MODE               auto (TTY only), always, or never\n  --json | --jsonl           Machine output (never styled)\n  --explain                  Show the plan without contacting anything\n\nPassive by default: never port scans discovered infrastructure. Exposure lookups run only with --exposure. Network pivots run only with explicit --network and valid --scope.",
                     inv::MAX_DEPTH
                 );
                 return;
@@ -2403,19 +2497,8 @@ fn run_investigate(args: &[String]) {
     } else if jsonl {
         out!("{}", inv::render_jsonl(&report));
     } else {
-        maybe_search_startup_mark(args, false);
-        let mode = rxscan::terminal::parse_color_mode(args);
-        let tty = rxscan::terminal::stdout_is_tty();
-        let color = rxscan::terminal::color_enabled(mode, rxscan::terminal::no_color_env(), tty);
-        out!(
-            "{}",
-            inv::render_human(
-                &report,
-                show_all,
-                color,
-                !rxscan::terminal::unicode_supported()
-            )
-        );
+        let caps = resolve_human_caps(args);
+        out!("{}", inv::render_human_caps(&report, show_all, caps));
     }
 }
 
@@ -2530,7 +2613,7 @@ fn run_exposure_cli(args: &[String]) {
             }
             "--help" | "-h" => {
                 out_line!(
-                    "rxscan exposure --email ADDR|--username NAME|--domain NAME [--dataset PATH] [--deadline 30s] [--project-db PATH] [--color MODE] [--json|--jsonl] [--explain]\n\nDefensive exposure lookup. External providers that receive identifiers run only here (explicit opt-in), never during ordinary passive investigation. Secrets are never retained or displayed."
+                    "RXSCAN\nReconnaissance / Evidence Engine\n\nUSAGE\n  rxscan exposure --email ADDR [options]\n  rxscan exposure --username NAME [options]\n  rxscan exposure --domain NAME [options]\n\nWORKFLOWS\n  exposure       Defensive exposure lookup\n\nEXAMPLES\n  rxscan exposure --username exampleuser\n\nOPTIONS\n  --dataset PATH             Operator-supplied local dataset (sends nothing)\n  --deadline 30s             Lookup deadline\n  --project-db PATH          Persist normalized metadata (never secrets)\n  --color MODE               auto (TTY only), always, or never\n  --json | --jsonl           Machine output (never styled)\n  --explain                  Disclose identifier-sending before any contact\n\nDefensive exposure lookup. External providers that receive identifiers run only here (explicit opt-in), never during ordinary passive investigation. Secrets are never retained or displayed."
                 );
                 return;
             }
@@ -2725,13 +2808,7 @@ fn run_exposure_cli(args: &[String]) {
     } else if jsonl {
         out!("{}", exp::render_jsonl(&report));
     } else {
-        let mode = rxscan::terminal::parse_color_mode(args);
-        let tty = rxscan::terminal::stdout_is_tty();
-        let color = rxscan::terminal::color_enabled(mode, rxscan::terminal::no_color_env(), tty);
-        maybe_search_startup_mark(args, false);
-        out!(
-            "{}",
-            exp::render_human(&report, color, !rxscan::terminal::unicode_supported())
-        );
+        let caps = resolve_human_caps(args);
+        out!("{}", exp::render_human_caps(&report, caps));
     }
 }

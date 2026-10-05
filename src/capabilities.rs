@@ -163,15 +163,259 @@ pub fn probe() -> Capabilities {
 }
 
 pub fn render_human(capabilities: &Capabilities) -> String {
-    let mut out = format!("Capabilities ({})\n", capabilities.platform);
-    for item in &capabilities.entries {
-        out.push_str(&format!(
-            "  {:<14} {} ({})\n",
-            item.name,
-            if item.available { "yes" } else { "no" },
-            item.detail
-        ));
+    render_human_caps(capabilities, crate::terminal::TerminalCapabilities::plain())
+}
+
+/// Human label for a stable capability ID.
+///
+/// Stable IDs (e.g. `raw_syn_ipv6`) stay unchanged for machine output and
+/// internal logic; human output prefers these labels (e.g. `Raw SYN · IPv6`).
+pub fn human_label(name: &str) -> String {
+    match name {
+        "connect_scan" => "TCP connect scanning".to_owned(),
+        "raw_syn" => "Raw SYN · IPv4".to_owned(),
+        "raw_syn_ipv6" => "Raw SYN · IPv6".to_owned(),
+        "arp_active" => "ARP discovery".to_owned(),
+        "ndp" => "IPv6 neighbor discovery".to_owned(),
+        "ipv6" => "IPv6 support".to_owned(),
+        "raw_icmp" => "Raw ICMP".to_owned(),
+        "ping_sockets" => "Ping sockets".to_owned(),
+        "udp" => "UDP discovery".to_owned(),
+        "tls" => "TLS observation".to_owned(),
+        "search_http" => "Search HTTP client".to_owned(),
+        "search_json" => "Search JSON output".to_owned(),
+        "search_jsonl" => "Search JSONL stream".to_owned(),
+        "search_project_db" => "Search project database".to_owned(),
+        "search_username" => "Username search".to_owned(),
+        "username_providers" => "Username providers".to_owned(),
+        "username_providers_fixture_backed" => "Fixture-backed providers".to_owned(),
+        "fingerprints" => "Service fingerprints".to_owned(),
+        "project_db" => "Project database".to_owned(),
+        "investigation" => "Investigation workflow".to_owned(),
+        "investigation_username_seed" => "Username seed".to_owned(),
+        "investigation_account_transforms" => "Account transforms".to_owned(),
+        "investigation_url_transforms" => "URL transforms".to_owned(),
+        "investigation_dns_transforms" => "DNS transforms".to_owned(),
+        "investigation_project_persistence" => "Project persistence".to_owned(),
+        "investigation_transforms" => "Transform registry".to_owned(),
+        "investigation_direct_network" => "Direct network".to_owned(),
+        "investigation_network_bridge" => "Network bridge".to_owned(),
+        "exposure" => "Exposure lookup".to_owned(),
+        "exposure_local_dataset" => "Local exposure dataset".to_owned(),
+        "exposure_http_api" => "Exposure HTTP API".to_owned(),
+        "exposure_secret_retention" => "Secret retention".to_owned(),
+        _ => name
+            .split('_')
+            .map(|word| {
+                let mut chars = word.chars();
+                match chars.next() {
+                    Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+                    None => String::new(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
     }
+}
+
+/// Logical human group for a stable capability ID.
+///
+/// Groups (`NETWORK`, `SEARCH`, `INVESTIGATION`, `INTELLIGENCE`, `PROJECT`)
+/// are presentation-only; machine output keeps the flat sorted ID list and
+/// no capability appears in two groups.
+pub fn human_group(name: &str) -> &'static str {
+    match name {
+        "connect_scan" | "raw_syn" | "raw_syn_ipv6" | "arp_active" | "ndp" | "ipv6"
+        | "raw_icmp" | "ping_sockets" | "udp" | "tls" => "NETWORK",
+        "search_http"
+        | "search_json"
+        | "search_jsonl"
+        | "search_username"
+        | "username_providers"
+        | "username_providers_fixture_backed" => "SEARCH",
+        "investigation"
+        | "investigation_username_seed"
+        | "investigation_account_transforms"
+        | "investigation_url_transforms"
+        | "investigation_dns_transforms"
+        | "investigation_transforms"
+        | "investigation_direct_network"
+        | "investigation_network_bridge" => "INVESTIGATION",
+        "fingerprints"
+        | "exposure"
+        | "exposure_local_dataset"
+        | "exposure_http_api"
+        | "exposure_secret_retention" => "INTELLIGENCE",
+        "project_db" | "search_project_db" | "investigation_project_persistence" => "PROJECT",
+        _ => "OTHER",
+    }
+}
+
+/// Capabilities-aware runtime report: workflow header, `RUNTIME`
+/// metadata, grouped human `NETWORK` / `SEARCH` / `INVESTIGATION` /
+/// `INTELLIGENCE` / `PROJECT` tables with human labels, and a summary bar.
+/// Styled only when `caps.color` is set; machine output never passes
+/// through here. Stable IDs stay unchanged for machine output.
+pub fn render_human_caps(
+    capabilities: &Capabilities,
+    caps: crate::terminal::TerminalCapabilities,
+) -> String {
+    use crate::terminal::Style;
+    use crate::terminal::{
+        Table, footer_block, format_count, key_value, paint, section_heading, workflow_header,
+    };
+    let color = caps.color;
+    let mut out = String::new();
+    out.push_str(&workflow_header(caps, "CAPABILITIES", None));
+    out.push('\n');
+    out.push('\n');
+    out.push_str(&section_heading(caps, "Runtime"));
+    out.push('\n');
+    out.push('\n');
+    out.push_str(&key_value(
+        caps,
+        "Platform",
+        &paint(color, Style::Identifier, &capabilities.platform),
+        9,
+    ));
+    out.push('\n');
+    const GROUPS: &[&str] = &[
+        "NETWORK",
+        "SEARCH",
+        "INVESTIGATION",
+        "INTELLIGENCE",
+        "PROJECT",
+    ];
+    let compact = caps.width_mode() == crate::terminal::WidthMode::Compact;
+    for group in GROUPS {
+        let items: Vec<&CapabilityEntry> = capabilities
+            .entries
+            .iter()
+            .filter(|item| human_group(&item.name) == *group)
+            .collect();
+        if items.is_empty() {
+            continue;
+        }
+        out.push('\n');
+        out.push_str(&section_heading(caps, group));
+        out.push('\n');
+        out.push('\n');
+        if compact {
+            for item in items {
+                let status = if item.available {
+                    "AVAILABLE"
+                } else {
+                    "UNAVAILABLE"
+                };
+                let style = if item.available {
+                    Style::Success
+                } else {
+                    Style::Muted
+                };
+                out.push_str(&format!(
+                    "  {} {}\n",
+                    paint(color, style, status),
+                    paint(color, Style::Identifier, &human_label(&item.name)),
+                ));
+                out.push_str(&format!("    Detail  {}\n", item.detail));
+            }
+        } else {
+            let mut table = Table::new(&["CAPABILITY", "STATUS", "DETAIL"]);
+            table.max_widths = vec![34, 12, 48];
+            for item in items {
+                let status = if item.available {
+                    "AVAILABLE"
+                } else {
+                    "UNAVAILABLE"
+                };
+                let style = if item.available {
+                    Style::Success
+                } else {
+                    Style::Muted
+                };
+                table.cells(vec![
+                    paint(color, Style::Identifier, &human_label(&item.name)),
+                    paint(color, style, status),
+                    item.detail.clone(),
+                ]);
+            }
+            out.push_str(&table.render(caps));
+            out.push('\n');
+        }
+    }
+    // Any future capability outside the known groups renders once under
+    // OTHER so nothing is ever hidden; never duplicates grouped items.
+    let other: Vec<&CapabilityEntry> = capabilities
+        .entries
+        .iter()
+        .filter(|item| human_group(&item.name) == "OTHER")
+        .collect();
+    if !other.is_empty() {
+        out.push('\n');
+        out.push_str(&section_heading(caps, "Other"));
+        out.push('\n');
+        out.push('\n');
+        if compact {
+            for item in other {
+                let status = if item.available {
+                    "AVAILABLE"
+                } else {
+                    "UNAVAILABLE"
+                };
+                let style = if item.available {
+                    Style::Success
+                } else {
+                    Style::Muted
+                };
+                out.push_str(&format!(
+                    "  {} {}\n",
+                    paint(color, style, status),
+                    paint(color, Style::Identifier, &human_label(&item.name)),
+                ));
+                out.push_str(&format!("    Detail  {}\n", item.detail));
+            }
+        } else {
+            let mut table = Table::new(&["CAPABILITY", "STATUS", "DETAIL"]);
+            table.max_widths = vec![34, 12, 48];
+            for item in other {
+                let status = if item.available {
+                    "AVAILABLE"
+                } else {
+                    "UNAVAILABLE"
+                };
+                let style = if item.available {
+                    Style::Success
+                } else {
+                    Style::Muted
+                };
+                table.cells(vec![
+                    paint(color, Style::Identifier, &human_label(&item.name)),
+                    paint(color, style, status),
+                    item.detail.clone(),
+                ]);
+            }
+            out.push_str(&table.render(caps));
+            out.push('\n');
+        }
+    }
+    out.push('\n');
+    let available = capabilities
+        .entries
+        .iter()
+        .filter(|item| item.available)
+        .count();
+    let total = capabilities.entries.len();
+    let recap = format!(
+        "{}  ·  {}",
+        paint(color, Style::Success, &format!("{available} available")),
+        paint(
+            color,
+            Style::Secondary,
+            &format!("{} total", format_count(total)),
+        ),
+    );
+    out.push_str(&footer_block(caps, &recap));
+    out.push('\n');
     out
 }
 

@@ -707,12 +707,21 @@ fn udp_runs_alongside_tcp_with_transport_aware_human_output() {
     assert_eq!(report.udp_totals.open, 1);
     assert_eq!(report.udp_totals.unscanned, 0);
     let human = rxscan::run::human_summary(&report);
-    assert!(human.contains("UDP discovery ("), "human shows UDP work");
+    // Default is concise: UDP opens show, telemetry lives in --explain.
     assert!(
         human.contains(&format!("{port}/udp")),
         "human lists the port"
     );
     assert!(human.contains("open"), "human shows open state");
+    assert!(
+        !human.contains("UDP discovery ("),
+        "default must not duplicate UDP accounting: {human}"
+    );
+    let explained = rxscan::run::human_summary_explain(&report);
+    assert!(
+        explained.contains("UDP discovery ("),
+        "explain shows UDP work"
+    );
     // Machine agrees: the completed ledger matches the human counts.
     let payloads = read_jsonl_payloads(&path);
     let completed = payloads

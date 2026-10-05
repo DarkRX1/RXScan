@@ -1563,11 +1563,14 @@ fn write_outputs<W: std::io::Write>(
 /// Human summary for non-JSONL runs (service table prioritizes classified
 /// services with product hints; closed/filtered detail lives in JSONL).
 ///
-/// Scanner work comes first: TCP totals and identified services are rendered
-/// from the same typed [`crate::tcp_discovery::TcpScanTotals`] / `ServiceIdentified` state that
-/// JSONL serializes, so human counts always equal machine counts.
-/// Scheduler task accounting is demoted to a trailing `Diagnostics` block
-/// (full task/budget detail remains in `--explain` and JSONL).
+/// Designed interface: `RXSCAN / RECON` header, `TARGET` metadata, `PORTS`
+/// table, `SCAN SUMMARY` counts, `DIAGNOSTICS` accounting, and a bottom
+/// summary bar. Scanner work comes first: TCP totals and identified
+/// services render from the same typed [`crate::tcp_discovery::TcpScanTotals`]
+/// / `ServiceIdentified` state that JSONL serializes, so human counts
+/// always equal machine counts. Scheduler task accounting is demoted to a
+/// trailing `Diagnostics` block (full task/budget detail remains in
+/// `--explain` and JSONL).
 pub fn human_summary(report: &RunReport) -> String {
     human_summary_with_opens(report, None)
 }
@@ -1577,14 +1580,81 @@ pub fn human_summary_with_opens(
     report: &RunReport,
     module_outputs: Option<&[(crate::execution::TaskId, crate::execution::ModuleOutput)]>,
 ) -> String {
-    let scheduler = &report.scheduler_report;
-    let summary = match module_outputs {
-        Some(outputs) if !outputs.is_empty() => crate::service_probe::human_service_table(outputs),
-        _ => report.open_ports_summary.clone(),
+    human_summary_caps(
+        report,
+        crate::terminal::TerminalCapabilities::plain(),
+        module_outputs,
+    )
+}
+
+/// Capabilities-aware scan renderer: styled human output when
+/// `caps.color` is set, plain fallback otherwise. Machine output never
+/// passes through here.
+///
+/// Default human output is findings-first and concise: header, `TARGET`,
+/// `PORTS`, `SCAN SUMMARY`, concise exceptional warnings, and a footer
+/// recap. Legacy diagnostic prose (`Duration:`, `TCP discovery …`,
+/// `Services: …`, `DIAGNOSTICS` telemetry) lives only in the explain
+/// rendering ([`human_explain_caps`]); see `--explain` and JSONL.
+pub fn human_summary_caps(
+    report: &RunReport,
+    caps: crate::terminal::TerminalCapabilities,
+    module_outputs: Option<&[(crate::execution::TaskId, crate::execution::ModuleOutput)]>,
+) -> String {
+    human_summary_inner(report, caps, module_outputs, false)
+}
+
+/// Detailed operational rendering for `--explain`.
+///
+/// Contains everything default shows plus the engineering detail:
+/// termination, task admission, retry/evidence budgets, error categories,
+/// fingerprints, graph/certificates, deadlines, wall/overrun/cleanup,
+/// JSONL bytes, TCP accounting, services line, legacy `Duration:`, scan
+/// modes, fallback reasons, and effective plan. The model is unchanged;
+/// only presentation differs.
+pub fn human_summary_explain(report: &RunReport) -> String {
+    human_summary_with_opens_explain(report, None)
+}
+
+/// Detailed rendering with fresh module outputs (tests).
+pub fn human_summary_with_opens_explain(
+    report: &RunReport,
+    module_outputs: Option<&[(crate::execution::TaskId, crate::execution::ModuleOutput)]>,
+) -> String {
+    human_summary_explain_caps(
+        report,
+        crate::terminal::TerminalCapabilities::plain(),
+        module_outputs,
+    )
+}
+
+/// Capabilities-aware detailed rendering for `--explain`.
+pub fn human_summary_explain_caps(
+    report: &RunReport,
+    caps: crate::terminal::TerminalCapabilities,
+    module_outputs: Option<&[(crate::execution::TaskId, crate::execution::ModuleOutput)]>,
+) -> String {
+    human_summary_inner(report, caps, module_outputs, true)
+}
+
+fn human_summary_inner(
+    report: &RunReport,
+    caps: crate::terminal::TerminalCapabilities,
+    module_outputs: Option<&[(crate::execution::TaskId, crate::execution::ModuleOutput)]>,
+    explain: bool,
+) -> String {
+    use crate::terminal::{
+        Align, Table, WorkflowMode, error_block, footer_block, format_count, format_count_u64,
+        humanize_duration_ms, key_value, paint, section_heading, style_for_port_state,
+        warning_block, workflow_header,
     };
-    // Scanner-work section derives from typed execution state. When the
+    use crate::terminal::{Style, Theme};
+    let color = caps.color;
+    let mode = caps.width_mode();
+    let scheduler = &report.scheduler_report;
+    // Scanner-work state derives from typed execution state. When the
     // caller supplies fresher outputs (tests), re-aggregate from those so
-    // the numbers still match the table above; otherwise use the report's
+    // the numbers still match the table; otherwise use the report's
     // stored totals (computed from the same outputs at execution time).
     let (tcp_totals, services_identified) = match module_outputs {
         Some(outputs) if !outputs.is_empty() => (
@@ -1597,193 +1667,657 @@ pub fn human_summary_with_opens(
     let scan_section = if tcp_line.is_empty() {
         "TCP discovery: not attempted; no ports were scanned.".to_owned()
     } else {
-        tcp_line
+        tcp_line.clone()
     };
     let services_line = format!("Services: {services_identified} identified");
-    // UDP block appears only when the operator requested UDP discovery.
-    // Like TCP, its lines require a completed scan; a requested-but-empty
-    // ledger states that truthfully instead of implying results.
-    let udp_section = if report.plan.udp_requested {
-        let (udp_totals, udp_table) = match module_outputs {
-            Some(outputs) if !outputs.is_empty() => (
-                crate::udp_discovery::summarize_udp_scans(outputs),
-                crate::udp_discovery::human_udp_table(outputs),
-            ),
-            _ => (report.udp_totals.clone(), report.udp_summary.clone()),
-        };
-        let totals_line = crate::udp_discovery::human_udp_totals_line(&udp_totals);
-        if totals_line.is_empty() {
-            // Precise accounting instead of a bare "no scan completed"
-            // (Priority 4): surface the truncation reason + admission state
-            // so a deadline/budget cut is distinguishable from never-queued.
-            format!(
-                "\n\nUDP discovery: requested but no scan completed (requested: UDP discovery, attempted: {}, remaining: {}, reason: {})",
-                udp_totals.ports_attempted, udp_totals.unscanned, scheduler.termination,
-            )
-        } else if udp_table.is_empty() {
-            format!("\n\n{totals_line}\n\nNo open UDP ports observed.")
+
+    let mut out = String::new();
+    // Header ------------------------------------------------------------
+    out.push_str(&workflow_header(caps, "RECON", None));
+    out.push('\n');
+
+    // TARGET ------------------------------------------------------------
+    out.push('\n');
+    out.push_str(&section_heading(caps, "Target"));
+    out.push('\n');
+    out.push('\n');
+    let hosts = report
+        .plan
+        .targets
+        .iter()
+        .map(|target| target.original_input.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let host_display = if hosts.is_empty() {
+        "-".to_owned()
+    } else {
+        hosts
+    };
+    out.push_str(&key_value(
+        caps,
+        "Host",
+        &paint(color, Style::Identifier, &host_display),
+        9,
+    ));
+    out.push('\n');
+    out.push_str(&key_value(
+        caps,
+        "Profile",
+        &format!(
+            "Level {} · {}",
+            paint(color, Style::Value, &report.plan.level.to_string()),
+            report.plan.speed
+        ),
+        9,
+    ));
+    out.push('\n');
+    out.push_str(&key_value(
+        caps,
+        "Duration",
+        &paint(
+            color,
+            Style::Value,
+            &humanize_duration_ms(report.duration_ms),
+        ),
+        9,
+    ));
+    out.push('\n');
+    // Duration renders exactly once in the main body (humanized). The
+    // footer recap repeats it as compact summary context; the legacy
+    // `Duration: <ms>ms` telemetry lives only in `--explain`.
+    // (No duplicate duration line here.)
+
+    // PORTS -------------------------------------------------------------
+    out.push('\n');
+    out.push_str(&section_heading(caps, "Ports"));
+    out.push('\n');
+    let port_rows = scan_port_rows(report, module_outputs);
+    if port_rows.is_empty() {
+        out.push('\n');
+        if tcp_totals.completed_tasks > 0 {
+            out.push_str(&format!(
+                "  {}\n",
+                paint(color, Style::Muted, "No open TCP ports observed.")
+            ));
         } else {
-            format!("\n\n{totals_line}\n\n{udp_table}")
+            out.push_str(&format!(
+                "  {}\n",
+                paint(
+                    color,
+                    Style::Muted,
+                    "No TCP port discovery was completed; no ports were scanned."
+                )
+            ));
+        }
+    } else if mode == crate::terminal::WidthMode::Compact {
+        out.push('\n');
+        for row in &port_rows {
+            let state_label = row.state.to_ascii_uppercase();
+            out.push_str(&format!(
+                "  {}  {}\n",
+                paint(color, Style::Identifier, &row.port_label),
+                paint(color, style_for_port_state(&row.state), &state_label),
+            ));
+            out.push_str(&format!("    Service    {}\n", row.service));
+            out.push_str(&format!("    Version    {}\n", row.version));
         }
     } else {
-        String::new()
-    };
-    let duration_line = format!("Duration: {}ms", report.duration_ms);
-    let header = format!(
-        "RXScan\n\nTarget: {}\nWorkflow: {}\nLevel: {}\nSpeed: {}\n\n{}\n\n{scan_section}\n{services_line}{udp_section}\n{duration_line}",
-        report
-            .plan
-            .targets
-            .iter()
-            .map(|target| target.original_input.as_str())
-            .collect::<Vec<_>>()
-            .join(", "),
-        report.plan.goal,
-        report.plan.level,
-        report.plan.speed,
-        summary
-    );
-    // Structured termination (P6): budget/deadline truncation is a normal
-    // bounded state with exact accounting, never an internal failure.
-    let termination_line = match scheduler.termination {
-        crate::execution::TerminationReason::Completed => "Termination: completed".to_owned(),
-        ref reason => format!(
-            "Termination: {reason} (truncated; partial evidence preserved: {})",
-            if report.jsonl_bytes > 0 || !scheduler.completed.is_empty() {
-                "yes"
-            } else {
-                "no completed tasks"
-            }
-        ),
-    };
-    let tasks_line = format!(
-        "  tasks admitted: {}, completed: {}, failed: {}, cancelled: {}, timed out: {}, skipped: {}, not admitted: {}",
-        scheduler.tasks_admitted,
-        scheduler.completed.len(),
-        scheduler.failed.len(),
-        scheduler.cancelled.len(),
-        scheduler.timed_out.len(),
-        scheduler.skipped.len(),
-        scheduler.tasks_not_admitted,
-    );
-    // Retry accounting (P7): budget configured vs consumed + by module.
-    let mut retry_parts = vec![format!(
-        "retry budget {}/{}",
-        scheduler.retries_consumed, report.plan.budgets.max_retries
-    )];
-    let mut retry_modules: Vec<_> = scheduler.retries_by_module.iter().collect();
-    retry_modules.sort();
-    for (module, count) in retry_modules.iter().take(8) {
-        retry_parts.push(format!("{module}={count}"));
+        out.push('\n');
+        // Wide and normal terminals show the full PORT / STATE / SERVICE /
+        // VERSION table (version truncates to fit); compact terminals fall
+        // back to vertical blocks so nothing is lost.
+        let mut table = Table::new(&["PORT", "STATE", "SERVICE", "VERSION"]);
+        // Right-align nothing; keep stable left alignment.
+        let _ = Align::Left;
+        table.max_widths = vec![10, 10, 16, 40];
+        for row in &port_rows {
+            let port_cell = paint(color, Style::Identifier, &row.port_label);
+            let state_cell = paint(
+                color,
+                style_for_port_state(&row.state),
+                &row.state.to_ascii_uppercase(),
+            );
+            let service_cell = row.service.clone();
+            table.cells(vec![
+                port_cell,
+                state_cell,
+                service_cell,
+                row.version.clone(),
+            ]);
+        }
+        out.push_str(&table.render(caps));
+        out.push('\n');
     }
-    let retry_line = format!("  retries: {}", retry_parts.join(", "));
-    // Structured errors (P5): categorized counts, aggregate preserved.
-    let errors_line = if scheduler.errors_by_category.is_empty() {
-        "  errors by category: none".to_owned()
-    } else {
-        let mut parts: Vec<_> = scheduler.errors_by_category.iter().collect();
-        parts.sort();
-        format!(
-            "  errors by category: {}",
-            parts
-                .into_iter()
-                .map(|(name, count)| format!("{name}={count}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    };
-    // Web/module failures (P8): failures by high-level stage.
-    let failures_line = if scheduler.failures_by_module.is_empty() {
-        String::new()
-    } else {
-        let mut parts: Vec<_> = scheduler.failures_by_module.iter().collect();
-        parts.sort();
-        format!(
-            "\n  failures by module: {}",
-            parts
-                .into_iter()
-                .map(|(name, count)| format!("{name}={count}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    };
-    // Correlation engine summary: fingerprint packs loaded once per scan,
-    // graph entities/edges streamed, certificate reuse observed.
-    let fingerprint_line = format!(
-        "  fingerprints: {} packs, {} rules, {} rejected",
-        report.fingerprint_packs_loaded,
-        report.fingerprint_rules,
-        report.fingerprint_files_rejected,
+
+    // SCAN SUMMARY ------------------------------------------------------
+    out.push('\n');
+    out.push_str(&section_heading(caps, "Scan Summary"));
+    out.push('\n');
+    out.push('\n');
+    let attempted = format!(
+        "{} / {}",
+        format_count_u64(tcp_totals.ports_attempted),
+        format_count_u64(tcp_totals.ports_requested)
     );
-    let graph_line = format!(
-        "  graph: {} entities, {} edges{}; certificates: {} observed, {} reused",
-        report.graph_entities,
-        report.graph_edges,
-        if report.graph_truncated {
-            " (truncated)"
+    out.push_str(&key_value(
+        caps,
+        "Attempted",
+        &paint(color, Style::Value, &attempted),
+        10,
+    ));
+    out.push('\n');
+    out.push_str(&key_value(
+        caps,
+        "Open",
+        &paint(color, Style::Success, &format_count_u64(tcp_totals.open)),
+        10,
+    ));
+    out.push('\n');
+    out.push_str(&key_value(
+        caps,
+        "Filtered",
+        &paint(
+            color,
+            Style::Warning,
+            &format_count_u64(tcp_totals.filtered_or_timed_out),
+        ),
+        10,
+    ));
+    out.push('\n');
+    out.push_str(&key_value(
+        caps,
+        "Errors",
+        &paint(color, Style::Error, &format_count_u64(tcp_totals.error)),
+        10,
+    ));
+    out.push('\n');
+    out.push_str(&key_value(
+        caps,
+        "Unscanned",
+        &paint(color, Style::Muted, &format_count_u64(tcp_totals.unscanned)),
+        10,
+    ));
+    out.push('\n');
+    // Concise UDP state (default): findings only, no telemetry sentence.
+    // Detailed UDP accounting lives in `--explain`.
+    let (udp_totals, udp_table) = match module_outputs {
+        Some(outputs) if !outputs.is_empty() => (
+            crate::udp_discovery::summarize_udp_scans(outputs),
+            crate::udp_discovery::human_udp_table(outputs),
+        ),
+        _ => (report.udp_totals.clone(), report.udp_summary.clone()),
+    };
+    let udp_totals_line = crate::udp_discovery::human_udp_totals_line(&udp_totals);
+    if report.plan.udp_requested {
+        out.push('\n');
+        if udp_totals.completed_tasks == 0 && udp_totals_line.is_empty() {
+            out.push_str(&format!(
+                "  {}\n",
+                paint(
+                    color,
+                    Style::Muted,
+                    "No UDP discovery was completed; no UDP ports were scanned."
+                )
+            ));
+        } else if udp_table.is_empty() {
+            out.push_str(&format!(
+                "  {}\n",
+                paint(color, Style::Muted, "No open UDP ports observed.")
+            ));
         } else {
-            ""
-        },
-        report.certificates_observed,
-        report.certificate_reuse_groups,
-    );
-    let project_line = report
-        .project_import
-        .as_ref()
-        .map_or(String::new(), |import| {
-            format!(
-                "\n  project: {} ({} entities, {} observations, {} relationships)",
+            out.push('\n');
+            for line in udp_table.lines() {
+                out.push_str(&format!("  {line}\n"));
+            }
+        }
+    }
+    // Concise exceptional warnings (default): material uncertainty stays
+    // visible without `--explain`. Detailed accounting lives in explain.
+    if scheduler.termination != crate::execution::TerminationReason::Completed {
+        out.push('\n');
+        out.push_str(&warning_block(
+            caps,
+            &human_termination_title(report),
+            Some("Partial evidence preserved."),
+        ));
+        out.push('\n');
+    }
+    if scheduler.tasks_not_admitted > 0 && tcp_totals.unscanned > 0 {
+        out.push('\n');
+        out.push_str(&warning_block(
+            caps,
+            &format!(
+                "{} requested ports were not scanned.",
+                format_count_u64(tcp_totals.unscanned)
+            ),
+            Some("Partial evidence preserved."),
+        ));
+        out.push('\n');
+    }
+    if !scheduler.failed.is_empty() {
+        out.push('\n');
+        let count = scheduler.failed.len();
+        out.push_str(&error_block(
+            caps,
+            &format!(
+                "{count} scan task{} failed.",
+                if count == 1 { "" } else { "s" }
+            ),
+            Some("See --explain for task detail."),
+        ));
+        out.push('\n');
+    }
+    // Concise project findings stay visible in default output.
+    if report.project_import.is_some()
+        || !report.project_changes.is_empty()
+        || !report.attention.is_empty()
+    {
+        out.push('\n');
+        out.push_str(&section_heading(caps, "Project"));
+        out.push('\n');
+        out.push('\n');
+        if let Some(import) = &report.project_import {
+            out.push_str(&format!(
+                "  project: {} ({} entities, {} observations, {} relationships)\n",
                 import.path,
                 import.entities_upserted,
                 import.observations_added,
                 import.relationships_upserted,
-            )
-        });
-    // Change intelligence (project mode only): concise counts plus top
-    // attention items. Detail lives in structured records / project CLI.
-    let changes_line = if report.project_changes.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "\n{}",
-            crate::project_db::human_changes_summary(&report.project_changes)
-        )
-    };
-    let attention_line = if report.attention.is_empty() {
-        String::new()
-    } else {
-        use std::collections::BTreeMap;
-        let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
-        for event in &report.attention {
-            *counts.entry(event.severity.as_str()).or_default() += 1;
-        }
-        let mut lines = vec![format!("Attention ({} items):", report.attention.len())];
-        for (severity, count) in &counts {
-            lines.push(format!("  {severity}: {count}"));
-        }
-        for event in report.attention.iter().take(5) {
-            lines.push(format!(
-                "  [{}] {}: {}",
-                event.severity.as_str(),
-                event.category,
-                event.title.chars().take(100).collect::<String>()
             ));
         }
-        format!("\n{}", lines.join("\n"))
-    };
-    let footer = format!(
-        "\n\nDiagnostics\n{termination_line}\n{tasks_line}\n{retry_line}\n  evidence bytes: {}/{}\n{errors_line}{failures_line}\n{fingerprint_line}\n{graph_line}{project_line}{changes_line}{attention_line}\n  deadline: {}ms configured, {}ms wall, {}ms overrun, {}ms cleanup\n  jsonl bytes: {}{}",
-        scheduler.evidence_bytes,
-        report.plan.budgets.max_evidence_bytes,
-        scheduler.deadline_ms,
-        scheduler.wall_ms,
-        scheduler.deadline_overrun_ms,
-        scheduler.cleanup_ms,
-        report.jsonl_bytes,
-        report
-            .output_path
-            .as_deref()
-            .map_or(String::new(), |path| format!("\n  output: {path}"))
+        if !report.project_changes.is_empty() {
+            out.push_str(&format!(
+                "  {}\n",
+                crate::project_db::human_changes_summary(&report.project_changes)
+            ));
+        }
+        if !report.attention.is_empty() {
+            out.push_str(&format!("  Attention: {} items\n", report.attention.len()));
+        }
+    }
+
+    // Engineering detail owns `--explain` ---------------------------------
+    // Default output stops here (findings + completeness + footer). The
+    // full scheduler/evidence/fingerprint/graph/deadline/TCP accounting
+    // renders only when `explain` is true.
+    if explain {
+        out.push('\n');
+        out.push_str(&section_heading(caps, "Explain"));
+        out.push('\n');
+        out.push('\n');
+        // Effective plan + scan-mode truth (why this plan).
+        out.push_str(&format!(
+            "  effective plan: Level {} · {} · {}\n",
+            report.plan.level, report.plan.speed, report.plan.goal,
+        ));
+        if !report.plan.scan_mode_requested.is_empty() || !report.plan.scan_mode.is_empty() {
+            let requested = if report.plan.scan_mode_requested.is_empty() {
+                "auto"
+            } else {
+                report.plan.scan_mode_requested.as_str()
+            };
+            let effective = if report.plan.scan_mode.is_empty() {
+                "connect"
+            } else {
+                report.plan.scan_mode.as_str()
+            };
+            if report.plan.scan_mode_fallback.is_empty() {
+                out.push_str(&format!(
+                    "  scan modes: requested {requested}, effective {effective}\n"
+                ));
+            } else {
+                out.push_str(&format!(
+                    "  scan modes: requested {requested}, effective {effective} (fallback: {})\n",
+                    report.plan.scan_mode_fallback,
+                ));
+            }
+        }
+        out.push_str(&format!("  tcp ports: {:?}\n", report.plan.tcp_ports));
+        // Legacy scanner-work lines (explain-only).
+        out.push_str(&format!("  {scan_section}\n"));
+        out.push_str(&format!("  {services_line}\n"));
+        if report.plan.udp_requested && !udp_totals_line.is_empty() {
+            out.push_str(&format!("  {udp_totals_line}\n"));
+        }
+        // Legacy duration telemetry (explain-only).
+        out.push_str(&format!("  Duration: {}ms\n", report.duration_ms));
+        let termination_line = match scheduler.termination {
+            crate::execution::TerminationReason::Completed => "Termination: completed".to_owned(),
+            ref reason => format!(
+                "Termination: {reason} (truncated; partial evidence preserved: {})",
+                if report.jsonl_bytes > 0 || !scheduler.completed.is_empty() {
+                    "yes"
+                } else {
+                    "no completed tasks"
+                }
+            ),
+        };
+        out.push_str(&format!("  {termination_line}\n"));
+        out.push_str(&format!(
+            "  tasks admitted: {}, completed: {}, failed: {}, cancelled: {}, timed out: {}, skipped: {}, not admitted: {}\n",
+            scheduler.tasks_admitted,
+            scheduler.completed.len(),
+            scheduler.failed.len(),
+            scheduler.cancelled.len(),
+            scheduler.timed_out.len(),
+            scheduler.skipped.len(),
+            scheduler.tasks_not_admitted,
+        ));
+        let mut retry_parts = vec![format!(
+            "retry budget {}/{}",
+            scheduler.retries_consumed, report.plan.budgets.max_retries
+        )];
+        let mut retry_modules: Vec<_> = scheduler.retries_by_module.iter().collect();
+        retry_modules.sort();
+        for (module, count) in retry_modules.iter().take(8) {
+            retry_parts.push(format!("{module}={count}"));
+        }
+        out.push_str(&format!("  retries: {}\n", retry_parts.join(", ")));
+        out.push_str(&format!(
+            "  evidence bytes: {}/{}\n",
+            scheduler.evidence_bytes, report.plan.budgets.max_evidence_bytes,
+        ));
+        if scheduler.errors_by_category.is_empty() {
+            out.push_str("  errors by category: none\n");
+        } else {
+            let mut parts: Vec<_> = scheduler.errors_by_category.iter().collect();
+            parts.sort();
+            out.push_str(&format!(
+                "  errors by category: {}\n",
+                parts
+                    .into_iter()
+                    .map(|(name, count)| format!("{name}={count}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if !scheduler.failures_by_module.is_empty() {
+            let mut parts: Vec<_> = scheduler.failures_by_module.iter().collect();
+            parts.sort();
+            out.push_str(&format!(
+                "  failures by module: {}\n",
+                parts
+                    .into_iter()
+                    .map(|(name, count)| format!("{name}={count}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        out.push_str(&format!(
+            "  fingerprints: {} packs, {} rules, {} rejected\n",
+            report.fingerprint_packs_loaded,
+            report.fingerprint_rules,
+            report.fingerprint_files_rejected,
+        ));
+        out.push_str(&format!(
+            "  graph: {} entities, {} edges{}; certificates: {} observed, {} reused\n",
+            report.graph_entities,
+            report.graph_edges,
+            if report.graph_truncated {
+                " (truncated)"
+            } else {
+                ""
+            },
+            report.certificates_observed,
+            report.certificate_reuse_groups,
+        ));
+        // Per-task timing proxy: slowest TCP task + scheduler wall/cleanup.
+        out.push_str(&format!(
+            "  per-task timing: TCP slowest {}ms; scheduler wall {}ms, cleanup {}ms\n",
+            tcp_totals.elapsed_ms_max, scheduler.wall_ms, scheduler.cleanup_ms,
+        ));
+        if let Some(import) = &report.project_import {
+            out.push_str(&format!(
+                "  project: {} ({} entities, {} observations, {} relationships)\n",
+                import.path,
+                import.entities_upserted,
+                import.observations_added,
+                import.relationships_upserted,
+            ));
+        }
+        if !report.project_changes.is_empty() {
+            out.push_str(&format!(
+                "  {}\n",
+                crate::project_db::human_changes_summary(&report.project_changes)
+            ));
+        }
+        if !report.attention.is_empty() {
+            use std::collections::BTreeMap;
+            let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+            for event in &report.attention {
+                *counts.entry(event.severity.as_str()).or_default() += 1;
+            }
+            out.push_str(&format!(
+                "  Attention ({} items):\n",
+                report.attention.len()
+            ));
+            for (severity, count) in &counts {
+                out.push_str(&format!("    {severity}: {count}\n"));
+            }
+            for event in report.attention.iter().take(5) {
+                out.push_str(&format!(
+                    "    [{}] {}: {}\n",
+                    event.severity.as_str(),
+                    event.category,
+                    event.title.chars().take(100).collect::<String>()
+                ));
+            }
+        }
+        out.push_str(&format!(
+            "  deadline: {}ms configured, {}ms wall, {}ms overrun, {}ms cleanup\n",
+            scheduler.deadline_ms,
+            scheduler.wall_ms,
+            scheduler.deadline_overrun_ms,
+            scheduler.cleanup_ms,
+        ));
+        out.push_str(&format!("  jsonl bytes: {}", report.jsonl_bytes));
+        if let Some(path) = &report.output_path {
+            out.push_str(&format!("\n  output: {path}"));
+        }
+        out.push('\n');
+        // Scheduler decisions + plan reasons (why this plan).
+        if !report.plan.reasons.is_empty() {
+            out.push_str("  scheduler decisions:\n");
+            for reason in report.plan.reasons.iter().take(12) {
+                let short: String = reason.chars().take(160).collect();
+                out.push_str(&format!("    - {short}\n"));
+            }
+        }
+    }
+
+    // Footer summary bar --------------------------------------------------
+    out.push('\n');
+    let recap = format!(
+        "{}  ·  {}  ·  {}",
+        paint(
+            color,
+            Style::Success,
+            &format!("{} services", format_count(services_identified)),
+        ),
+        paint(
+            color,
+            Style::Secondary,
+            &format!(
+                "{} ports attempted",
+                format_count_u64(tcp_totals.ports_attempted)
+            ),
+        ),
+        paint(
+            color,
+            Style::Secondary,
+            &humanize_duration_ms(report.duration_ms),
+        ),
     );
-    format!("{header}{footer}")
+    out.push_str(&footer_block(caps, &recap));
+    out.push('\n');
+    let _ = (format_count, Theme::DEFAULT, WorkflowMode::Passive);
+    out
+}
+
+/// Concise human title for a non-completed termination.
+///
+/// Default output shows this short warning; full accounting lives in
+/// `--explain`. Never hides material truncation.
+fn human_termination_title(report: &RunReport) -> String {
+    use crate::terminal::humanize_duration_ms;
+    match report.scheduler_report.termination {
+        crate::execution::TerminationReason::Completed => "Completed".to_owned(),
+        crate::execution::TerminationReason::GlobalDeadline => {
+            let basis = if report.scheduler_report.deadline_ms > 0 {
+                report.scheduler_report.deadline_ms
+            } else {
+                report.duration_ms
+            };
+            format!(
+                "Execution deadline reached after {}",
+                humanize_duration_ms(basis)
+            )
+        }
+        crate::execution::TerminationReason::UserCancelled => "Scan was cancelled".to_owned(),
+        crate::execution::TerminationReason::TaskBudget => "Task budget reached".to_owned(),
+        crate::execution::TerminationReason::RetryBudget => "Retry budget exhausted".to_owned(),
+        crate::execution::TerminationReason::EvidenceBudget => {
+            "Evidence budget exhausted".to_owned()
+        }
+        crate::execution::TerminationReason::OutputBudget => "Output budget exhausted".to_owned(),
+        crate::execution::TerminationReason::InternalFailure => "Internal failure".to_owned(),
+    }
+}
+
+/// One open-port row for the styled `PORTS` table.
+struct ScanPortRow {
+    port_label: String,
+    state: String,
+    service: String,
+    version: String,
+}
+
+/// Build open-port rows from typed findings when available, else by
+/// parsing the stored service summary. Rows are always `open`; filtered
+/// and closed counts live in `SCAN SUMMARY` and JSONL.
+fn scan_port_rows(
+    report: &RunReport,
+    module_outputs: Option<&[(crate::execution::TaskId, crate::execution::ModuleOutput)]>,
+) -> Vec<ScanPortRow> {
+    if let Some(outputs) = module_outputs {
+        if !outputs.is_empty() {
+            return scan_port_rows_from_outputs(outputs);
+        }
+    }
+    scan_port_rows_from_summary(&report.open_ports_summary)
+}
+
+/// Extract open ports + service/product from module findings.
+fn scan_port_rows_from_outputs(
+    outputs: &[(crate::execution::TaskId, crate::execution::ModuleOutput)],
+) -> Vec<ScanPortRow> {
+    use std::collections::BTreeMap;
+    let mut ports: BTreeMap<(String, u16), ()> = BTreeMap::new();
+    let mut services: BTreeMap<(String, u16), (String, String)> = BTreeMap::new();
+    for (_, output) in outputs {
+        for finding in &output.findings {
+            if finding.title.starts_with("Open TCP port") {
+                let address = finding
+                    .metadata
+                    .get("address")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_owned();
+                let port = finding
+                    .metadata
+                    .get("port")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0) as u16;
+                if port > 0 {
+                    ports.insert((address, port), ());
+                }
+            } else if finding.title.ends_with("service on port")
+                || finding.title.contains(" service on port ")
+            {
+                let address = finding
+                    .metadata
+                    .get("address")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_owned();
+                let port = finding
+                    .metadata
+                    .get("port")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0) as u16;
+                let service = finding
+                    .metadata
+                    .get("service")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_owned();
+                let product = finding
+                    .metadata
+                    .get("product")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("-")
+                    .to_owned();
+                if port > 0 {
+                    ports.insert((address.clone(), port), ());
+                    services.insert((address, port), (service, product));
+                }
+            }
+        }
+    }
+    let mut rows = Vec::new();
+    let mut keys: Vec<(String, u16)> = ports.into_keys().collect();
+    keys.sort();
+    for (host, port) in keys {
+        let _ = host;
+        let (service, version) = services
+            .get(&(host.clone(), port))
+            .cloned()
+            .unwrap_or_else(|| ("unknown".to_owned(), "-".to_owned()));
+        rows.push(ScanPortRow {
+            port_label: format!("{port}/tcp"),
+            state: "open".to_owned(),
+            service,
+            version,
+        });
+    }
+    rows
+}
+
+/// Fallback parser for the stored plain service summary
+/// (`HOST … / PORT SERVICE PRODUCT / 22/tcp ssh …`).
+fn scan_port_rows_from_summary(summary: &str) -> Vec<ScanPortRow> {
+    let mut rows = Vec::new();
+    for line in summary.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with("HOST")
+            || trimmed.starts_with("PORT")
+            || trimmed.starts_with("No ")
+        {
+            continue;
+        }
+        let mut parts = trimmed.split_whitespace();
+        let Some(port_token) = parts.next() else {
+            continue;
+        };
+        if !port_token.contains("/tcp") {
+            continue;
+        }
+        let service = parts.next().unwrap_or("unknown").to_owned();
+        let version = {
+            let rest: Vec<&str> = parts.collect();
+            if rest.is_empty() {
+                "-".to_owned()
+            } else {
+                rest.join(" ")
+            }
+        };
+        rows.push(ScanPortRow {
+            port_label: port_token.to_owned(),
+            state: "open".to_owned(),
+            service,
+            version,
+        });
+    }
+    rows
 }

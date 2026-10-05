@@ -259,7 +259,7 @@ fn bridge_output_is_deterministic_and_structured() {
     }
     assert!(!jsonl.contains('\x1b'));
     let human = investigate::render_human(&first, false, false, true);
-    assert!(human.contains("AUTHORIZED"));
+    assert!(human.contains("NETWORK ENABLED"));
     assert!(!human.contains('\x1b'));
 }
 

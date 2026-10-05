@@ -2033,9 +2033,19 @@ fn unprivileged_host_discovery_completes_without_root() {
         &dir,
     );
     assert_eq!(code, 0, "unprivileged scan must complete: {stderr:?}");
+    // Default human output is concise: findings + completeness, no
+    // engineering diagnostics on normal completion.
     assert!(
-        stdout.contains("Diagnostics"),
-        "expected human diagnostics footer: {stdout:?}"
+        stdout.contains("SCAN SUMMARY") || stdout.contains("Scan Summary"),
+        "expected concise scan summary: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("DIAGNOSTICS") && !stdout.contains("Diagnostics"),
+        "normal default must not print diagnostics: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("tasks admitted:"),
+        "engineering detail lives in --explain, not default: {stdout:?}"
     );
     assert!(!stderr.contains("root"), "must not demand root: {stderr:?}");
     std::fs::remove_dir_all(&dir).ok();

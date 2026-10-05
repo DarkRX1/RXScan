@@ -1688,36 +1688,64 @@ fn human_counts_equal_port_scan_completed_counts() {
     assert_eq!(report.tcp_totals.error, machine("error"));
     assert_eq!(report.tcp_totals.unscanned, machine("unscanned"));
     assert_eq!(report.services_identified, services_machine);
-    // Human summary renders those same numbers (not task accounting).
+    // Default human summary is findings-first: SCAN SUMMARY carries the
+    // same typed counts; legacy diagnostic prose lives in --explain.
     let human = rxscan::run::human_summary(&report);
     assert!(
-        human.contains(&format!("{} requested", machine("requested"))),
-        "human must show requested: {human}"
+        human.contains("SCAN SUMMARY"),
+        "default must keep scan summary: {human}"
     );
     assert!(
-        human.contains(&format!("{} attempted", machine("attempted"))),
-        "human must show attempted: {human}"
+        human.contains(&format!("{}", machine("requested"))),
+        "default must show requested count: {human}"
     );
     assert!(
-        human.contains(&format!("{} open", machine("open"))),
-        "human must show open: {human}"
-    );
-    assert!(
-        human.contains(&format!("{} closed", machine("closed"))),
-        "human must show closed: {human}"
-    );
-    assert!(
-        human.contains(&format!("Services: {services_machine} identified")),
-        "human must show services: {human}"
+        human.contains(&format!("{}", machine("attempted"))),
+        "default must show attempted count: {human}"
     );
     assert!(human.contains(&format!("{open_port}/tcp")));
     assert!(!human.contains(&format!("{closed_port}/tcp")));
-    // Scheduler task accounting is demoted to Diagnostics, never primary.
-    let tcp_pos = human.find("TCP discovery").expect("scanner work first");
+    // Default must not duplicate engineering detail.
+    for legacy in [
+        "TCP discovery",
+        "Services:",
+        "tasks admitted:",
+        "retry budget",
+        "evidence bytes:",
+        "fingerprints:",
+        "jsonl bytes:",
+        "Duration:",
+    ] {
+        assert!(
+            !human.contains(legacy),
+            "default must not contain legacy {legacy:?}: {human}"
+        );
+    }
     assert!(
-        human.find("Diagnostics").is_some_and(|pos| pos > tcp_pos),
-        "task accounting must follow scanner work: {human}"
+        !human.contains("DIAGNOSTICS") && !human.contains("Diagnostics"),
+        "normal default has no diagnostics section: {human}"
     );
+    // Explain retains the full operational detail.
+    let explained = rxscan::run::human_summary_explain(&report);
+    assert!(
+        explained.contains(&format!("{} requested", machine("requested"))),
+        "explain must show requested: {explained}"
+    );
+    assert!(
+        explained.contains(&format!("{} attempted", machine("attempted"))),
+        "explain must show attempted: {explained}"
+    );
+    assert!(
+        explained.contains(&format!("Services: {services_machine} identified")),
+        "explain must show services: {explained}"
+    );
+    assert!(explained.contains("tasks admitted:"));
+    assert!(explained.contains("retry budget"));
+    assert!(explained.contains("evidence bytes:"));
+    assert!(explained.contains("fingerprints:"));
+    assert!(explained.contains("jsonl bytes:"));
+    assert!(explained.contains("TCP discovery"));
+    assert!(explained.contains("Duration:"));
     fs::remove_file(path).ok();
 }
 
@@ -1922,10 +1950,19 @@ fn all_ports_loopback_proves_full_ledger_and_bounds() {
             && value["payload"]["details"]["data"]["port"].as_u64() == Some(u64::from(port))
             && value["payload"]["details"]["data"]["protocol"] == "ssh"
     }));
-    // Human counts agree with the typed ledger.
+    // Human counts agree with the typed ledger (default concise).
     let human = rxscan::run::human_summary(&report);
-    assert!(human.contains("65535 requested"));
-    assert!(human.contains("65535 attempted"));
+    assert!(
+        human.contains("65,535"),
+        "default shows requested/attempted: {human}"
+    );
     assert!(human.contains(&format!("{port}/tcp")));
+    assert!(
+        !human.contains("TCP discovery"),
+        "default must not duplicate TCP accounting: {human}"
+    );
+    let explained = rxscan::run::human_summary_explain(&report);
+    assert!(explained.contains("65535 requested"));
+    assert!(explained.contains("65535 attempted"));
     fs::remove_file(path).ok();
 }

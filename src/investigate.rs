@@ -2647,45 +2647,160 @@ pub fn explain_plan(config: &InvestigationConfig) -> String {
     out
 }
 
-/// Compact graph-oriented human rendering. Bounded: interesting entities,
-/// strong relationships, correlations, warnings, and truncation first;
+/// Designed graph-oriented human rendering. Bounded: seed, accounts as a
+/// Unicode tree, correlations as a table, warnings, then a summary bar;
 /// complete data lives in JSON/JSONL. Styled only when `color` is true
 /// (TTY); piped and `--color never` output stays plain. `ascii` selects
-/// ASCII separators for `NO_UNICODE` environments.
+/// ASCII separators for `NO_UNICODE` environments. Fixed 80-column
+/// layout; see [`render_human_caps`] for width-adaptive rendering.
 pub fn render_human(
     report: &InvestigationReport,
     show_all: bool,
     color: bool,
     ascii: bool,
 ) -> String {
-    use crate::terminal::{Style, paint};
-    let sep = if ascii { "-" } else { "\u{00B7}" };
+    render_human_caps(
+        report,
+        show_all,
+        crate::terminal::TerminalCapabilities {
+            color,
+            ascii,
+            width: 80,
+            tty: false,
+        },
+    )
+}
+
+/// Capabilities-aware investigation renderer (responsive + styled).
+///
+/// Default human output is concise: seed, accounts tree, correlation,
+/// truncation warnings, and the compact footer
+/// (`3 entities · 2 relationships · passive`). The secondary operational
+/// line (`N HTTP · M DNS · K network scans`) shows in default only when
+/// direct network pivots were enabled/performed (material contact-class
+/// information); otherwise it lives only in the explain rendering
+/// ([`render_human_explain_caps`]); see `--explain`.
+pub fn render_human_caps(
+    report: &InvestigationReport,
+    show_all: bool,
+    caps: crate::terminal::TerminalCapabilities,
+) -> String {
+    render_human_inner(report, show_all, caps, false)
+}
+
+/// Detailed investigation rendering for `--explain`.
+///
+/// Contains everything default shows plus the secondary operational line
+/// (`N HTTP · M DNS · K network scans`), exposure counts, and full
+/// accounting. The model is unchanged; only presentation differs.
+pub fn render_human_explain(
+    report: &InvestigationReport,
+    show_all: bool,
+    color: bool,
+    ascii: bool,
+) -> String {
+    render_human_explain_caps(
+        report,
+        show_all,
+        crate::terminal::TerminalCapabilities {
+            color,
+            ascii,
+            width: 80,
+            tty: false,
+        },
+    )
+}
+
+/// Capabilities-aware detailed investigation rendering for `--explain`.
+pub fn render_human_explain_caps(
+    report: &InvestigationReport,
+    show_all: bool,
+    caps: crate::terminal::TerminalCapabilities,
+) -> String {
+    render_human_inner(report, show_all, caps, true)
+}
+
+fn render_human_inner(
+    report: &InvestigationReport,
+    show_all: bool,
+    caps: crate::terminal::TerminalCapabilities,
+    explain: bool,
+) -> String {
+    use crate::terminal::{
+        Align, Style, Table, TerminalCapabilities, WorkflowMode, confidence_label, footer_block,
+        format_count, key_value, paint, section_heading, style_for_confidence, warning_block,
+        workflow_header,
+    };
+    let color = caps.color;
+    let ascii = caps.ascii;
     let mut out = String::new();
-    out.push_str(&paint(
-        color,
-        Style::Heading,
-        &format!("RXSCAN INVESTIGATION {sep} passive evidence graph"),
+    // Header with mode badge -------------------------------------------
+    let mode = if report.network_enabled {
+        WorkflowMode::NetworkEnabled
+    } else {
+        WorkflowMode::Passive
+    };
+    out.push_str(&workflow_header(caps, "INVESTIGATE", Some(mode)));
+    out.push('\n');
+
+    // SEED --------------------------------------------------------------
+    out.push('\n');
+    out.push_str(&section_heading(caps, "Seed"));
+    out.push('\n');
+    out.push('\n');
+    let seed_type = match report.seed_kind {
+        SeedKind::Username => "Username",
+        SeedKind::Domain => "Domain",
+        SeedKind::Url => "Url",
+    };
+    out.push_str(&key_value(caps, "Type", seed_type, 8));
+    out.push('\n');
+    // Human value, not `username:exampleuser`.
+    let seed_value = if report.seed.label.trim().is_empty() {
+        report.seed.canonical_value.clone()
+    } else {
+        report.seed.label.clone()
+    };
+    out.push_str(&key_value(
+        caps,
+        "Value",
+        &paint(color, Style::Identifier, &truncate(&seed_value, 64)),
+        8,
     ));
     out.push('\n');
-    out.push_str(&format!(
-        "seed       {}:{}\n",
-        report.seed_kind.as_str(),
-        report.seed.canonical_value
+    out.push_str(&key_value(
+        caps,
+        "Depth",
+        &paint(color, Style::Value, &report.depth.to_string()),
+        8,
     ));
-    out.push_str(&format!("depth      {}\n", report.depth));
+    out.push('\n');
     if report.network_enabled {
-        out.push_str(&format!(
-            "network    AUTHORIZED (scope: {})\n\n",
-            if report.network_scopes.is_empty() {
-                "none".to_owned()
-            } else {
-                report.network_scopes.join(", ")
-            }
+        let scopes = if report.network_scopes.is_empty() {
+            "authorized (no scope listed)".to_owned()
+        } else {
+            report.network_scopes.join(", ")
+        };
+        out.push_str(&key_value(
+            caps,
+            "Network",
+            &paint(color, Style::Warning, &truncate(&scopes, 64)),
+            8,
         ));
     } else {
-        out.push_str("network    disabled\n\n");
+        out.push_str(&key_value(
+            caps,
+            "Network",
+            &paint(color, Style::Muted, "Disabled"),
+            8,
+        ));
     }
-    // Accounts first (strongest signal), then a bounded sample of the rest.
+    out.push('\n');
+
+    // ACCOUNTS (Unicode tree) -------------------------------------------
+    out.push('\n');
+    out.push_str(&section_heading(caps, "Accounts"));
+    out.push('\n');
     let mut accounts: Vec<&InvestigationEntity> = report
         .entities
         .values()
@@ -2693,50 +2808,234 @@ pub fn render_human(
         .collect();
     accounts.sort_by(|a, b| a.id.cmp(&b.id));
     let account_limit = if show_all { accounts.len() } else { 10 };
-    for account in accounts.iter().take(account_limit) {
-        out.push_str(&format!("  account     {}\n", account.label));
-        let mut outgoing: Vec<&InvestigationRelationship> = report
-            .relationships
-            .iter()
-            .filter(|r| r.from == account.id)
-            .collect();
-        outgoing.sort_by(|a, b| b.confidence.cmp(&a.confidence).then(a.to.cmp(&b.to)));
-        let link_limit = if show_all { outgoing.len() } else { 5 };
-        for rel in outgoing.iter().take(link_limit) {
-            let target_kind = report
-                .entities
-                .get(&rel.to)
-                .map(|e| e.kind.to_string())
-                .unwrap_or_else(|| "?".to_owned());
+    let shown = accounts.iter().take(account_limit).count();
+    if accounts.is_empty() {
+        out.push('\n');
+        out.push_str(&format!(
+            "  {}\n",
+            paint(
+                color,
+                Style::Muted,
+                "no accounts discovered in passive evidence"
+            )
+        ));
+    } else {
+        for account in accounts.iter().take(account_limit) {
+            out.push('\n');
+            // Account/provider name: bold primary.
             out.push_str(&format!(
-                "      |- {} {} ({})\n",
-                target_kind,
-                truncate(&rel.to, 64),
-                rel.confidence
+                "  {}\n",
+                paint(color, Style::Value, &truncate(&account.label, 64))
             ));
+            // Seed->account confidence for this account.
+            let seed_conf = report
+                .relationships
+                .iter()
+                .filter(|r| r.to == account.id)
+                .map(|r| r.confidence)
+                .max();
+            let mut outgoing: Vec<&InvestigationRelationship> = report
+                .relationships
+                .iter()
+                .filter(|r| r.from == account.id)
+                .collect();
+            outgoing.sort_by(|a, b| b.confidence.cmp(&a.confidence).then(a.to.cmp(&b.to)));
+            // Partition: profile URL vs related endpoints.
+            let profile_url = account
+                .attributes
+                .get("final_url")
+                .or_else(|| account.attributes.get("profile_url"))
+                .cloned()
+                .unwrap_or_default();
+            let mut related: Vec<(&InvestigationEntity, u8)> = Vec::new();
+            for rel in outgoing.iter() {
+                if let Some(entity) = report.entities.get(&rel.to) {
+                    // Skip the canonical profile duplicate in related list;
+                    // it has its own Profile branch.
+                    if !profile_url.is_empty()
+                        && (entity.canonical_value == profile_url || entity.label == profile_url)
+                    {
+                        continue;
+                    }
+                    related.push((entity, rel.confidence));
+                }
+            }
+            let link_limit = if show_all { related.len() } else { 6 };
+            let related_shown = related.iter().take(link_limit).count();
+            // Build branch list: Profile?, Related?, Confidence.
+            enum Branch {
+                Profile(String),
+                Related(Vec<(String, String)>),
+                Confidence(Option<u8>),
+            }
+            let mut branches: Vec<Branch> = Vec::new();
+            if !profile_url.is_empty() {
+                branches.push(Branch::Profile(profile_url.clone()));
+            }
+            if related_shown > 0 {
+                let items: Vec<(String, String)> = related
+                    .iter()
+                    .take(link_limit)
+                    .map(|(entity, _)| {
+                        (
+                            human_entity_kind(entity.kind),
+                            truncate(&human_entity_display(entity), 56),
+                        )
+                    })
+                    .collect();
+                branches.push(Branch::Related(items));
+            }
+            branches.push(Branch::Confidence(seed_conf));
+            let branch_glyph = |last: bool| {
+                if ascii {
+                    if last { "`- " } else { "|- " }
+                } else if last {
+                    "└─ "
+                } else {
+                    "├─ "
+                }
+            };
+            let cont_glyph = if ascii { "|  " } else { "│  " };
+            for (bi, branch) in branches.iter().enumerate() {
+                let last_branch = bi + 1 == branches.len();
+                let stem = branch_glyph(last_branch);
+                match branch {
+                    Branch::Profile(url) => {
+                        out.push_str(&format!(
+                            "  {}{}\n",
+                            stem,
+                            paint(color, Style::Muted, "Profile")
+                        ));
+                        let prefix = if last_branch { "   " } else { cont_glyph };
+                        out.push_str(&format!(
+                            "  {}{}\n",
+                            prefix,
+                            paint(color, Style::Identifier, &truncate(url, 64))
+                        ));
+                    }
+                    Branch::Related(items) => {
+                        out.push_str(&format!(
+                            "  {}{}\n",
+                            stem,
+                            paint(color, Style::Muted, "Related endpoints")
+                        ));
+                        let prefix = if last_branch { "   " } else { cont_glyph };
+                        for (ii, (kind, display)) in items.iter().enumerate() {
+                            let last_item = ii + 1 == items.len();
+                            let leaf = if ascii {
+                                if last_item { "`- " } else { "|- " }
+                            } else if last_item {
+                                "└─ "
+                            } else {
+                                "├─ "
+                            };
+                            out.push_str(&format!(
+                                "  {prefix}{leaf}{}  {}\n",
+                                paint(color, Style::Muted, kind),
+                                paint(color, Style::Identifier, display),
+                            ));
+                        }
+                        if !show_all && related.len() > link_limit {
+                            out.push_str(&format!(
+                                "  {prefix}   {}\n",
+                                paint(
+                                    color,
+                                    Style::Muted,
+                                    &format!("+{} more", related.len() - link_limit)
+                                )
+                            ));
+                        }
+                    }
+                    Branch::Confidence(conf) => {
+                        out.push_str(&format!(
+                            "  {}{}\n",
+                            stem,
+                            paint(color, Style::Muted, "Confidence")
+                        ));
+                        let prefix = if last_branch { "   " } else { cont_glyph };
+                        if let Some(score) = *conf {
+                            let label = confidence_label(score);
+                            let text = format!("{label} · {score}%");
+                            out.push_str(&format!(
+                                "  {prefix}  {}\n",
+                                paint(color, style_for_confidence(score), &text)
+                            ));
+                        } else {
+                            out.push_str(&format!(
+                                "  {prefix}  {}\n",
+                                paint(color, Style::Muted, "unknown")
+                            ));
+                        }
+                    }
+                }
+            }
+            let _ = TerminalCapabilities::plain;
+            let _ = Align::Left;
         }
     }
     if !show_all && accounts.len() > account_limit {
         out.push_str(&format!(
-            "  ... {} more accounts (use --all or JSON for complete data)\n",
-            accounts.len() - account_limit
+            "\n  {}\n",
+            paint(
+                color,
+                Style::Muted,
+                &format!(
+                    "... {} more accounts (use --all or JSON for complete data)",
+                    accounts.len() - account_limit
+                )
+            )
         ));
     }
+    let _ = shown;
+
+    // CORRELATION ---------------------------------------------------------
     let correlations = report.correlations();
     if !correlations.is_empty() {
-        out.push_str(&format!(
-            "\n{}\n",
-            paint(color, Style::Heading, "CORRELATION")
-        ));
+        out.push('\n');
+        out.push_str(&section_heading(caps, "Correlation"));
+        out.push('\n');
+        out.push('\n');
         let limit = if show_all { correlations.len() } else { 10 };
+        // Resolve human-readable names for entity IDs.
+        let mut rows: Vec<(String, usize)> = Vec::new();
         for (id, sources) in correlations.iter().take(limit) {
-            out.push_str(&format!(
-                "  {} referenced by {} independent sources\n",
-                truncate(id, 72),
-                sources.len()
-            ));
+            let display = report
+                .entities
+                .get(id)
+                .map(human_entity_display)
+                .unwrap_or_else(|| humanize_entity_id(id));
+            rows.push((truncate(&display, 48), sources.len()));
+        }
+        rows.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        if caps.width_mode() == crate::terminal::WidthMode::Compact {
+            for (display, count) in &rows {
+                out.push_str(&format!("  {}\n", paint(color, Style::Identifier, display)));
+                let refs = format!(
+                    "{count} independent reference{}",
+                    if *count == 1 { "" } else { "s" }
+                );
+                out.push_str(&format!(
+                    "  {} {}\n",
+                    if ascii { "`-" } else { "└─" },
+                    paint(color, Style::Secondary, &refs)
+                ));
+            }
+        } else {
+            let mut table =
+                Table::with_align(&["ENTITY", "REFERENCES"], &[Align::Left, Align::Right]);
+            table.max_widths = vec![48, 10];
+            for (display, count) in &rows {
+                table.cells(vec![
+                    paint(color, Style::Identifier, display),
+                    paint(color, Style::Value, &format_count(*count)),
+                ]);
+            }
+            out.push_str(&table.render(caps));
+            out.push('\n');
         }
     }
+
+    // Exposures (opt-in enrichment) ---------------------------------------
     let mut exposures: Vec<&InvestigationEntity> = report
         .entities
         .values()
@@ -2744,52 +3043,135 @@ pub fn render_human(
         .collect();
     exposures.sort_by(|a, b| a.id.cmp(&b.id));
     if !exposures.is_empty() {
-        out.push_str(&format!(
-            "\n{}\n",
-            paint(color, Style::Warning, "EXPOSURE INTELLIGENCE")
-        ));
+        out.push('\n');
+        out.push_str(&paint(color, Style::Warning, "EXPOSURE INTELLIGENCE"));
+        out.push('\n');
         let limit = if show_all { exposures.len() } else { 10 };
         for entity in exposures.iter().take(limit) {
             out.push_str(&format!(
                 "  {} (secrets retained: no)\n",
-                truncate(&entity.label, 88)
+                truncate(&human_entity_display(entity), 88)
             ));
         }
     }
     if report.accounting.truncated {
         let mut reasons: Vec<&String> = report.accounting.truncation_reasons.iter().collect();
         reasons.sort();
+        out.push('\n');
+        out.push_str(&warning_block(
+            caps,
+            &format!(
+                "Truncated ({})",
+                reasons
+                    .iter()
+                    .map(|r| r.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Some("partial evidence preserved; JSON holds complete records"),
+        ));
+        out.push('\n');
+    }
+
+    // Footer summary bar ----------------------------------------------------
+    out.push('\n');
+    let network_word = if report.network_enabled {
+        "network"
+    } else {
+        "passive"
+    };
+    let recap = format!(
+        "{}  ·  {}  ·  {}",
+        paint(
+            color,
+            Style::Value,
+            &format!("{} entities", format_count(report.entities.len()))
+        ),
+        paint(
+            color,
+            Style::Value,
+            &format!("{} relationships", format_count(report.relationships.len()))
+        ),
+        paint(color, Style::Secondary, network_word),
+    );
+    out.push_str(&footer_block(caps, &recap));
+    out.push('\n');
+    // Secondary operational detail: default shows it only when direct
+    // network pivots were enabled/performed (material contact-class info
+    // the operator must see). Normal passive runs keep only the compact
+    // footer; full accounting lives in `--explain`. Exposure counts show
+    // whenever exposure enrichment ran (opt-in, material).
+    let show_operational = explain || report.network_enabled || report.accounting.network_scans > 0;
+    if show_operational {
+        let sep = if ascii { "-" } else { "·" };
         out.push_str(&format!(
-            "\n{}\n",
-            paint(
-                color,
-                Style::Warning,
-                &format!(
-                    "TRUNCATED ({})",
-                    reasons
-                        .iter()
-                        .map(|r| r.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            )
+            "  {} HTTP {} {} DNS {} {} network scans\n",
+            report.accounting.http_requests,
+            sep,
+            report.accounting.dns_queries,
+            sep,
+            report.accounting.network_scans,
         ));
     }
-    out.push_str(&format!(
-        "\n----------------------------------------\n{} entities {sep} {} relationships\n{} HTTP {sep} {} DNS {sep} {} network scans\n",
-        report.entities.len(),
-        report.relationships.len(),
-        report.accounting.http_requests,
-        report.accounting.dns_queries,
-        report.accounting.network_scans,
-    ));
-    if report.accounting.exposure_lookups > 0 || report.accounting.exposures_found > 0 {
+    // In default output the exposure line appears only when enrichment
+    // actually ran (material); in explain it always appears.
+    if explain || report.accounting.exposure_lookups > 0 || report.accounting.exposures_found > 0 {
+        let sep = if ascii { "-" } else { "·" };
         out.push_str(&format!(
-            "exposure      {} lookups {sep} {} found {sep} secrets stored: 0\n",
-            report.accounting.exposure_lookups, report.accounting.exposures_found
+            "  exposure {} lookups {} {} found {} secrets stored: 0\n",
+            report.accounting.exposure_lookups, sep, report.accounting.exposures_found, sep,
         ));
     }
     out
+}
+
+/// Human-readable entity display: prefer the stored label (already human)
+/// over the canonical `kind:value` id. Falls back to stripping the id
+/// prefix when no entity is available.
+fn human_entity_display(entity: &InvestigationEntity) -> String {
+    if !entity.label.trim().is_empty() {
+        return entity.label.clone();
+    }
+    humanize_entity_id(&entity.id)
+}
+
+/// Strip the canonical `prefix:value` wrapper (`domain:example.test` →
+/// `example.test`, `endpoint:https://…` → `https://…`).
+fn humanize_entity_id(id: &str) -> String {
+    if let Some((prefix, rest)) = id.split_once(':') {
+        match prefix {
+            "domain" | "hostname" | "username" | "email" | "ip" | "organization" | "repository"
+            | "account" => rest.to_owned(),
+            "endpoint" => rest.to_owned(),
+            _ => {
+                // `endpoint:https://…`, `dns_record:…`, `port:…`: drop only
+                // the first segment, keep the meaningful remainder.
+                if rest.is_empty() {
+                    id.to_owned()
+                } else {
+                    rest.to_owned()
+                }
+            }
+        }
+    } else {
+        id.to_owned()
+    }
+}
+
+/// Short lowercase kind label for tree leaves (`WebEndpoint` → `endpoint`).
+fn human_entity_kind(kind: EntityKind) -> String {
+    match kind {
+        EntityKind::WebEndpoint | EntityKind::NetworkEndpoint => "endpoint".to_owned(),
+        EntityKind::Domain => "domain".to_owned(),
+        EntityKind::Hostname => "hostname".to_owned(),
+        EntityKind::IpAddress => "ip".to_owned(),
+        EntityKind::Repository => "repository".to_owned(),
+        EntityKind::DnsRecord => "dns".to_owned(),
+        EntityKind::Account => "account".to_owned(),
+        EntityKind::Username => "username".to_owned(),
+        EntityKind::EmailAddress => "email".to_owned(),
+        _ => kind.to_string(),
+    }
 }
 
 /// Typed JSONL: `investigation_start`, `entity`, `relationship`,
