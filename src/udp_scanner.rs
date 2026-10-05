@@ -635,6 +635,7 @@ fn scan_ports_udp(
         let now = Instant::now();
         let mut finished: Vec<c_int> = Vec::new();
         let mut to_retry: Vec<(u16, u32)> = Vec::new();
+        let mut to_requeue: Vec<(u16, u32)> = Vec::new();
         for (fd, item) in pending.iter() {
             let revents = ready_map.get(fd).copied().unwrap_or(0);
             // Error signal first: attributable closed vs network error.
@@ -814,6 +815,185 @@ fn scan_ports_udp(
                 }
             }
             if now >= item.attempt_deadline {
+                // No new retries after cancellation or overall deadline:
+                // preserve the probe for unscanned accounting instead of
+                // counting a retry that can never be sent.
+                if config.cancel.is_cancelled() || is_expired(Instant::now()) {
+                    to_requeue.push((item.port, item.attempts));
+                    finished.push(*fd);
+                    continue;
+                }
+                // Final evidence check before resending: late ICMP/response
+                // arriving after poll must not trigger an unnecessary retry.
+                // Definitive CLOSED and valid responses never retry.
+                let final_error = socket_error(*fd);
+                if final_error == ECONNREFUSED {
+                    outcome.closed_errors += 1;
+                    outcome.record(
+                        UdpProbe {
+                            port: item.port,
+                            state: UdpPortState::Closed,
+                            latency: item.started.elapsed(),
+                            detail: format!(
+                                "UDP port unreachable on {}:{} (errno {final_error}); host responded",
+                                ip, item.port
+                            ),
+                            attempts: item.attempts,
+                            protocol: None,
+                            datagrams_sent: item.attempts,
+                            datagrams_received: 0,
+                        },
+                        config.retain_detail,
+                    );
+                    finished.push(*fd);
+                    continue;
+                }
+                if final_error != 0 {
+                    outcome.record(
+                        UdpProbe {
+                            port: item.port,
+                            state: UdpPortState::Error,
+                            latency: item.started.elapsed(),
+                            detail: format!(
+                                "UDP socket error on {}:{} (errno {final_error})",
+                                ip, item.port
+                            ),
+                            attempts: item.attempts,
+                            protocol: None,
+                            datagrams_sent: item.attempts,
+                            datagrams_received: 0,
+                        },
+                        config.retain_detail,
+                    );
+                    finished.push(*fd);
+                    continue;
+                }
+                // Non-blocking probe for a late response (socket is already
+                // non-blocking, so this never waits).
+                {
+                    let mut buffer = [0u8; 2048];
+                    let received = unsafe {
+                        recv(
+                            *fd,
+                            buffer.as_mut_ptr() as *mut c_void,
+                            buffer.len(),
+                            MSG_NOSIGNAL,
+                        )
+                    };
+                    if received > 0 {
+                        let count = received as usize;
+                        outcome.datagrams_received += 1;
+                        let protocol = source.classify(item.port, &buffer[..count]);
+                        let detail = match &protocol {
+                            Some(name) => {
+                                format!("UDP response on {}:{} matched {name}", ip, item.port)
+                            }
+                            None => format!(
+                                "UDP response on {}:{} ({} bytes, unrecognized)",
+                                ip, item.port, count
+                            ),
+                        };
+                        outcome.record(
+                            UdpProbe {
+                                port: item.port,
+                                state: UdpPortState::Open,
+                                latency: item.started.elapsed(),
+                                detail,
+                                attempts: item.attempts,
+                                protocol,
+                                datagrams_sent: item.attempts,
+                                datagrams_received: 1,
+                            },
+                            config.retain_detail,
+                        );
+                        finished.push(*fd);
+                        continue;
+                    }
+                    if received == 0 {
+                        outcome.datagrams_received += 1;
+                        let protocol = source.classify(item.port, &[]);
+                        outcome.record(
+                            UdpProbe {
+                                port: item.port,
+                                state: UdpPortState::Open,
+                                latency: item.started.elapsed(),
+                                detail: format!("UDP empty response on {}:{}", ip, item.port),
+                                attempts: item.attempts,
+                                protocol,
+                                datagrams_sent: item.attempts,
+                                datagrams_received: 1,
+                            },
+                            config.retain_detail,
+                        );
+                        finished.push(*fd);
+                        continue;
+                    }
+                    // received < 0: distinguish terminal errors from silence.
+                    let errno = last_errno();
+                    if errno == ECONNREFUSED {
+                        outcome.closed_errors += 1;
+                        outcome.record(
+                            UdpProbe {
+                                port: item.port,
+                                state: UdpPortState::Closed,
+                                latency: item.started.elapsed(),
+                                detail: format!(
+                                    "UDP port unreachable on {}:{} (errno {errno})",
+                                    ip, item.port
+                                ),
+                                attempts: item.attempts,
+                                protocol: None,
+                                datagrams_sent: item.attempts,
+                                datagrams_received: 0,
+                            },
+                            config.retain_detail,
+                        );
+                        finished.push(*fd);
+                        continue;
+                    }
+                    if errno == EHOSTUNREACH || errno == ENETUNREACH {
+                        outcome.record(
+                            UdpProbe {
+                                port: item.port,
+                                state: UdpPortState::Error,
+                                latency: item.started.elapsed(),
+                                detail: format!(
+                                    "UDP {}:{} unreachable (errno {errno})",
+                                    ip, item.port
+                                ),
+                                attempts: item.attempts,
+                                protocol: None,
+                                datagrams_sent: item.attempts,
+                                datagrams_received: 0,
+                            },
+                            config.retain_detail,
+                        );
+                        finished.push(*fd);
+                        continue;
+                    }
+                    if errno != EAGAIN && errno != EINTR {
+                        outcome.record(
+                            UdpProbe {
+                                port: item.port,
+                                state: UdpPortState::Error,
+                                latency: item.started.elapsed(),
+                                detail: format!(
+                                    "UDP recv on {}:{} failed (errno {errno})",
+                                    ip, item.port
+                                ),
+                                attempts: item.attempts,
+                                protocol: None,
+                                datagrams_sent: item.attempts,
+                                datagrams_received: 0,
+                            },
+                            config.retain_detail,
+                        );
+                        finished.push(*fd);
+                        continue;
+                    }
+                    // EAGAIN/EINTR: genuine silence, fall through to retry
+                    // budget below.
+                }
                 if item.attempts <= config.max_retries {
                     // Silence only: resend the identical payload (never on
                     // closed/answered; those terminal states return above).
@@ -843,6 +1023,11 @@ fn scan_ports_udp(
         }
         for fd in finished {
             pending.remove(&fd);
+        }
+        // Denied retries (cancel/deadline) rejoin the queue unconsumed so
+        // they count as unscanned, preserving exact accounting.
+        for (port, attempts) in to_requeue.into_iter().rev() {
+            queue.push_front((port, attempts));
         }
         // Retries go to the front (deterministic) for the next fill.
         for (port, attempts) in to_retry.into_iter().rev() {
@@ -1005,5 +1190,165 @@ mod tests {
             &outcome,
         );
         assert!(scanned.cancelled);
+    }
+
+    /// Release-gate regression: definitive CLOSED never retries, even when
+    /// a retry budget is available. Exactly one attempt, zero retries.
+    #[test]
+    fn closed_never_retries_even_with_budget() {
+        let outcome = NativeUdpScanner.scan(
+            "127.0.0.1".parse().unwrap(),
+            &[closed_port()],
+            &EmptySource,
+            &test_config(500, 1),
+        );
+        assert_eq!(outcome.probes.len(), 1);
+        assert_eq!(outcome.probes[0].state, UdpPortState::Closed);
+        assert_eq!(outcome.probes[0].attempts, 1);
+        assert_eq!(outcome.retries, 0);
+    }
+
+    /// Release-gate regression: a valid response never retries, even with
+    /// budget available. Exactly one attempt, zero retries.
+    #[test]
+    fn valid_response_never_retries_with_budget() {
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = server.local_addr().unwrap().port();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_thread = stop.clone();
+        let handle = std::thread::spawn(move || {
+            server
+                .set_read_timeout(Some(Duration::from_millis(100)))
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !stop_thread.load(Ordering::SeqCst) && Instant::now() < deadline {
+                let mut buf = [0u8; 2048];
+                if let Ok((count, addr)) = server.recv_from(&mut buf) {
+                    let _ = server.send_to(&buf[..count.min(8)], addr);
+                }
+            }
+        });
+        let outcome = NativeUdpScanner.scan(
+            "127.0.0.1".parse().unwrap(),
+            &[port],
+            &EmptySource,
+            &test_config(2000, 1),
+        );
+        stop.store(true, Ordering::SeqCst);
+        handle.join().unwrap();
+        assert_eq!(outcome.probes.len(), 1);
+        assert_eq!(outcome.probes[0].state, UdpPortState::Open);
+        assert_eq!(outcome.probes[0].attempts, 1);
+        assert_eq!(outcome.retries, 0);
+    }
+
+    /// Release-gate regression: silence without budget never retries.
+    #[test]
+    fn silence_without_budget_never_retries() {
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = server.local_addr().unwrap().port();
+        let outcome = NativeUdpScanner.scan(
+            "127.0.0.1".parse().unwrap(),
+            &[port],
+            &EmptySource,
+            &test_config(300, 0),
+        );
+        drop(server);
+        assert_eq!(outcome.probes.len(), 1);
+        assert_eq!(outcome.probes[0].state, UdpPortState::OpenOrFiltered);
+        assert_eq!(outcome.probes[0].attempts, 1);
+        assert_eq!(outcome.retries, 0);
+    }
+
+    /// Release-gate regression: non-retryable local errors never retry,
+    /// even with budget available.
+    #[test]
+    fn non_retryable_send_error_never_retries() {
+        struct OversizedSource;
+        impl UdpProbeSource for OversizedSource {
+            fn payload(&self, _ip: &IpAddr, _port: u16) -> Vec<u8> {
+                vec![0u8; 70_000]
+            }
+            fn classify(&self, _port: u16, _response: &[u8]) -> Option<String> {
+                None
+            }
+        }
+        let outcome = NativeUdpScanner.scan(
+            "127.0.0.1".parse().unwrap(),
+            &[closed_port()],
+            &OversizedSource,
+            &test_config(500, 1),
+        );
+        assert_eq!(outcome.probes.len(), 1);
+        assert_eq!(outcome.probes[0].state, UdpPortState::Error);
+        assert_eq!(outcome.probes[0].attempts, 1);
+        assert_eq!(outcome.retries, 0);
+    }
+
+    /// Release-gate regression: retryable silence never exceeds the
+    /// configured attempt budget (initial + at most `max_retries`).
+    #[test]
+    fn retryable_silence_never_exceeds_budget() {
+        let holders: Vec<UdpSocket> = (0..3)
+            .map(|_| UdpSocket::bind("127.0.0.1:0").unwrap())
+            .collect();
+        let ports: Vec<u16> = holders
+            .iter()
+            .map(|socket| socket.local_addr().unwrap().port())
+            .collect();
+        let outcome = NativeUdpScanner.scan(
+            "127.0.0.1".parse().unwrap(),
+            &ports,
+            &EmptySource,
+            &test_config(300, 1),
+        );
+        drop(holders);
+        assert_eq!(outcome.probes.len(), 3);
+        for probe in &outcome.probes {
+            assert_eq!(probe.state, UdpPortState::OpenOrFiltered);
+            assert_eq!(probe.attempts, 2, "silence uses exactly budget 1+1");
+            assert!(probe.attempts <= 1 + 1);
+        }
+        assert_eq!(outcome.retries, 3);
+        assert_eq!(outcome.datagrams_sent, 6);
+    }
+
+    /// Release-gate regression: cancellation admits no new retries.
+    #[test]
+    fn cancelled_scan_admits_no_new_retries() {
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = server.local_addr().unwrap().port();
+        let token = CancellationToken::default();
+        token.cancel();
+        let config = UdpScanConfig::bounded(Duration::from_millis(300), 16, 1, None, token);
+        let outcome =
+            NativeUdpScanner.scan("127.0.0.1".parse().unwrap(), &[port], &EmptySource, &config);
+        drop(server);
+        assert!(outcome.cancelled);
+        assert_eq!(outcome.retries, 0);
+        assert_eq!(outcome.unscanned, 1);
+        assert!(outcome.probes.is_empty());
+    }
+
+    /// Release-gate regression: an already-expired overall deadline admits
+    /// no new retries.
+    #[test]
+    fn expired_deadline_admits_no_new_retries() {
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = server.local_addr().unwrap().port();
+        let past = Instant::now() - Duration::from_secs(1);
+        let config = UdpScanConfig::bounded(
+            Duration::from_millis(300),
+            16,
+            1,
+            Some(past),
+            CancellationToken::default(),
+        );
+        let outcome =
+            NativeUdpScanner.scan("127.0.0.1".parse().unwrap(), &[port], &EmptySource, &config);
+        drop(server);
+        assert_eq!(outcome.retries, 0);
+        assert!(outcome.truncated);
+        assert!(outcome.unscanned >= 1);
     }
 }
