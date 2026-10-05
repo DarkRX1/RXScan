@@ -102,7 +102,6 @@ or domain word is evidence of reuse, never proof of identity — accounts
 are never auto-merged, and no person entities are inferred.
 
 ## Provenance and explanation
-
 Every entity and relationship records source entity, transform ID,
 provider/source, contact class, timestamp, evidence, confidence, and
 depth. `explain_entity` walks the chain back to the seed, e.g.:
@@ -151,3 +150,32 @@ which transforms and DNS names actually completed, so later diffs report
 
 All examples use reserved/synthetic values (`example.test`,
 `192.0.2.10`, `2001:db8::10`).
+
+## Observation classes (Stage 4)
+
+Every relationship carries `observation_class`:
+
+```text
+observed  directly seen evidence (provider confirmed account,
+          profile contains link, DNS answered)
+derived   normalization of observed data (URL host to domain,
+          forge URL pattern to repository identity)
+inferred  interpretive verdicts only; the transform engine never emits
+          these, and they are never presented as observed fact
+```
+
+## Exposure enrichment (Stage 3)
+
+```bash
+rxscan investigate --username exampleuser --exposure
+```
+
+Opt-in defensive exposure lookup for the seed identifier. External
+providers that receive identifiers run only with `--exposure`; see
+`docs/EXPOSURE.md`. Secrets are never retained; the human summary ends
+with `secrets stored: 0`.
+
+## DOT export (Stage 4)
+
+Library function `investigate::render_dot` renders the evidence graph in
+DOT format (deterministic, bounded). GraphML is deferred.

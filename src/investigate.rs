@@ -1496,6 +1496,30 @@ fn observation(
     }
 }
 
+/// Observation classes: how a relationship was established.
+///
+/// * `observed` — directly seen evidence (profile contains the link, DNS
+///   answered, provider confirmed the account).
+/// * `derived` — normalization of observed data (URL host to domain, forge
+///   URL pattern to repository identity). No new contact, no new claim.
+/// * `inferred` — interpretive correlation verdicts. The transform engine
+///   never emits these; only explicit reconciliation overlays
+///   (`reconcile_candidates`) may, and they are never presented as
+///   observed fact.
+pub const OBSERVATION_OBSERVED: &str = "observed";
+pub const OBSERVATION_DERIVED: &str = "derived";
+pub const OBSERVATION_INFERRED: &str = "inferred";
+
+/// Default observation class per transform. Pure normalization transforms
+/// derive; everything else observes. Applied authoritatively at admission
+/// so every relationship carries a class even when a transform omits it.
+fn observation_class_for(transform_id: &str) -> &'static str {
+    match transform_id {
+        "url_to_domain" | "url_to_repository" => OBSERVATION_DERIVED,
+        _ => OBSERVATION_OBSERVED,
+    }
+}
+
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1810,7 +1834,7 @@ impl<'a> InvestigationEngine<'a> {
             }
             // Admit relationships (dedup by from/to/relation; strongest
             // confidence wins, bounded evidence merged).
-            for rel in output.relationships {
+            for mut rel in output.relationships {
                 let key = (rel.from.clone(), rel.to.clone(), rel.relation.to_string());
                 if self.edge_keys.contains(&key) {
                     // Merge evidence into the existing edge without
@@ -1839,6 +1863,13 @@ impl<'a> InvestigationEngine<'a> {
                     self.mark_truncated("relationship_budget");
                     break;
                 }
+                // Stage 4: every relationship carries its observation class
+                // (observed vs derived); inferred is never auto-emitted.
+                rel.attributes
+                    .entry("observation_class".to_owned())
+                    .or_insert_with(|| {
+                        observation_class_for(&rel.provenance.transform_id).to_owned()
+                    });
                 self.edge_keys.insert(key);
                 self.relationships.push(rel);
                 self.accounting.relationships_created += 1;
@@ -2043,7 +2074,7 @@ impl<'a> InvestigationEngine<'a> {
             self.entities.insert(entity.id.clone(), entity);
             self.accounting.entities_created += 1;
         }
-        for rel in edges {
+        for mut rel in edges {
             let key = (rel.from.clone(), rel.to.clone(), rel.relation.to_string());
             if self.edge_keys.contains(&key) {
                 continue;
@@ -2055,6 +2086,9 @@ impl<'a> InvestigationEngine<'a> {
                 self.mark_truncated("relationship_budget");
                 break;
             }
+            rel.attributes
+                .entry("observation_class".to_owned())
+                .or_insert_with(|| observation_class_for(&rel.provenance.transform_id).to_owned());
             self.edge_keys.insert(key);
             self.relationships.push(rel);
             self.accounting.relationships_created += 1;
@@ -2405,6 +2439,52 @@ pub fn render_jsonl(report: &InvestigationReport) -> String {
         }),
     ));
     out.push('\n');
+    out
+}
+
+/// DOT export for investigation graphs (Stage 4 graph V3). Nodes carry a
+/// `kind` shape hint; edges are labeled with the relation. Pure,
+/// deterministic, bounded by the graph itself. GraphML is deferred: DOT
+/// covers the cleanly-implementable export need.
+pub fn render_dot(report: &InvestigationReport) -> String {
+    fn escape(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        for ch in text.chars() {
+            match ch {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                c if c.is_control() => out.push(' '),
+                c => out.push(c),
+            }
+        }
+        out
+    }
+    let mut out = String::from("digraph investigation {\n  rankdir=LR;\n");
+    for entity in report.ordered_entities() {
+        let shape = match entity.kind {
+            EntityKind::Username | EntityKind::Account => "ellipse",
+            EntityKind::Domain | EntityKind::Hostname => "box",
+            EntityKind::IpAddress => "diamond",
+            _ => "note",
+        };
+        out.push_str(&format!(
+            "  \"{}\" [label=\"{}:{}\" shape={}];\n",
+            escape(&entity.id),
+            entity.kind,
+            escape(&truncate(&entity.label, 48)),
+            shape
+        ));
+    }
+    for rel in &report.relationships {
+        out.push_str(&format!(
+            "  \"{}\" -> \"{}\" [label=\"{}\"];\n",
+            escape(&rel.from),
+            escape(&rel.to),
+            rel.relation
+        ));
+    }
+    out.push_str("}\n");
     out
 }
 
