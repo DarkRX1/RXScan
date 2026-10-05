@@ -67,6 +67,14 @@ pub const HARD_MAX_HTTP_REQUESTS: usize = 1_000;
 pub const DEFAULT_MAX_DNS_QUERIES: usize = 100;
 pub const HARD_MAX_DNS_QUERIES: usize = 1_000;
 pub const DEFAULT_MAX_PROVIDERS: usize = 10_000;
+pub const DEFAULT_MAX_NETWORK_PIVOTS: usize = 10;
+pub const HARD_MAX_NETWORK_PIVOTS: usize = 100;
+/// Bounded pivot port set: host discovery plus port presence only. No
+/// service probing, no TLS/SSH handshakes (those stay in the scanner's
+/// explicit workflows). Small and fixed so pivot cost is predictable.
+pub const NETWORK_PIVOT_PORTS: &[u16] = &[80, 443, 22, 8080, 8443];
+/// Per-port pivot connect timeout.
+pub const NETWORK_PIVOT_PORT_TIMEOUT: Duration = Duration::from_secs(2);
 /// Default global investigation deadline.
 pub const DEFAULT_INVESTIGATION_DEADLINE: Duration = Duration::from_secs(60);
 
@@ -142,13 +150,33 @@ pub struct InvestigationConfig {
     pub exposure: bool,
     /// Operator-supplied local exposure dataset (local-only, never uploaded).
     pub exposure_dataset: Option<std::path::PathBuf>,
+    /// Explicit authorized network bridge. Without this, `network_scans`
+    /// is always 0. Requires explicit `--scope`; the Scope Guard stays
+    /// authoritative for every pivot.
+    pub network: bool,
+    /// Authoritative scope allowlist for network pivots ( IPs, CIDRs,
+    /// hostnames, URLs). Empty means no authorization: `--network`
+    /// without scope is rejected.
+    pub scopes: Vec<String>,
+    /// Scope exclusions for network pivots.
+    pub scope_exclusions: Vec<String>,
+    /// Maximum IPs to pivot into per investigation.
+    pub max_network_pivots: usize,
+    /// Pivot contact backend. `None` selects the production bounded TCP
+    /// connect prober; tests inject deterministic fixtures.
+    pub pivot: Option<std::sync::Arc<dyn NetworkPivot>>,
 }
 
 impl InvestigationConfig {
     pub fn username(username: &str) -> Self {
+        Self::seeded(SeedKind::Username, username)
+    }
+
+    /// Constructor for domain/URL seeds with identical defaults.
+    pub fn seeded(kind: SeedKind, value: &str) -> Self {
         Self {
-            seed_kind: SeedKind::Username,
-            seed_value: username.to_owned(),
+            seed_kind: kind,
+            seed_value: value.to_owned(),
             depth: DEFAULT_DEPTH,
             max_entities: DEFAULT_MAX_ENTITIES,
             max_relationships: DEFAULT_MAX_RELATIONSHIPS,
@@ -162,6 +190,11 @@ impl InvestigationConfig {
             categories: BTreeSet::new(),
             exposure: false,
             exposure_dataset: None,
+            network: false,
+            scopes: Vec::new(),
+            scope_exclusions: Vec::new(),
+            max_network_pivots: DEFAULT_MAX_NETWORK_PIVOTS,
+            pivot: None,
         }
     }
 
@@ -188,6 +221,24 @@ impl InvestigationConfig {
         }
         if self.max_providers == 0 {
             return Err("max_providers must be positive".to_owned());
+        }
+        if self.max_network_pivots > HARD_MAX_NETWORK_PIVOTS {
+            return Err(format!(
+                "max_network_pivots must be 0..={HARD_MAX_NETWORK_PIVOTS}"
+            ));
+        }
+        // The bridge is explicit or it does not exist: network pivots
+        // require an explicit, parseable scope. Scope parsing is pure
+        // (no DNS contact), so validation is safe in plan-only mode.
+        if self.network && self.scopes.is_empty() {
+            return Err(
+                "--network requires explicit --scope (no authorization inferred)".to_owned(),
+            );
+        }
+        for scope in self.scopes.iter().chain(self.scope_exclusions.iter()) {
+            if crate::target::TargetSpec::parse(scope).is_err() {
+                return Err(format!("invalid scope rule '{scope}'"));
+            }
         }
         match self.seed_kind {
             SeedKind::Username => {
@@ -386,7 +437,8 @@ pub struct InvestigationAccounting {
     pub relationships_created: usize,
     pub http_requests: usize,
     pub dns_queries: usize,
-    /// Passive investigation never performs network scans; always 0.
+    /// Authorized network pivots executed. Always 0 unless the operator
+    /// passed `--network` with an explicit scope.
     pub network_scans: u64,
     /// Opt-in exposure lookups completed (0 unless `--exposure`).
     pub exposure_lookups: usize,
@@ -419,9 +471,8 @@ impl InvestigationAccounting {
                 self.transforms_unscanned,
             ));
         }
-        if self.network_scans != 0 {
-            return Err("passive investigation must never record network scans".to_owned());
-        }
+        // `network_scans` is 0 for passive runs and counts authorized
+        // pivots for `--network` runs; both are asserted per-mode by tests.
         Ok(())
     }
 }
@@ -514,6 +565,98 @@ pub trait DnsFetcher: Send + Sync {
         deadline: Instant,
         cancelled: &AtomicBool,
     ) -> Result<Vec<String>, String>;
+}
+
+/// Bounded direct-network pivot backend (Stage 6). Called at most once
+/// per in-scope IP, only when the operator passed `--network` with an
+/// explicit valid scope. Returns per-port reachability for the fixed
+/// [`NETWORK_PIVOT_PORTS`] set: host discovery plus port presence.
+/// Silence is uncertainty (closed/filtered), never a negative claim.
+pub trait NetworkPivot: Send + Sync + std::fmt::Debug {
+    fn probe(
+        &self,
+        ip: std::net::IpAddr,
+        deadline: Instant,
+        cancelled: &AtomicBool,
+    ) -> Vec<(u16, bool)>;
+}
+
+/// Production pivot: bounded TCP connect checks with per-port timeouts.
+/// Refuses non-public destinations unless test loopback is enabled.
+/// Never performs service probing, TLS/SSH handshakes, or UDP work.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TcpConnectPivot {
+    pub allow_test_loopback: bool,
+}
+
+impl NetworkPivot for TcpConnectPivot {
+    fn probe(
+        &self,
+        ip: std::net::IpAddr,
+        deadline: Instant,
+        cancelled: &AtomicBool,
+    ) -> Vec<(u16, bool)> {
+        let mut out = Vec::with_capacity(NETWORK_PIVOT_PORTS.len());
+        if !self.allow_test_loopback && is_non_public_literal(ip, false) {
+            return out;
+        }
+        for port in NETWORK_PIVOT_PORTS {
+            if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+                break;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let timeout = NETWORK_PIVOT_PORT_TIMEOUT.min(remaining);
+            if timeout.is_zero() {
+                break;
+            }
+            let open = std::net::TcpStream::connect_timeout(
+                &std::net::SocketAddr::new(ip, *port),
+                timeout,
+            )
+            .is_ok();
+            out.push((*port, open));
+        }
+        out
+    }
+}
+
+/// Deterministic fixture pivot for tests: canned per-port results with a
+/// call log proving which IPs were actually contacted (scope tests).
+#[derive(Debug, Default)]
+pub struct FixturePivot {
+    pub open: std::collections::BTreeSet<(String, u16)>,
+    pub calls: std::sync::Mutex<Vec<String>>,
+}
+
+impl FixturePivot {
+    pub fn with_open(mut self, ip: &str, port: u16) -> Self {
+        self.open.insert((ip.to_owned(), port));
+        self
+    }
+
+    pub fn contacted(&self) -> Vec<String> {
+        self.calls
+            .lock()
+            .map(|calls| calls.clone())
+            .unwrap_or_default()
+    }
+}
+
+impl NetworkPivot for FixturePivot {
+    fn probe(
+        &self,
+        ip: std::net::IpAddr,
+        _deadline: Instant,
+        _cancelled: &AtomicBool,
+    ) -> Vec<(u16, bool)> {
+        if let Ok(mut calls) = self.calls.lock() {
+            calls.push(ip.to_string());
+        }
+        NETWORK_PIVOT_PORTS
+            .iter()
+            .map(|port| (*port, self.open.contains(&(ip.to_string(), *port))))
+            .collect()
+    }
 }
 
 /// Context handed to every transform: shared deadline, cancellation,
@@ -1533,6 +1676,7 @@ pub struct InvestigationEngine<'a> {
     search: &'a dyn UsernameSearchRunner,
     profile: &'a dyn ProfileFetcher,
     dns: &'a dyn DnsFetcher,
+    pivot: std::sync::Arc<dyn NetworkPivot>,
     pub entities: BTreeMap<String, InvestigationEntity>,
     pub relationships: Vec<InvestigationRelationship>,
     edge_keys: BTreeSet<(String, String, String)>,
@@ -1568,6 +1712,11 @@ impl<'a> InvestigationEngine<'a> {
             ),
         );
         Ok(Self {
+            pivot: config.pivot.clone().unwrap_or_else(|| {
+                std::sync::Arc::new(TcpConnectPivot {
+                    allow_test_loopback: config.allow_test_loopback,
+                })
+            }),
             config,
             registry: TransformRegistry::new(),
             search,
@@ -1893,6 +2042,10 @@ impl<'a> InvestigationEngine<'a> {
             self.enrich_exposure(cancelled, deadline);
         }
 
+        // Explicit authorized network bridge (Stage 6). Without
+        // `--network`, this is a no-op and `network_scans` stays 0.
+        self.run_network_bridge(cancelled, deadline);
+
         // Deterministic final ordering: never expose completion timing.
         self.observations.sort_by(|a, b| {
             a.transform_id
@@ -1932,9 +2085,12 @@ impl<'a> InvestigationEngine<'a> {
                 max_http_requests: self.config.max_http_requests,
                 max_dns_queries: self.config.max_dns_queries,
                 max_providers: self.config.max_providers,
+                max_network_pivots: self.config.max_network_pivots,
             },
-            network_scans: 0,
-            direct_network_contacts: 0,
+            network_scans: self.accounting.network_scans,
+            direct_network_contacts: self.accounting.network_scans,
+            network_enabled: self.config.network,
+            network_scopes: self.config.scopes.clone(),
             started_at: self.started_at,
             completed_at,
         }
@@ -1943,6 +2099,213 @@ impl<'a> InvestigationEngine<'a> {
     fn mark_truncated(&mut self, reason: &str) {
         self.accounting.truncated = true;
         self.accounting.truncation_reasons.insert(reason.to_owned());
+    }
+
+    /// Explicit authorized network bridge (Stage 6). Runs only when the
+    /// operator passed `--network` with an explicit valid scope — both
+    /// checked in [`InvestigationConfig::validate`], so reaching here
+    /// means authorization was explicit, never inferred from discovery.
+    ///
+    /// Pivot candidates are DNS-derived `IpAddress` entities (`RESOLVES_TO`
+    /// inbound). The Scope Guard is authoritative per IP: out-of-scope
+    /// addresses stay graph entities with `pivot_authorized=false` and are
+    /// never contacted. Each probed IP consumes one `max_network_pivots`
+    /// unit and performs bounded TCP connect checks over
+    /// [`NETWORK_PIVOT_PORTS`] — host discovery plus port presence only,
+    /// never service probing. Silence is uncertainty: closed/filtered
+    /// ports produce observations, never negative entities.
+    fn run_network_bridge(&mut self, cancelled: &AtomicBool, deadline: Instant) {
+        if !self.config.network {
+            return;
+        }
+        let now = unix_now();
+        let policy = match crate::scope::ScopePolicy::from_targets(
+            &[],
+            &self.config.scopes,
+            &self.config.scope_exclusions,
+        ) {
+            Ok(policy) => policy,
+            Err(error) => {
+                self.observations.push(InvestigationObservation {
+                    transform_id: "network_pivot".to_owned(),
+                    input_entity_id: self.run_id.clone(),
+                    contact_class: ContactClass::PassivePublic,
+                    status: "error".to_owned(),
+                    confidence: 0,
+                    timestamp: now,
+                    evidence: vec![truncate(&error.to_string(), 256)],
+                    attributes: BTreeMap::new(),
+                });
+                self.mark_truncated("scope_error");
+                return;
+            }
+        };
+        // Candidates: DNS-derived IPs only, deterministic order.
+        let resolvers: BTreeSet<String> = self
+            .relationships
+            .iter()
+            .filter(|rel| rel.relation == EdgeRelation::ResolvesTo)
+            .map(|rel| rel.to.clone())
+            .collect();
+        let mut candidates: Vec<String> = self
+            .entities
+            .values()
+            .filter(|entity| entity.kind == EntityKind::IpAddress && resolvers.contains(&entity.id))
+            .map(|entity| entity.id.clone())
+            .collect();
+        candidates.sort();
+        candidates.dedup();
+        let mut pivots_used: usize = 0;
+        for ip_id in candidates {
+            if cancelled.load(Ordering::Acquire) {
+                self.mark_truncated("cancellation");
+                break;
+            }
+            if Instant::now() >= deadline {
+                self.mark_truncated("deadline");
+                break;
+            }
+            let ip_text = self
+                .entities
+                .get(&ip_id)
+                .map(|entity| entity.canonical_value.clone())
+                .unwrap_or_default();
+            let Ok(ip) = ip_text.parse::<std::net::IpAddr>() else {
+                continue;
+            };
+            if !policy.permits(Some(ip), None) {
+                // Observed, stored, displayed — never contacted.
+                if let Some(entity) = self.entities.get_mut(&ip_id) {
+                    entity
+                        .attributes
+                        .insert("pivot_authorized".to_owned(), "false".to_owned());
+                }
+                self.observations.push(InvestigationObservation {
+                    transform_id: "network_pivot".to_owned(),
+                    input_entity_id: ip_id,
+                    contact_class: ContactClass::PassivePublic,
+                    status: "rejected_by_scope".to_owned(),
+                    confidence: 0,
+                    timestamp: unix_now(),
+                    evidence: vec![format!("{ip} is outside the authorized pivot scope")],
+                    attributes: BTreeMap::new(),
+                });
+                continue;
+            }
+            if pivots_used >= self.config.max_network_pivots {
+                self.mark_truncated("network_pivot_budget");
+                break;
+            }
+            let results = self.pivot.probe(ip, deadline, cancelled);
+            self.accounting.network_scans += 1;
+            pivots_used += 1;
+            if let Some(entity) = self.entities.get_mut(&ip_id) {
+                entity
+                    .attributes
+                    .insert("pivot_authorized".to_owned(), "true".to_owned());
+                entity
+                    .attributes
+                    .insert("pivot_contacted".to_owned(), "true".to_owned());
+            }
+            let mut open_ports = Vec::new();
+            for (port, open) in results {
+                if !open {
+                    continue;
+                }
+                open_ports.push(port);
+                let port_id = crate::graph::port_entity_id("tcp", &ip.to_string(), port);
+                let provenance = TransformProvenance {
+                    source_entity: Some(ip_id.clone()),
+                    transform_id: "network_pivot".to_owned(),
+                    provider: None,
+                    contact_class: ContactClass::DirectNetwork,
+                    timestamp: unix_now(),
+                    evidence: vec![format!(
+                        "authorized pivot: TCP connect to {ip}:{port} succeeded"
+                    )],
+                    confidence: 80,
+                    depth: self
+                        .entities
+                        .get(&ip_id)
+                        .map(|entity| entity.depth)
+                        .unwrap_or(0),
+                };
+                if !self.entities.contains_key(&port_id) {
+                    if self.entities.len() >= self.config.max_entities {
+                        self.mark_truncated("entity_budget");
+                        break;
+                    }
+                    self.entities.insert(
+                        port_id.clone(),
+                        InvestigationEntity {
+                            id: port_id.clone(),
+                            kind: EntityKind::Port,
+                            label: format!("{ip}:{port}/tcp"),
+                            canonical_value: port_id.clone(),
+                            attributes: BTreeMap::from([
+                                ("address".to_owned(), ip.to_string()),
+                                ("transport".to_owned(), "tcp".to_owned()),
+                                ("port".to_owned(), port.to_string()),
+                                ("pivot_contacted".to_owned(), "true".to_owned()),
+                            ]),
+                            depth: self
+                                .entities
+                                .get(&ip_id)
+                                .map(|entity| entity.depth)
+                                .unwrap_or(0),
+                            provenance: provenance.clone(),
+                            observations: 1,
+                        },
+                    );
+                    self.accounting.entities_created += 1;
+                }
+                let key = (
+                    ip_id.clone(),
+                    port_id.clone(),
+                    EdgeRelation::ListensOn.to_string(),
+                );
+                if self.edge_keys.contains(&key) {
+                    continue;
+                }
+                if self.relationships.len() >= self.config.max_relationships {
+                    self.mark_truncated("relationship_budget");
+                    break;
+                }
+                self.edge_keys.insert(key);
+                self.relationships.push(InvestigationRelationship {
+                    from: ip_id.clone(),
+                    to: port_id,
+                    relation: EdgeRelation::ListensOn,
+                    confidence: 80,
+                    provenance,
+                    evidence: vec![format!(
+                        "authorized pivot: TCP connect to {ip}:{port} succeeded"
+                    )],
+                    attributes: BTreeMap::from([
+                        (
+                            "observation_class".to_owned(),
+                            OBSERVATION_OBSERVED.to_owned(),
+                        ),
+                        ("pivot_contacted".to_owned(), "true".to_owned()),
+                    ]),
+                });
+                self.accounting.relationships_created += 1;
+            }
+            self.observations.push(InvestigationObservation {
+                transform_id: "network_pivot".to_owned(),
+                input_entity_id: ip_id,
+                contact_class: ContactClass::DirectNetwork,
+                status: "completed".to_owned(),
+                confidence: 80,
+                timestamp: unix_now(),
+                evidence: vec![format!(
+                    "pivot {ip}: {} open of {} probed",
+                    open_ports.len(),
+                    NETWORK_PIVOT_PORTS.len()
+                )],
+                attributes: BTreeMap::new(),
+            });
+        }
     }
 
     /// Opt-in exposure enrichment for the seed identifier. Normalized
@@ -2121,6 +2484,7 @@ pub struct BudgetSnapshot {
     pub max_http_requests: usize,
     pub max_dns_queries: usize,
     pub max_providers: usize,
+    pub max_network_pivots: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2138,6 +2502,9 @@ pub struct InvestigationReport {
     pub budgets: BudgetSnapshot,
     pub network_scans: u64,
     pub direct_network_contacts: u64,
+    pub network_enabled: bool,
+    #[serde(default)]
+    pub network_scopes: Vec<String>,
     pub started_at: u64,
     pub completed_at: u64,
 }
@@ -2242,8 +2609,40 @@ pub fn explain_plan(config: &InvestigationConfig) -> String {
     } else {
         out.push_str("\nexposure          disabled (pass --exposure to opt in)\n");
     }
+    if config.network {
+        out.push_str("\nNETWORK BRIDGE\n");
+        out.push_str("enabled             yes (explicit --network)\n");
+        out.push_str(&format!(
+            "authorized scope    {}\n",
+            if config.scope_exclusions.is_empty() {
+                config.scopes.join(", ")
+            } else {
+                format!(
+                    "{} except {}",
+                    config.scopes.join(", "),
+                    config.scope_exclusions.join(", ")
+                )
+            }
+        ));
+        out.push_str(&format!(
+            "network budget      {} pivots\npivot ports         {}\n",
+            config.max_network_pivots,
+            NETWORK_PIVOT_PORTS
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+        out.push_str(
+            "candidates        DNS-derived IPs, filtered by Scope Guard at runtime\nout-of-scope       observed as entities, never contacted\n",
+        );
+    } else {
+        out.push_str(
+            "\nNETWORK BRIDGE\n  disabled (pass --network with explicit --scope to authorize)\n",
+        );
+    }
     out.push_str(
-        "note              rxscan investigate never port scans discovered infrastructure\n",
+        "note              rxscan investigate never port scans without explicit --network --scope\n",
     );
     out
 }
@@ -2260,7 +2659,18 @@ pub fn render_human(report: &InvestigationReport, show_all: bool) -> String {
         report.seed.canonical_value
     ));
     out.push_str(&format!("depth      {}\n", report.depth));
-    out.push_str("network    disabled\n\n");
+    if report.network_enabled {
+        out.push_str(&format!(
+            "network    AUTHORIZED (scope: {})\n\n",
+            if report.network_scopes.is_empty() {
+                "none".to_owned()
+            } else {
+                report.network_scopes.join(", ")
+            }
+        ));
+    } else {
+        out.push_str("network    disabled\n\n");
+    }
     // Accounts first (strongest signal), then a bounded sample of the rest.
     let mut accounts: Vec<&InvestigationEntity> = report
         .entities
@@ -2339,11 +2749,12 @@ pub fn render_human(report: &InvestigationReport, show_all: bool) -> String {
         ));
     }
     out.push_str(&format!(
-        "\n----------------------------------------\n{} entities \u{00B7} {} relationships\n{} HTTP \u{00B7} {} DNS \u{00B7} 0 network scans\n",
+        "\n----------------------------------------\n{} entities \u{00B7} {} relationships\n{} HTTP \u{00B7} {} DNS \u{00B7} {} network scans\n",
         report.entities.len(),
         report.relationships.len(),
         report.accounting.http_requests,
         report.accounting.dns_queries,
+        report.accounting.network_scans,
     ));
     if report.accounting.exposure_lookups > 0 || report.accounting.exposures_found > 0 {
         out.push_str(&format!(
@@ -3088,7 +3499,23 @@ pub fn persist_investigation(
             dns_queried.insert(entity.canonical_value.clone());
         }
     }
+    // Pivoted hosts are attempted hosts: the diff engine treats them as
+    // covered (appearance/disappearance semantics) rather than unknown.
+    let mut hosts_attempted: Vec<String> = report
+        .observations
+        .iter()
+        .filter(|o| o.transform_id == "network_pivot" && o.status == "completed")
+        .filter_map(|o| {
+            report
+                .entities
+                .get(&o.input_entity_id)
+                .map(|entity| entity.canonical_value.clone())
+        })
+        .collect();
+    hosts_attempted.sort();
+    hosts_attempted.dedup();
     let coverage = CoverageSnapshot {
+        hosts_attempted,
         dns_queried: dns_queried.into_iter().collect(),
         modules_completed: modules,
         truncated: report.accounting.truncated,
@@ -3116,7 +3543,8 @@ pub fn persist_investigation(
         finished_at_ms: report.completed_at.saturating_mul(1_000),
         scope_json: serde_json::json!({
             "contact_class": ["passive_public", "public_http", "dns_query"],
-            "direct_network": false,
+            "direct_network": report.network_enabled,
+            "network_scopes": report.network_scopes,
             "seed_kind": report.seed_kind.as_str(),
             "depth": report.depth,
         })
@@ -3301,6 +3729,12 @@ pub fn capability_entries() -> Vec<(String, bool, String)> {
             "investigation_direct_network".to_owned(),
             false,
             "disabled by default; passive investigation never port scans".to_owned(),
+        ),
+        (
+            "investigation_network_bridge".to_owned(),
+            true,
+            "explicit --network with valid --scope; Scope Guard authoritative; budgeted pivots"
+                .to_owned(),
         ),
     ]
 }

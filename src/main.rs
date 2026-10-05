@@ -2009,6 +2009,10 @@ fn run_investigate(args: &[String]) {
     let mut project_db: Option<std::path::PathBuf> = None;
     let mut exposure = false;
     let mut exposure_dataset: Option<std::path::PathBuf> = None;
+    let mut network = false;
+    let mut scopes: Vec<String> = Vec::new();
+    let mut scope_exclusions: Vec<String> = Vec::new();
+    let mut max_network_pivots = inv::DEFAULT_MAX_NETWORK_PIVOTS;
     let mut index = 2usize;
     while index < args.len() {
         match args[index].as_str() {
@@ -2224,6 +2228,42 @@ fn run_investigate(args: &[String]) {
                 };
                 exposure_dataset = Some(value.into());
             }
+            "--network" => network = true,
+            "--scope" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    err!("rxscan investigate: --scope requires a target or CIDR");
+                    std::process::exit(2);
+                };
+                scopes.push(value.clone());
+            }
+            "--exclude" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    err!("rxscan investigate: --exclude requires a target or CIDR");
+                    std::process::exit(2);
+                };
+                scope_exclusions.push(value.clone());
+            }
+            "--max-network-pivots" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    err!("rxscan investigate: --max-network-pivots requires a value");
+                    std::process::exit(2);
+                };
+                match value.parse::<usize>() {
+                    Ok(parsed) if parsed <= inv::HARD_MAX_NETWORK_PIVOTS => {
+                        max_network_pivots = parsed;
+                    }
+                    _ => {
+                        err!(
+                            "rxscan investigate: --max-network-pivots must be 0..={}",
+                            inv::HARD_MAX_NETWORK_PIVOTS
+                        );
+                        std::process::exit(2);
+                    }
+                }
+            }
             "--color" => {
                 index += 1;
                 let Some(value) = args.get(index) else {
@@ -2246,7 +2286,7 @@ fn run_investigate(args: &[String]) {
             }
             "--help" | "-h" => {
                 out_line!(
-                    "rxscan investigate --username NAME [--depth 0-{}] [--deadline 60s] [--max-entities N] [--max-relationships N] [--max-http-requests N] [--max-dns-queries N] [--max-providers N] [--providers IDS] [--exclude-provider IDS] [--category CATS] [--project-db PATH] [--exposure] [--exposure-dataset PATH] [--all] [--color MODE] [--json|--jsonl] [--explain]\nrxscan investigate --domain NAME [same options]\nrxscan investigate --url URL [same options]\nrxscan investigate transforms [--json]\n\nPassive by default: never port scans discovered infrastructure. DNS queries are DnsQuery, not DirectNetwork. Exposure lookups that send identifiers to third parties run only with --exposure.",
+                    "rxscan investigate --username NAME [--depth 0-{}] [--deadline 60s] [--max-entities N] [--max-relationships N] [--max-http-requests N] [--max-dns-queries N] [--max-providers N] [--providers IDS] [--exclude-provider IDS] [--category CATS] [--project-db PATH] [--exposure] [--exposure-dataset PATH] [--network] [--scope CIDR-OR-HOST] [--exclude CIDR-OR-HOST] [--max-network-pivots N] [--all] [--color MODE] [--json|--jsonl] [--explain]\nrxscan investigate --domain NAME [same options]\nrxscan investigate --url URL [same options]\nrxscan investigate transforms [--json]\n\nPassive by default: never port scans discovered infrastructure. DNS queries are DnsQuery, not DirectNetwork. Exposure lookups that send identifiers to third parties run only with --exposure. Direct network pivots run only with explicit --network and valid --scope.",
                     inv::MAX_DEPTH
                 );
                 return;
@@ -2273,40 +2313,8 @@ fn run_investigate(args: &[String]) {
     };
     let mut config = match seed_kind {
         inv::SeedKind::Username => inv::InvestigationConfig::username(&seed_value),
-        inv::SeedKind::Domain => inv::InvestigationConfig {
-            seed_kind,
-            seed_value: seed_value.clone(),
-            depth: inv::DEFAULT_DEPTH,
-            max_entities: inv::DEFAULT_MAX_ENTITIES,
-            max_relationships: inv::DEFAULT_MAX_RELATIONSHIPS,
-            max_http_requests: inv::DEFAULT_MAX_HTTP_REQUESTS,
-            max_dns_queries: inv::DEFAULT_MAX_DNS_QUERIES,
-            max_providers: inv::DEFAULT_MAX_PROVIDERS,
-            deadline: inv::DEFAULT_INVESTIGATION_DEADLINE,
-            allow_test_loopback: false,
-            selected_providers: None,
-            excluded_providers: std::collections::BTreeSet::new(),
-            categories: std::collections::BTreeSet::new(),
-            exposure: false,
-            exposure_dataset: None,
-        },
-        inv::SeedKind::Url => inv::InvestigationConfig {
-            seed_kind,
-            seed_value: seed_value.clone(),
-            depth: inv::DEFAULT_DEPTH,
-            max_entities: inv::DEFAULT_MAX_ENTITIES,
-            max_relationships: inv::DEFAULT_MAX_RELATIONSHIPS,
-            max_http_requests: inv::DEFAULT_MAX_HTTP_REQUESTS,
-            max_dns_queries: inv::DEFAULT_MAX_DNS_QUERIES,
-            max_providers: inv::DEFAULT_MAX_PROVIDERS,
-            deadline: inv::DEFAULT_INVESTIGATION_DEADLINE,
-            allow_test_loopback: false,
-            selected_providers: None,
-            excluded_providers: std::collections::BTreeSet::new(),
-            categories: std::collections::BTreeSet::new(),
-            exposure: false,
-            exposure_dataset: None,
-        },
+        inv::SeedKind::Domain => inv::InvestigationConfig::seeded(seed_kind, &seed_value),
+        inv::SeedKind::Url => inv::InvestigationConfig::seeded(seed_kind, &seed_value),
     };
     config.depth = depth;
     config.deadline = deadline;
@@ -2320,6 +2328,10 @@ fn run_investigate(args: &[String]) {
     config.categories = categories;
     config.exposure = exposure;
     config.exposure_dataset = exposure_dataset;
+    config.network = network;
+    config.scopes = scopes;
+    config.scope_exclusions = scope_exclusions;
+    config.max_network_pivots = max_network_pivots;
     if let Err(error) = config.validate() {
         err!("rxscan investigate: {error}");
         std::process::exit(2);

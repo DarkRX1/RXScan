@@ -194,3 +194,24 @@ when the new run completed `investigate.username_to_account`; a
 truncated, blocked, or deadline-cut run leaves UNKNOWN, never a fake
 disappearance. Every investigation run carries a unique run id, so
 same-second reruns append history instead of overwriting it.
+
+## Authorized network bridge (Stage 6)
+
+```bash
+rxscan investigate --username exampleuser --network --scope example.test
+```
+
+All of the following are required together, or no network contact
+happens: explicit `--network`, explicit valid `--scope` (repeatable;
+`--exclude` removes), Scope Guard authorization per IP, and pivot
+budget (`--max-network-pivots`, default 10, hard max 100).
+
+Pivot candidates are DNS-derived IP addresses only. Out-of-scope
+addresses stay graph entities (`pivot_authorized=false`) and are never
+contacted. Each probed IP consumes one pivot unit and performs bounded
+TCP connect checks over ports 80, 443, 22, 8080, 8443 — host discovery
+plus port presence only. There is no service probing, no TLS/SSH
+handshake, and no UDP work in pivots; silence is uncertainty, never a
+negative claim. Every pivot is recorded as a `network_pivot`
+observation; open ports become `Port` entities with `LISTENS_ON` edges.
+`--explain` shows the bridge plan without contacting anything.
