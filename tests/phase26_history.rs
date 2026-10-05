@@ -177,3 +177,54 @@ fn project_db_explain_shows_persisted_chain() {
     assert_eq!(code, 1);
     std::fs::remove_file(&db_path).ok();
 }
+
+#[test]
+fn diff_check_exit_codes_serve_automation() {
+    // Identical consecutive persists agree (exit 0); a changed run
+    // reports exit 3 under --check. Default output is unaffected.
+    let same = run_fixture(&[("provider-a", "Provider A", "a.example.test")], 1);
+    let changed = run_fixture(
+        &[
+            ("provider-a", "Provider A", "a.example.test"),
+            ("provider-b", "Provider B", "b.example.test"),
+        ],
+        1,
+    );
+    let db_path = std::env::temp_dir().join(format!("rxscan-check-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&db_path);
+    let db_str = db_path.to_str().unwrap().to_owned();
+    let mut db = rxscan::project_db::ProjectDb::open(&db_path).unwrap();
+    investigate::persist_investigation(&mut db, &same).unwrap();
+    investigate::persist_investigation(&mut db, &changed).unwrap();
+    drop(db);
+    let (code, _, _) = run_cli(&[
+        "project-db",
+        "diff",
+        "--db",
+        &db_str,
+        &same.run_id,
+        &same.run_id,
+        "--check",
+    ]);
+    assert_eq!(code, 0, "identical runs agree");
+    let (code, _, _) = run_cli(&[
+        "project-db",
+        "diff",
+        "--db",
+        &db_str,
+        &same.run_id,
+        &changed.run_id,
+        "--check",
+    ]);
+    assert_eq!(code, 3, "changed runs report exit 3");
+    let (code, _, _) = run_cli(&[
+        "project-db",
+        "diff",
+        "--db",
+        &db_str,
+        &same.run_id,
+        &changed.run_id,
+    ]);
+    assert_eq!(code, 0, "default diff keeps exit 0");
+    std::fs::remove_file(&db_path).ok();
+}

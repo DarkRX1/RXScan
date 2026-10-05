@@ -1456,13 +1456,14 @@ fn run_project_db(args: &[String]) {
     let command = args.get(2).map(String::as_str).unwrap_or("--help");
     if command == "--help" || command == "-h" {
         out_line!(
-            "rxscan project-db scans --db <path> [--json]\nrxscan project-db summary --db <path> [--json]\nrxscan project-db changes --db <path> <scan> [--json] [--limit N]\nrxscan project-db diff --db <path> <old-scan> <new-scan> [--json] [--limit N]\nrxscan project-db explain --db <path> <entity> [--json] [--limit N]"
+            "rxscan project-db scans --db <path> [--json]\nrxscan project-db summary --db <path> [--json]\nrxscan project-db changes --db <path> <scan> [--json] [--limit N]\nrxscan project-db diff --db <path> <old-scan> <new-scan> [--json] [--limit N] [--check]\nrxscan project-db explain --db <path> <entity> [--json] [--limit N]"
         );
         return;
     }
-    // Minimal flag parsing: --db <path>, --json, --limit N, positionals.
+    // Minimal flag parsing: --db <path>, --json, --limit N, --check, positionals.
     let mut db_path: Option<&str> = None;
     let mut json = false;
+    let mut check = false;
     let mut limit = 100usize;
     let mut positionals: Vec<&str> = Vec::new();
     let mut iter = args[3..].iter().peekable();
@@ -1472,6 +1473,11 @@ fn run_project_db(args: &[String]) {
                 db_path = iter.next().map(String::as_str);
             }
             "--json" => json = true,
+            // Automation foundation (Stage 7): `--check` turns diff into
+            // a change detector for scheduled runs — exit 0 when the two
+            // runs agree, exit 3 when changes exist. Default output and
+            // exit codes are unchanged without the flag.
+            "--check" => check = true,
             "--limit" => {
                 limit = iter
                     .next()
@@ -1577,6 +1583,9 @@ fn run_project_db(args: &[String]) {
                 out_line!("{}", serde_json::to_string_pretty(&changes).unwrap());
             } else {
                 out_line!("{}", rxscan::project_db::human_changes_summary(&changes));
+            }
+            if check {
+                std::process::exit(i32::from(!changes.is_empty()) * 3);
             }
         }
         "explain" => {
