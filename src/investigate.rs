@@ -1552,12 +1552,19 @@ impl<'a> InvestigationEngine<'a> {
     ) -> Result<Self, String> {
         config.validate()?;
         let started_at = unix_now();
+        // Run identity must be unique per execution: same-second reruns of
+        // one seed would otherwise collide and overwrite project history
+        // (imports upsert by scan id). Process id plus a per-process
+        // sequence keeps every run distinct without touching the graph.
+        static RUN_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let sequence = RUN_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let run_id = crate::assets::public_entity_id(
             "investigation_run",
             &format!(
-                "{}:{}:{started_at}",
+                "{}:{}:{started_at}:{}:{sequence}",
                 config.seed_kind.as_str(),
-                config.seed_value.to_ascii_lowercase()
+                config.seed_value.to_ascii_lowercase(),
+                std::process::id(),
             ),
         );
         Ok(Self {

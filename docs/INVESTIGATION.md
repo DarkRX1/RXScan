@@ -179,3 +179,18 @@ with `secrets stored: 0`.
 
 Library function `investigate::render_dot` renders the evidence graph in
 DOT format (deterministic, bounded). GraphML is deferred.
+
+## Project history (Stage 5)
+
+```bash
+rxscan project-db diff --db project.db <old-run> <new-run>
+rxscan project-db explain --db project.db domain:example.test
+```
+
+Consecutive investigation persists diff as Added/Removed at both
+entity and relationship level. Removal is coverage-gated per producing
+transform: an account missing from the new run reads as Removed only
+when the new run completed `investigate.username_to_account`; a
+truncated, blocked, or deadline-cut run leaves UNKNOWN, never a fake
+disappearance. Every investigation run carries a unique run id, so
+same-second reruns append history instead of overwriting it.

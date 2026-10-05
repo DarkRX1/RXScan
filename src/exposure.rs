@@ -924,9 +924,20 @@ pub fn run_exposure(
     cancelled: &AtomicBool,
 ) -> ExposureReport {
     let started_at = unix_now();
+    // Unique per execution (same rationale as investigation runs:
+    // imports upsert by scan id, so colliding ids would overwrite
+    // history rather than append it).
+    static EXPOSURE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = EXPOSURE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let run_id = crate::assets::public_entity_id(
         "exposure_run",
-        &format!("{}:{}", kind.as_str(), identifier_hash(identifier)),
+        &format!(
+            "{}:{}:{}:{}",
+            kind.as_str(),
+            identifier_hash(identifier),
+            std::process::id(),
+            sequence
+        ),
     );
     let deadline_at = Instant::now() + deadline;
     let mut accounting = ExposureAccounting {

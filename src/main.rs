@@ -1452,11 +1452,11 @@ fn run_project(args: &[String]) {
 /// pair. Never touches the network; scope already enforced at scan time.
 fn run_project_db(args: &[String]) {
     use rxscan::project_db::ProjectDb;
-    let usage = "rxscan project-db scans|summary|changes|diff --db <path> ...";
+    let usage = "rxscan project-db scans|summary|changes|diff|explain --db <path> ...";
     let command = args.get(2).map(String::as_str).unwrap_or("--help");
     if command == "--help" || command == "-h" {
         out_line!(
-            "rxscan project-db scans --db <path> [--json]\nrxscan project-db summary --db <path> [--json]\nrxscan project-db changes --db <path> <scan> [--json] [--limit N]\nrxscan project-db diff --db <path> <old-scan> <new-scan> [--json] [--limit N]"
+            "rxscan project-db scans --db <path> [--json]\nrxscan project-db summary --db <path> [--json]\nrxscan project-db changes --db <path> <scan> [--json] [--limit N]\nrxscan project-db diff --db <path> <old-scan> <new-scan> [--json] [--limit N]\nrxscan project-db explain --db <path> <entity> [--json] [--limit N]"
         );
         return;
     }
@@ -1577,6 +1577,85 @@ fn run_project_db(args: &[String]) {
                 out_line!("{}", serde_json::to_string_pretty(&changes).unwrap());
             } else {
                 out_line!("{}", rxscan::project_db::human_changes_summary(&changes));
+            }
+        }
+        "explain" => {
+            let Some(entity) = positionals.first() else {
+                err!(
+                    "rxscan project-db explain: usage: rxscan project-db explain --db <path> <entity> [--json] [--limit N]"
+                );
+                std::process::exit(2);
+            };
+            let observations = match db.provenance_chain(entity) {
+                Ok(rows) => rows,
+                Err(error) => {
+                    err!("rxscan project-db explain: {error}");
+                    std::process::exit(1);
+                }
+            };
+            if observations.is_empty() {
+                err!("rxscan project-db explain: unknown entity {entity}");
+                std::process::exit(1);
+            }
+            // Bounded inbound walk toward the seed (cycle-guarded).
+            let mut chain: Vec<String> = Vec::new();
+            let mut current = (*entity).to_owned();
+            let mut seen = std::collections::BTreeSet::new();
+            seen.insert(current.clone());
+            for _ in 0..8 {
+                let inbound = match db.edges_to(&current) {
+                    Ok(edges) => edges,
+                    Err(error) => {
+                        err!("rxscan project-db explain: {error}");
+                        std::process::exit(1);
+                    }
+                };
+                let Some(edge) = inbound.first() else { break };
+                chain.push(format!(
+                    "{} --{}--> {} ({})",
+                    edge.from_id,
+                    edge.relation,
+                    edge.to_id,
+                    edge.evidence.chars().take(120).collect::<String>()
+                ));
+                if !seen.insert(edge.from_id.clone()) {
+                    break;
+                }
+                current = edge.from_id.clone();
+            }
+            if json {
+                out_line!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "entity": entity,
+                        "chain": chain,
+                        "observations": observations,
+                    }))
+                    .unwrap()
+                );
+            } else {
+                out_line!("Why is {entity} present?");
+                out_line!("");
+                for (index, step) in chain.iter().enumerate() {
+                    out_line!("{}. {step}", index + 1);
+                }
+                if chain.is_empty() {
+                    out_line!("(seed entity: no inbound relationships)");
+                }
+                out_line!("");
+                out_line!("observations: {}", observations.len());
+                for observation in observations.iter().take(limit) {
+                    out_line!(
+                        "  {} via {}: {}",
+                        observation.scan_run,
+                        observation.module,
+                        observation
+                            .evidence_excerpt
+                            .chars()
+                            .take(100)
+                            .collect::<String>()
+                    );
+                }
             }
         }
         _ => {

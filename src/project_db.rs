@@ -305,7 +305,7 @@ pub struct EntityRow {
     pub observation_count: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObservationRow {
     pub id: i64,
     pub scan_run: String,
@@ -1514,6 +1514,76 @@ impl ProjectDb {
             }
         }
 
+        // Investigation / exposure entities: new account, removed link
+        // target, new domain/repository/exposure, disappeared account.
+        // Coverage-gated per producing module: an entity absent from the
+        // new run is `Removed` only when the new run completed the module
+        // that produced it (blocked/truncated/deadline runs leave
+        // UNKNOWN, never negative evidence). Modules are the observation
+        // `module` values (`investigate.*`, `exposure.*`); network-scan
+        // entities never enter this layer.
+        fn investigation_module(module: &str) -> bool {
+            module.starts_with("investigate.") || module.starts_with("exposure.")
+        }
+        for (entity_id, new_row) in &new_obs {
+            if old_obs.contains_key(entity_id) || !investigation_module(&new_row.module) {
+                continue;
+            }
+            changes.push(GraphChange {
+                change_type: ChangeType::Added,
+                entity_id: entity_id.clone(),
+                old_value: String::new(),
+                new_value: format!("{} observed", new_row.kind),
+                confidence: 75,
+                evidence: format!("first observed in {scan_new} via {}", new_row.module),
+            });
+        }
+        for (entity_id, old_row) in &old_obs {
+            if new_obs.contains_key(entity_id) || !investigation_module(&old_row.module) {
+                continue;
+            }
+            if !new_cov.modules_completed.contains(&old_row.module) {
+                // Producing transform did not complete in the new run:
+                // unknown, not removed.
+                continue;
+            }
+            changes.push(GraphChange {
+                change_type: ChangeType::Removed,
+                entity_id: entity_id.clone(),
+                old_value: format!("{} observed", old_row.kind),
+                new_value: "not observed (covered)".to_owned(),
+                confidence: 80,
+                evidence: format!(
+                    "covered by {} ({}) without observation",
+                    scan_new, old_row.module
+                ),
+            });
+        }
+        // Investigation / exposure relationships: removed links are
+        // reported only when both endpoints' producing modules completed
+        // in the new run (added links already surface above generically).
+        for edge in old_edges.difference(&new_edges) {
+            let (from, to, relation) = edge;
+            let (Some(from_row), Some(to_row)) = (old_obs.get(from), old_obs.get(to)) else {
+                continue;
+            };
+            if !investigation_module(&from_row.module)
+                || !investigation_module(&to_row.module)
+                || !new_cov.modules_completed.contains(&from_row.module)
+                || !new_cov.modules_completed.contains(&to_row.module)
+            {
+                continue;
+            }
+            changes.push(GraphChange {
+                change_type: ChangeType::Removed,
+                entity_id: format!("{from}→{to}"),
+                old_value: format!("{from} {relation} {to}"),
+                new_value: "link not observed (covered)".to_owned(),
+                confidence: 75,
+                evidence: format!("covered by {scan_new} without observation"),
+            });
+        }
+
         changes.sort_by(|a, b| {
             (a.change_type.as_str(), &a.entity_id).cmp(&(b.change_type.as_str(), &b.entity_id))
         });
@@ -1565,7 +1635,7 @@ impl ProjectDb {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EdgeRow {
     pub from_id: String,
     pub to_id: String,
