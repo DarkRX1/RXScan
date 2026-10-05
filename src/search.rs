@@ -396,6 +396,17 @@ pub enum SearchEntityKind {
     Asn,
     DnsRecord,
     Repository,
+    // Ultimate OSINT expansion (additive).
+    NetworkPrefix,
+    Package,
+    Document,
+    ArchiveSnapshot,
+    PublicKey,
+    ExposureEvent,
+    Provider,
+    Route,
+    IdentityHypothesis,
+    Software,
 }
 
 impl SearchEntityKind {
@@ -419,6 +430,16 @@ impl SearchEntityKind {
             Self::Asn => "asn",
             Self::DnsRecord => "dns_record",
             Self::Repository => "repository",
+            Self::NetworkPrefix => "network_prefix",
+            Self::Package => "package",
+            Self::Document => "document",
+            Self::ArchiveSnapshot => "archive_snapshot",
+            Self::PublicKey => "public_key",
+            Self::ExposureEvent => "exposure_event",
+            Self::Provider => "provider",
+            Self::Route => "route",
+            Self::IdentityHypothesis => "identity_hypothesis",
+            Self::Software => "software",
         }
     }
 }
@@ -456,6 +477,448 @@ impl SearchEntity {
             attributes: BTreeMap::new(),
         })
     }
+
+    /// Canonical email identity: `email:<lower>`.
+    ///
+    /// Additive Phase-1 constructor. Local part 1..=64, total 1..=254,
+    /// single `@`, domain must satisfy [`canonical_domain_value`].
+    pub fn email(value: &str, timestamp: u64) -> Result<Self, SearchError> {
+        let display = value.trim();
+        if display.is_empty() || display.len() > 254 || display.chars().any(char::is_control) {
+            return Err(SearchError::InvalidEntity(
+                "email must be 1..=254 printable characters".to_owned(),
+            ));
+        }
+        let (local, domain) = display.split_once('@').ok_or_else(|| {
+            SearchError::InvalidEntity("email must contain a single '@'".to_owned())
+        })?;
+        if local.is_empty() || local.len() > 64 || domain.is_empty() {
+            return Err(SearchError::InvalidEntity(
+                "email has an invalid local part or domain".to_owned(),
+            ));
+        }
+        if local.contains(char::is_whitespace) || domain.contains(char::is_whitespace) {
+            return Err(SearchError::InvalidEntity(
+                "email must not contain whitespace".to_owned(),
+            ));
+        }
+        if display.chars().filter(|c| *c == '@').count() != 1 {
+            return Err(SearchError::InvalidEntity(
+                "email must contain a single '@'".to_owned(),
+            ));
+        }
+        let domain_canon = canonical_domain_value(domain).ok_or_else(|| {
+            SearchError::InvalidEntity("email domain is not a valid domain".to_owned())
+        })?;
+        let canonical = format!("{}@{domain_canon}", local.to_ascii_lowercase());
+        let mut attributes = BTreeMap::new();
+        attributes.insert("local_part".to_owned(), local.to_owned());
+        attributes.insert("domain".to_owned(), domain_canon);
+        Ok(Self {
+            id: crate::assets::public_entity_id("email_address", &canonical),
+            kind: SearchEntityKind::EmailAddress,
+            canonical_value: canonical,
+            display_value: display.to_owned(),
+            first_observed: timestamp,
+            last_observed: timestamp,
+            confidence: None,
+            attributes,
+        })
+    }
+
+    /// Canonical domain identity: `domain:<lower, no trailing dot>`.
+    pub fn domain(value: &str, timestamp: u64) -> Result<Self, SearchError> {
+        let canonical = canonical_domain_value(value)
+            .ok_or_else(|| SearchError::InvalidEntity("invalid domain".to_owned()))?;
+        Ok(Self {
+            id: crate::assets::public_entity_id("domain", &canonical),
+            kind: SearchEntityKind::Domain,
+            canonical_value: canonical.clone(),
+            display_value: value.trim().to_owned(),
+            first_observed: timestamp,
+            last_observed: timestamp,
+            confidence: None,
+            attributes: BTreeMap::from([("domain".to_owned(), canonical)]),
+        })
+    }
+
+    /// Canonical hostname identity. Single-label names (e.g. `localhost`)
+    /// are accepted here; bare IP literals are rejected (those are
+    /// `IpAddress` entities, not hostnames).
+    pub fn hostname(value: &str, timestamp: u64) -> Result<Self, SearchError> {
+        let canonical = canonical_hostname_value(value)
+            .ok_or_else(|| SearchError::InvalidEntity("invalid hostname".to_owned()))?;
+        Ok(Self {
+            id: crate::assets::public_entity_id("hostname", &canonical),
+            kind: SearchEntityKind::Hostname,
+            canonical_value: canonical.clone(),
+            display_value: value.trim().to_owned(),
+            first_observed: timestamp,
+            last_observed: timestamp,
+            confidence: None,
+            attributes: BTreeMap::from([("hostname".to_owned(), canonical)]),
+        })
+    }
+
+    /// Canonical IP identity (v4 or v6, normalized via [`std::net::IpAddr`]).
+    pub fn ip_address(value: &str, timestamp: u64) -> Result<Self, SearchError> {
+        let display = value.trim();
+        let ip: std::net::IpAddr = display
+            .parse()
+            .map_err(|_| SearchError::InvalidEntity("invalid IP address".to_owned()))?;
+        let canonical = ip.to_string().to_ascii_lowercase();
+        Ok(Self {
+            id: crate::assets::public_entity_id("ip_address", &canonical),
+            kind: SearchEntityKind::IpAddress,
+            canonical_value: canonical.clone(),
+            display_value: display.to_owned(),
+            first_observed: timestamp,
+            last_observed: timestamp,
+            confidence: None,
+            attributes: BTreeMap::from([("address".to_owned(), canonical)]),
+        })
+    }
+
+    /// Canonical ASN identity: `AS<number>` (1..=4294967295).
+    ///
+    /// Accepts `AS64500`, `as64500`, or bare `64500`.
+    pub fn asn(value: &str, timestamp: u64) -> Result<Self, SearchError> {
+        let canonical = canonical_asn_value(value).ok_or_else(|| {
+            SearchError::InvalidEntity("invalid ASN (want AS<number>)".to_owned())
+        })?;
+        Ok(Self {
+            id: crate::assets::public_entity_id("asn", &canonical),
+            kind: SearchEntityKind::Asn,
+            canonical_value: canonical.clone(),
+            display_value: value.trim().to_owned(),
+            first_observed: timestamp,
+            last_observed: timestamp,
+            confidence: None,
+            attributes: BTreeMap::from([("asn".to_owned(), canonical)]),
+        })
+    }
+
+    /// Canonical URL identity via the shared [`crate::graph::canonical_url`]
+    /// normalization (scheme/host lowercased, default ports filled).
+    pub fn url(value: &str, timestamp: u64) -> Result<Self, SearchError> {
+        let display = value.trim();
+        if display.is_empty() || display.len() > 2048 {
+            return Err(SearchError::InvalidEntity(
+                "url must be 1..=2048 characters".to_owned(),
+            ));
+        }
+        let canonical = crate::graph::canonical_url(display).ok_or_else(|| {
+            SearchError::InvalidEntity("invalid URL (need http/https with host)".to_owned())
+        })?;
+        Ok(Self {
+            id: crate::assets::public_entity_id("url", &canonical.to_ascii_lowercase()),
+            kind: SearchEntityKind::Url,
+            canonical_value: canonical.to_ascii_lowercase(),
+            display_value: display.to_owned(),
+            first_observed: timestamp,
+            last_observed: timestamp,
+            confidence: None,
+            attributes: BTreeMap::from([("url".to_owned(), canonical)]),
+        })
+    }
+
+    /// Canonical repository identity: `owner/name` (lowercased).
+    ///
+    /// Accepts `owner/name` or an `https://` forge URL containing
+    /// `owner/name`; nothing is cloned and no history is fetched.
+    pub fn repository(value: &str, timestamp: u64) -> Result<Self, SearchError> {
+        let (owner, name) = canonical_repo_parts(value).ok_or_else(|| {
+            SearchError::InvalidEntity("invalid repository (want owner/name)".to_owned())
+        })?;
+        let canonical = format!("{owner}/{name}");
+        Ok(Self {
+            id: crate::assets::public_entity_id("repository", &canonical),
+            kind: SearchEntityKind::Repository,
+            canonical_value: canonical.clone(),
+            display_value: value.trim().to_owned(),
+            first_observed: timestamp,
+            last_observed: timestamp,
+            confidence: None,
+            attributes: BTreeMap::from([
+                ("owner".to_owned(), owner),
+                ("name".to_owned(), name),
+                ("repository".to_owned(), canonical),
+            ]),
+        })
+    }
+
+    /// Canonical organization identity (forge owner / org name).
+    pub fn organization(value: &str, timestamp: u64) -> Result<Self, SearchError> {
+        let canonical = canonical_org_value(value)
+            .ok_or_else(|| SearchError::InvalidEntity("invalid organization name".to_owned()))?;
+        Ok(Self {
+            id: crate::assets::public_entity_id("organization", &canonical),
+            kind: SearchEntityKind::Organization,
+            canonical_value: canonical.clone(),
+            display_value: value.trim().to_owned(),
+            first_observed: timestamp,
+            last_observed: timestamp,
+            confidence: None,
+            attributes: BTreeMap::from([("name".to_owned(), canonical)]),
+        })
+    }
+
+    /// Canonical network-prefix identity (`192.0.2.0/24`, `2001:db8::/32`).
+    /// Validated via `ipnet`; host bits must be zero (no `192.0.2.1/24`).
+    pub fn network_prefix(value: &str, timestamp: u64) -> Result<Self, SearchError> {
+        let prefix: ipnet::IpNet = value
+            .trim()
+            .parse()
+            .map_err(|_| SearchError::InvalidEntity("invalid network prefix".to_owned()))?;
+        // Require canonical form: host bits zero, otherwise callers could
+        // create duplicate identities for the same prefix.
+        let canonical = prefix.to_string().to_ascii_lowercase();
+        let reparsed: ipnet::IpNet = canonical
+            .parse()
+            .map_err(|_| SearchError::InvalidEntity("invalid network prefix".to_owned()))?;
+        if reparsed != prefix || !canonical.contains('/') {
+            return Err(SearchError::InvalidEntity(
+                "invalid network prefix".to_owned(),
+            ));
+        }
+        // `ipnet` normalizes host bits; reject non-canonical input by
+        // comparing against the trimmed lowercased input.
+        if value.trim().to_ascii_lowercase() != canonical {
+            return Err(SearchError::InvalidEntity(
+                "prefix must be canonical (host bits zero)".to_owned(),
+            ));
+        }
+        Ok(Self {
+            id: crate::assets::public_entity_id("network_prefix", &canonical),
+            kind: SearchEntityKind::NetworkPrefix,
+            canonical_value: canonical.clone(),
+            display_value: value.trim().to_owned(),
+            first_observed: timestamp,
+            last_observed: timestamp,
+            confidence: None,
+            attributes: BTreeMap::from([("prefix".to_owned(), canonical)]),
+        })
+    }
+
+    /// Canonical package identity (`name`, lowercased, bounded charset).
+    pub fn package(value: &str, timestamp: u64) -> Result<Self, SearchError> {
+        let canonical = value.trim().to_ascii_lowercase();
+        if canonical.is_empty()
+            || canonical.len() > 128
+            || canonical
+                .chars()
+                .any(|c| c.is_control() || c.is_whitespace())
+            || !canonical
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+        {
+            return Err(SearchError::InvalidEntity(
+                "invalid package name".to_owned(),
+            ));
+        }
+        Ok(Self {
+            id: crate::assets::public_entity_id("package", &canonical),
+            kind: SearchEntityKind::Package,
+            canonical_value: canonical.clone(),
+            display_value: value.trim().to_owned(),
+            first_observed: timestamp,
+            last_observed: timestamp,
+            confidence: None,
+            attributes: BTreeMap::from([("package".to_owned(), canonical)]),
+        })
+    }
+
+    /// Generic canonical constructor for document / provider / route /
+    /// hypothesis / software kinds where identity is an opaque bounded
+    /// token (hash, name, or `a+b` subject list). Validation is
+    /// conservative: non-empty, bounded, no control characters.
+    pub fn opaque(
+        kind: SearchEntityKind,
+        value: &str,
+        timestamp: u64,
+    ) -> Result<Self, SearchError> {
+        match kind {
+            SearchEntityKind::Document
+            | SearchEntityKind::ArchiveSnapshot
+            | SearchEntityKind::PublicKey
+            | SearchEntityKind::ExposureEvent
+            | SearchEntityKind::Provider
+            | SearchEntityKind::Route
+            | SearchEntityKind::IdentityHypothesis
+            | SearchEntityKind::Software => {}
+            _ => {
+                return Err(SearchError::InvalidEntity(
+                    "opaque constructor only for extended kinds".to_owned(),
+                ));
+            }
+        }
+        let display = value.trim();
+        if display.is_empty() || display.len() > 512 || display.chars().any(char::is_control) {
+            return Err(SearchError::InvalidEntity(
+                "extended entity value must be 1..=512 printable characters".to_owned(),
+            ));
+        }
+        let canonical = display.to_ascii_lowercase();
+        Ok(Self {
+            id: crate::assets::public_entity_id(kind.as_str(), &canonical),
+            kind,
+            canonical_value: canonical,
+            display_value: display.to_owned(),
+            first_observed: timestamp,
+            last_observed: timestamp,
+            confidence: None,
+            attributes: BTreeMap::new(),
+        })
+    }
+}
+
+/// Shared domain normalization for passive entity constructors.
+///
+/// Lowercase, no trailing dot, 1..=253 chars, at least one dot, valid
+/// labels (1..=63, alnum/hyphen, no leading/trailing hyphen). IP literals
+/// are rejected (those are `IpAddress` entities).
+pub fn canonical_domain_value(raw: &str) -> Option<String> {
+    let domain = raw.trim().trim_end_matches('.').to_ascii_lowercase();
+    if domain.is_empty() || domain.len() > 253 || !domain.contains('.') {
+        return None;
+    }
+    if domain.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return None;
+    }
+    if domain.parse::<std::net::IpAddr>().is_ok() {
+        return None;
+    }
+    let valid = domain.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+    });
+    valid.then_some(domain)
+}
+
+/// Hostname normalization: like [`canonical_domain_value`] but single-label
+/// names are accepted (e.g. `localhost` in fixtures). IP literals rejected.
+pub fn canonical_hostname_value(raw: &str) -> Option<String> {
+    let host = raw.trim().trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty() || host.len() > 253 {
+        return None;
+    }
+    if host.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return None;
+    }
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return None;
+    }
+    let valid = host.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+    });
+    valid.then_some(host)
+}
+
+/// Canonical `AS<number>` value (uppercase prefix).
+pub fn canonical_asn_value(raw: &str) -> Option<String> {
+    let text = raw.trim();
+    if text.is_empty() || text.len() > 12 {
+        return None;
+    }
+    let digits = text
+        .strip_prefix("AS")
+        .or_else(|| text.strip_prefix("as"))
+        .or_else(|| text.strip_prefix("As"))
+        .or_else(|| text.strip_prefix("aS"))
+        .unwrap_or(text);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    // No leading-zero games change identity, but `AS0` is reserved.
+    let number: u32 = digits.parse().ok()?;
+    if number == 0 {
+        return None;
+    }
+    Some(format!("AS{number}"))
+}
+
+fn repo_part_valid(part: &str) -> bool {
+    !part.is_empty()
+        && part.len() <= 64
+        && part
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+        && part.bytes().any(|b| b.is_ascii_alphanumeric())
+}
+
+fn canonical_repo_parts(raw: &str) -> Option<(String, String)> {
+    let text = raw.trim();
+    if text.is_empty() || text.len() > 256 || text.chars().any(char::is_control) {
+        return None;
+    }
+    // Forge URL form: extract the first two path segments.
+    if text.contains("://") {
+        let url = url::Url::parse(text).ok()?;
+        if url.scheme() != "http" && url.scheme() != "https" {
+            return None;
+        }
+        let mut segments = url.path_segments()?.filter(|s| !s.is_empty());
+        let owner = segments.next()?.trim().to_ascii_lowercase();
+        let mut name = segments.next()?.trim().to_ascii_lowercase();
+        // Strip a trailing `.git` for identity stability.
+        if let Some(stripped) = name.strip_suffix(".git") {
+            if !stripped.is_empty() {
+                name = stripped.to_owned();
+            }
+        }
+        if !repo_part_valid(&owner) || !repo_part_valid(&name) {
+            return None;
+        }
+        return Some((owner, name));
+    }
+    let (owner_raw, name_raw) = text.split_once('/')?;
+    // Exactly one slash: `a/b/c` is rejected.
+    if name_raw.contains('/') {
+        return None;
+    }
+    let owner = owner_raw.trim().to_ascii_lowercase();
+    let mut name = name_raw.trim().to_ascii_lowercase();
+    if let Some(stripped) = name.strip_suffix(".git") {
+        if !stripped.is_empty() {
+            name = stripped.to_owned();
+        }
+    }
+    if !repo_part_valid(&owner) || !repo_part_valid(&name) {
+        return None;
+    }
+    Some((owner, name))
+}
+
+/// Organization / owner name normalization.
+pub fn canonical_org_value(raw: &str) -> Option<String> {
+    let name = raw.trim().to_ascii_lowercase();
+    if name.is_empty() || name.len() > 64 || name.contains('/') {
+        return None;
+    }
+    if name.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return None;
+    }
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+    {
+        return None;
+    }
+    if !name.bytes().any(|b| b.is_ascii_alphanumeric()) {
+        return None;
+    }
+    Some(name)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

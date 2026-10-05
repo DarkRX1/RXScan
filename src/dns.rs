@@ -902,6 +902,116 @@ pub fn resolver_from_resolv_conf(text: &str) -> Result<SocketAddr, String> {
     Err("no resolver configured".to_owned())
 }
 
+/// Parse a record-type token (`A`, `MX`, ...). `None` for unknown.
+pub(crate) fn parse_record_type(token: &str) -> Option<DnsRecordType> {
+    match token.trim().to_ascii_uppercase().as_str() {
+        "A" => Some(DnsRecordType::A),
+        "AAAA" => Some(DnsRecordType::Aaaa),
+        "CNAME" => Some(DnsRecordType::Cname),
+        "MX" => Some(DnsRecordType::Mx),
+        "NS" => Some(DnsRecordType::Ns),
+        "TXT" => Some(DnsRecordType::Txt),
+        "PTR" => Some(DnsRecordType::Ptr),
+        "SRV" => Some(DnsRecordType::Srv),
+        _ => None,
+    }
+}
+
+/// Bounded blocking DNS lookup for investigation transforms.
+///
+/// Uses the native UDP client with the system resolver, honoring
+/// `deadline`/`cancelled`. Returns display values (`10 mail.example.test.`
+/// for MX, plain hostnames otherwise, raw TXT). `NoData`/`NxDomain` map
+/// to empty (observed, not error); timeouts/cancellation propagate as
+/// strings for the caller to record honestly. Never touches scope.
+pub(crate) fn query_records_blocking(
+    name: &str,
+    record_type: DnsRecordType,
+    timeout: Duration,
+    deadline: Instant,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<Vec<String>, String> {
+    use std::sync::atomic::Ordering;
+    if cancelled.load(Ordering::Acquire) {
+        return Err("cancelled".to_owned());
+    }
+    if Instant::now() >= deadline {
+        return Err("deadline".to_owned());
+    }
+    let resolver = (|| {
+        let text = std::fs::read_to_string("/etc/resolv.conf").map_err(|e| e.to_string())?;
+        resolver_from_resolv_conf(&text)
+    })()
+    .map_err(|e| format!("no resolver: {e}"))?;
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let bounded = timeout.min(remaining.min(Duration::from_secs(3)));
+    if bounded.is_zero() {
+        return Err("deadline".to_owned());
+    }
+    let request = build_query(name, record_type).map_err(|_| "query build failed".to_owned())?;
+    let bind = if resolver.is_ipv6() {
+        "[::]:0"
+    } else {
+        "0.0.0.0:0"
+    };
+    let socket = UdpSocket::bind(bind).map_err(|_| "transport error".to_owned())?;
+    let _ = socket.set_read_timeout(Some(bounded));
+    let _ = socket.set_write_timeout(Some(bounded));
+    socket
+        .send_to(&request, resolver)
+        .map_err(|_| "transport error".to_owned())?;
+    let mut buf = [0u8; MAX_DNS_PACKET_BYTES];
+    let started = Instant::now();
+    let packet = loop {
+        if cancelled.load(Ordering::Acquire) {
+            return Err("cancelled".to_owned());
+        }
+        if Instant::now() >= deadline || started.elapsed() >= bounded {
+            return Err("timeout".to_owned());
+        }
+        match socket.recv_from(&mut buf) {
+            Ok((len, _)) => break buf[..len].to_vec(),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                if started.elapsed() >= bounded || Instant::now() >= deadline {
+                    return Err("timeout".to_owned());
+                }
+                continue;
+            }
+            Err(_) => return Err("transport error".to_owned()),
+        }
+    };
+    let parsed = parse_dns_response(
+        &packet,
+        &canonical_hostname(name).unwrap_or_else(|_| name.to_owned()),
+        record_type,
+    )
+    .map_err(|e| format!("malformed response: {e}"))?;
+    match parsed.outcome {
+        DnsOutcome::Resolved => Ok(parsed
+            .records
+            .into_iter()
+            .take(MAX_DNS_RECORDS_PER_RESPONSE)
+            .map(|r| match r.record_type {
+                DnsRecordType::Mx => match r.preference {
+                    Some(pref) => format!("{pref} {}", r.value),
+                    None => r.value,
+                },
+                _ => r.value,
+            })
+            .collect()),
+        DnsOutcome::NoData | DnsOutcome::NxDomain => Ok(Vec::new()),
+        DnsOutcome::Truncated => Err("truncated".to_owned()),
+        DnsOutcome::Timeout => Err("timeout".to_owned()),
+        DnsOutcome::Cancelled => Err("cancelled".to_owned()),
+        _ => Err(format!("dns outcome: {:?}", parsed.outcome).to_ascii_lowercase()),
+    }
+}
+
 fn record_types_from_params(params: &BTreeMap<String, String>) -> Option<Vec<DnsRecordType>> {
     params.get("record_types").map(|value| {
         value

@@ -52,6 +52,16 @@ pub enum EntityKind {
     DeviceCandidate,
     Exposure,
     ExposureSource,
+    // Ultimate OSINT expansion (additive; existing variants stable).
+    NetworkPrefix,
+    Package,
+    Document,
+    ArchiveSnapshot,
+    PublicKey,
+    Route,
+    Provider,
+    IdentityHypothesis,
+    Software,
 }
 
 impl std::fmt::Display for EntityKind {
@@ -80,6 +90,15 @@ impl std::fmt::Display for EntityKind {
             Self::DeviceCandidate => "device_candidate",
             Self::Exposure => "exposure",
             Self::ExposureSource => "exposure_source",
+            Self::NetworkPrefix => "network_prefix",
+            Self::Package => "package",
+            Self::Document => "document",
+            Self::ArchiveSnapshot => "archive_snapshot",
+            Self::PublicKey => "public_key",
+            Self::Route => "route",
+            Self::Provider => "provider",
+            Self::IdentityHypothesis => "identity_hypothesis",
+            Self::Software => "software",
         };
         f.write_str(name)
     }
@@ -113,6 +132,15 @@ impl EntityKind {
             "device_candidate" => Some(Self::DeviceCandidate),
             "exposure" => Some(Self::Exposure),
             "exposure_source" => Some(Self::ExposureSource),
+            "network_prefix" => Some(Self::NetworkPrefix),
+            "package" => Some(Self::Package),
+            "document" => Some(Self::Document),
+            "archive_snapshot" => Some(Self::ArchiveSnapshot),
+            "public_key" => Some(Self::PublicKey),
+            "route" => Some(Self::Route),
+            "provider" => Some(Self::Provider),
+            "identity_hypothesis" => Some(Self::IdentityHypothesis),
+            "software" => Some(Self::Software),
             _ => None,
         }
     }
@@ -159,6 +187,39 @@ pub enum EdgeRelation {
     ReportedBy,
     /// Malware observation targets a domain.
     TargetedDomain,
+    // Ultimate OSINT expansion (additive; existing relations stable).
+    /// Domain mail exchanger (MX).
+    MailExchanger,
+    /// Domain nameserver (NS).
+    NameServerFor,
+    /// DNS alias (CNAME).
+    AliasOf,
+    /// Organization owns repository.
+    OwnsRepository,
+    /// Identity contributed to repository.
+    ContributedTo,
+    /// Repository published release/package.
+    PublishedRelease,
+    /// Reference to a domain (repo/doc/url).
+    ReferencesDomain,
+    /// Reference to a URL (repo/doc).
+    ReferencesUrl,
+    /// Repository uses package.
+    UsesPackage,
+    /// Release/package signed by key.
+    SignedBy,
+    /// Observed (weak) organization association.
+    ObservedAssociation,
+    /// Likely organization association.
+    LikelyAssociation,
+    /// Possible organization association.
+    PossibleAssociation,
+    /// Strong ownership claim (only with strong evidence).
+    Ownership,
+    /// Hypothesis support.
+    Supports,
+    /// Hypothesis contradiction.
+    Contradicts,
 }
 
 impl std::fmt::Display for EdgeRelation {
@@ -191,6 +252,22 @@ impl std::fmt::Display for EdgeRelation {
             Self::Affects => "affects",
             Self::ReportedBy => "reported_by",
             Self::TargetedDomain => "targeted_domain",
+            Self::MailExchanger => "mail_exchanger",
+            Self::NameServerFor => "name_server_for",
+            Self::AliasOf => "alias_of",
+            Self::OwnsRepository => "owns_repository",
+            Self::ContributedTo => "contributed_to",
+            Self::PublishedRelease => "published_release",
+            Self::ReferencesDomain => "references_domain",
+            Self::ReferencesUrl => "references_url",
+            Self::UsesPackage => "uses_package",
+            Self::SignedBy => "signed_by",
+            Self::ObservedAssociation => "observed_association",
+            Self::LikelyAssociation => "likely_association",
+            Self::PossibleAssociation => "possible_association",
+            Self::Ownership => "ownership",
+            Self::Supports => "supports",
+            Self::Contradicts => "contradicts",
         };
         f.write_str(name)
     }
@@ -227,6 +304,22 @@ impl EdgeRelation {
             "affects" => Some(Self::Affects),
             "reported_by" => Some(Self::ReportedBy),
             "targeted_domain" => Some(Self::TargetedDomain),
+            "mail_exchanger" => Some(Self::MailExchanger),
+            "name_server_for" => Some(Self::NameServerFor),
+            "alias_of" => Some(Self::AliasOf),
+            "owns_repository" => Some(Self::OwnsRepository),
+            "contributed_to" => Some(Self::ContributedTo),
+            "published_release" => Some(Self::PublishedRelease),
+            "references_domain" => Some(Self::ReferencesDomain),
+            "references_url" => Some(Self::ReferencesUrl),
+            "uses_package" => Some(Self::UsesPackage),
+            "signed_by" => Some(Self::SignedBy),
+            "observed_association" => Some(Self::ObservedAssociation),
+            "likely_association" => Some(Self::LikelyAssociation),
+            "possible_association" => Some(Self::PossibleAssociation),
+            "ownership" => Some(Self::Ownership),
+            "supports" => Some(Self::Supports),
+            "contradicts" => Some(Self::Contradicts),
             _ => None,
         }
     }
@@ -327,6 +420,54 @@ impl ScanGraph {
             .filter(|(_, from)| from.len() > 1)
             .map(|(cert, from)| (cert, from.into_iter().collect()))
             .collect()
+    }
+
+    /// Bounded path search (`from` -> `to`, directed, cycle-safe).
+    /// Deterministic (sorted adjacency, FIFO), capped at 4096 visited and
+    /// `max_depth` (clamped 1..=6). Returns edge chain or `None`.
+    /// Answers "why are these connected?" — each edge carries evidence,
+    /// source, timestamp, and confidence.
+    pub fn find_path(&self, from: &str, to: &str, max_depth: usize) -> Option<Vec<GraphEdge>> {
+        let max_depth = max_depth.clamp(1, 6);
+        if !self.entities.contains_key(from) || !self.entities.contains_key(to) {
+            return None;
+        }
+        if from == to {
+            return Some(Vec::new());
+        }
+        use std::collections::VecDeque;
+        let mut queue: VecDeque<(String, Vec<GraphEdge>)> =
+            VecDeque::from([(from.to_owned(), Vec::new())]);
+        let mut seen: BTreeSet<String> = BTreeSet::from([from.to_owned()]);
+        while let Some((current, path)) = queue.pop_front() {
+            if path.len() >= max_depth {
+                continue;
+            }
+            if seen.len() >= 4096 {
+                break;
+            }
+            // Directed out-edges only, sorted for determinism.
+            let mut out_edges: Vec<&GraphEdge> =
+                self.edges.iter().filter(|e| e.from == current).collect();
+            out_edges.sort_by(|a, b| {
+                a.to.cmp(&b.to)
+                    .then(a.relation.to_string().cmp(&b.relation.to_string()))
+            });
+            for edge in out_edges {
+                let mut next_path = path.clone();
+                next_path.push(edge.clone());
+                if edge.to == to {
+                    return Some(next_path);
+                }
+                if seen.insert(edge.to.clone()) {
+                    queue.push_back((edge.to.clone(), next_path));
+                }
+                if queue.len() >= 2048 {
+                    break;
+                }
+            }
+        }
+        None
     }
 
     /// Public entity upsert for post-scan classification passes (OS/device
@@ -534,6 +675,63 @@ pub fn dns_record_entity_id(record_type: &str, name: &str, value: &str) -> Strin
         name.trim().trim_end_matches('.').to_ascii_lowercase(),
         value.trim().to_ascii_lowercase()
     )
+}
+
+/// Stable IDs for Ultimate OSINT entities (additive, deterministic).
+pub fn prefix_entity_id(prefix: &str) -> String {
+    format!("prefix:{}", prefix.trim().to_ascii_lowercase())
+}
+
+pub fn asn_entity_id(asn: &str) -> String {
+    let upper = asn.trim().to_ascii_uppercase();
+    let numbered = if upper.starts_with("AS") {
+        upper
+    } else {
+        format!("AS{upper}")
+    };
+    format!("asn:{numbered}")
+}
+
+pub fn package_entity_id(name: &str) -> String {
+    format!("package:{}", name.trim().to_ascii_lowercase())
+}
+
+pub fn document_entity_id(digest_hex: &str) -> String {
+    format!("document:sha256:{}", digest_hex.trim().to_ascii_lowercase())
+}
+
+pub fn snapshot_entity_id(url: &str, timestamp: &str) -> String {
+    format!(
+        "snapshot:{}:{}",
+        url.trim().to_ascii_lowercase(),
+        timestamp.trim()
+    )
+}
+
+pub fn public_key_entity_id(sha256_hex: &str) -> String {
+    format!("pubkey:sha256:{}", sha256_hex.trim().to_ascii_lowercase())
+}
+
+pub fn route_entity_id(prefix: &str, asn: &str) -> String {
+    format!(
+        "route:{}:{}",
+        prefix.trim().to_ascii_lowercase(),
+        asn.trim().to_ascii_uppercase()
+    )
+}
+
+pub fn provider_entity_id(name: &str) -> String {
+    format!("provider:{}", name.trim().to_ascii_lowercase())
+}
+
+pub fn hypothesis_entity_id(subjects: &[&str]) -> String {
+    let mut sorted: Vec<String> = subjects
+        .iter()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .collect();
+    sorted.sort();
+    sorted.dedup();
+    format!("hypothesis:{}", sorted.join("+"))
 }
 
 // ---------------- builder ----------------
