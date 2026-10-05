@@ -21,6 +21,7 @@ pub mod fuzz;
 pub mod graph;
 pub mod host_discovery;
 pub mod icmp;
+pub mod investigate;
 pub mod level;
 pub mod lowering;
 pub mod model;

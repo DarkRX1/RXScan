@@ -124,6 +124,10 @@ fn main() {
         run_search(&args);
         return;
     }
+    if args.get(1).is_some_and(|arg| arg == "investigate") {
+        run_investigate(&args);
+        return;
+    }
     // `rxscan scan <target> ...` is an explicit alias for the default
     // network-recon workflow (`rxscan <target> ...`).
     let mut owned_args: Vec<String> = Vec::new();
@@ -1851,5 +1855,434 @@ fn run_diff(args: &[String]) {
             err!("rxscan diff: {error}");
             std::process::exit(1);
         }
+    }
+}
+
+/// Passive investigation workflow (`rxscan investigate ...`).
+///
+/// PUBLIC/PASSIVE by default: never invokes the network scanner, never
+/// uses `DirectNetwork`, never activates authenticated APIs. Entity
+/// creation is not contact; only bounded public transforms contact
+/// anything, and unsafe destinations are observed-as-text at most.
+///
+/// Usage:
+/// `rxscan investigate --username NAME [--depth N] [--explain] [--json|--jsonl] [--project-db PATH] [--all] ...`
+/// `rxscan investigate --domain NAME ...`
+/// `rxscan investigate --url URL ...`
+/// `rxscan investigate transforms [--json]`
+fn run_investigate(args: &[String]) {
+    use rxscan::investigate as inv;
+    // Transform listing: `rxscan investigate transforms [--json]`.
+    if args.get(2).is_some_and(|arg| arg == "transforms") {
+        let json = args[3..].iter().any(|a| a == "--json");
+        for arg in &args[3..] {
+            if arg != "--json" && !arg.starts_with("--color") {
+                err!("rxscan investigate transforms: only --json and --color are supported");
+                std::process::exit(2);
+            }
+        }
+        let registry = inv::TransformRegistry::new();
+        if json {
+            out_line!(
+                "{}",
+                serde_json::to_string_pretty(&registry.infos()).unwrap()
+            );
+        } else {
+            maybe_search_startup_mark(args, false);
+            out_line!("RXScan Investigation Transforms");
+            out_line!("");
+            for info in registry.infos() {
+                out_line!(
+                    "  {:<20} accepts {} [{}]",
+                    info.id,
+                    info.accepts.join(","),
+                    inv::contact_class_as_str(info.contact_class)
+                );
+            }
+            out_line!("");
+            out_line!(
+                "DirectNetwork: disabled by default; passive investigation never port scans."
+            );
+        }
+        return;
+    }
+    let mut username: Option<String> = None;
+    let mut domain: Option<String> = None;
+    let mut url: Option<String> = None;
+    let mut depth: u8 = inv::DEFAULT_DEPTH;
+    let mut explain = false;
+    let mut json = false;
+    let mut jsonl = false;
+    let mut show_all = false;
+    let mut deadline = inv::DEFAULT_INVESTIGATION_DEADLINE;
+    let mut max_entities = inv::DEFAULT_MAX_ENTITIES;
+    let mut max_relationships = inv::DEFAULT_MAX_RELATIONSHIPS;
+    let mut max_http = inv::DEFAULT_MAX_HTTP_REQUESTS;
+    let mut max_dns = inv::DEFAULT_MAX_DNS_QUERIES;
+    let mut max_providers = inv::DEFAULT_MAX_PROVIDERS;
+    let mut selected: Option<std::collections::BTreeSet<String>> = None;
+    let mut excluded = std::collections::BTreeSet::<String>::new();
+    let mut categories = std::collections::BTreeSet::<String>::new();
+    let mut project_db: Option<std::path::PathBuf> = None;
+    let mut index = 2usize;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--username" => {
+                index += 1;
+                let Some(value) = args.get(index).cloned() else {
+                    err!("rxscan investigate: --username requires a value");
+                    std::process::exit(2);
+                };
+                if username.is_some() || domain.is_some() || url.is_some() {
+                    err!("rxscan investigate: only one of --username, --domain, --url");
+                    std::process::exit(2);
+                }
+                username = Some(value);
+            }
+            "--domain" => {
+                index += 1;
+                let Some(value) = args.get(index).cloned() else {
+                    err!("rxscan investigate: --domain requires a value");
+                    std::process::exit(2);
+                };
+                if username.is_some() || domain.is_some() || url.is_some() {
+                    err!("rxscan investigate: only one of --username, --domain, --url");
+                    std::process::exit(2);
+                }
+                domain = Some(value);
+            }
+            "--url" => {
+                index += 1;
+                let Some(value) = args.get(index).cloned() else {
+                    err!("rxscan investigate: --url requires a value");
+                    std::process::exit(2);
+                };
+                if username.is_some() || domain.is_some() || url.is_some() {
+                    err!("rxscan investigate: only one of --username, --domain, --url");
+                    std::process::exit(2);
+                }
+                url = Some(value);
+            }
+            "--depth" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    err!("rxscan investigate: --depth requires a value");
+                    std::process::exit(2);
+                };
+                match value.parse::<u8>() {
+                    Ok(parsed) if parsed <= inv::MAX_DEPTH => depth = parsed,
+                    _ => {
+                        err!(
+                            "rxscan investigate: --depth must be an integer from 0 to {}",
+                            inv::MAX_DEPTH
+                        );
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "--explain" => explain = true,
+            "--json" => json = true,
+            "--jsonl" => jsonl = true,
+            "--all" => show_all = true,
+            "--deadline" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    err!("rxscan investigate: --deadline requires a duration");
+                    std::process::exit(2);
+                };
+                deadline = match rxscan::config::parse_duration_ms(value) {
+                    Ok(ms) => std::time::Duration::from_millis(ms),
+                    Err(error) => {
+                        err!("rxscan investigate: invalid deadline: {error}");
+                        std::process::exit(2);
+                    }
+                };
+            }
+            "--max-entities" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    err!("rxscan investigate: --max-entities requires a value");
+                    std::process::exit(2);
+                };
+                match value.parse::<usize>() {
+                    Ok(parsed) if (1..=inv::HARD_MAX_ENTITIES).contains(&parsed) => {
+                        max_entities = parsed;
+                    }
+                    _ => {
+                        err!(
+                            "rxscan investigate: --max-entities must be 1..={}",
+                            inv::HARD_MAX_ENTITIES
+                        );
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "--max-relationships" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    err!("rxscan investigate: --max-relationships requires a value");
+                    std::process::exit(2);
+                };
+                match value.parse::<usize>() {
+                    Ok(parsed) if (1..=inv::HARD_MAX_RELATIONSHIPS).contains(&parsed) => {
+                        max_relationships = parsed;
+                    }
+                    _ => {
+                        err!("rxscan investigate: --max-relationships out of range");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "--max-http-requests" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    err!("rxscan investigate: --max-http-requests requires a value");
+                    std::process::exit(2);
+                };
+                match value.parse::<usize>() {
+                    Ok(parsed) if parsed <= inv::HARD_MAX_HTTP_REQUESTS => {
+                        max_http = parsed;
+                    }
+                    _ => {
+                        err!("rxscan investigate: --max-http-requests out of range");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "--max-dns-queries" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    err!("rxscan investigate: --max-dns-queries requires a value");
+                    std::process::exit(2);
+                };
+                match value.parse::<usize>() {
+                    Ok(parsed) if parsed <= inv::HARD_MAX_DNS_QUERIES => {
+                        max_dns = parsed;
+                    }
+                    _ => {
+                        err!("rxscan investigate: --max-dns-queries out of range");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "--max-providers" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    err!("rxscan investigate: --max-providers requires a value");
+                    std::process::exit(2);
+                };
+                match value.parse::<usize>() {
+                    Ok(parsed) if parsed >= 1 => max_providers = parsed,
+                    _ => {
+                        err!("rxscan investigate: --max-providers must be positive");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "--providers" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    err!("rxscan investigate: --providers requires a comma-separated list");
+                    std::process::exit(2);
+                };
+                selected = Some(
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_owned)
+                        .collect(),
+                );
+            }
+            "--exclude-provider" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    err!("rxscan investigate: --exclude-provider requires a comma-separated list");
+                    std::process::exit(2);
+                };
+                excluded.extend(
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_owned),
+                );
+            }
+            "--category" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    err!("rxscan investigate: --category requires a comma-separated list");
+                    std::process::exit(2);
+                };
+                categories.extend(
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|category| !category.is_empty())
+                        .map(str::to_owned),
+                );
+            }
+            "--project-db" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    err!("rxscan investigate: --project-db requires a path");
+                    std::process::exit(2);
+                };
+                project_db = Some(value.into());
+            }
+            "--color" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    err!("rxscan investigate: --color requires one of auto, always, never");
+                    std::process::exit(2);
+                };
+                if !matches!(value.as_str(), "auto" | "always" | "never") {
+                    err!("rxscan investigate: --color must be one of auto, always, never");
+                    std::process::exit(2);
+                }
+            }
+            arg if arg.starts_with("--color=") => {
+                if !matches!(
+                    arg.trim_start_matches("--color="),
+                    "auto" | "always" | "never"
+                ) {
+                    err!("rxscan investigate: --color must be one of auto, always, never");
+                    std::process::exit(2);
+                }
+            }
+            "--help" | "-h" => {
+                out_line!(
+                    "rxscan investigate --username NAME [--depth 0-{}] [--deadline 60s] [--max-entities N] [--max-relationships N] [--max-http-requests N] [--max-dns-queries N] [--max-providers N] [--providers IDS] [--exclude-provider IDS] [--category CATS] [--project-db PATH] [--all] [--color MODE] [--json|--jsonl] [--explain]\nrxscan investigate --domain NAME [same options]\nrxscan investigate --url URL [same options]\nrxscan investigate transforms [--json]\n\nPassive by default: never port scans discovered infrastructure. DNS queries are DnsQuery, not DirectNetwork.",
+                    inv::MAX_DEPTH
+                );
+                return;
+            }
+            unknown => {
+                err!("rxscan investigate: unknown option '{unknown}'");
+                std::process::exit(2);
+            }
+        }
+        index += 1;
+    }
+    if json && jsonl {
+        err!("rxscan investigate: --json and --jsonl conflict");
+        std::process::exit(2);
+    }
+    let (seed_kind, seed_value) = match (username, domain, url) {
+        (Some(value), None, None) => (inv::SeedKind::Username, value),
+        (None, Some(value), None) => (inv::SeedKind::Domain, value),
+        (None, None, Some(value)) => (inv::SeedKind::Url, value),
+        _ => {
+            err!("rxscan investigate: exactly one of --username, --domain, --url is required");
+            std::process::exit(2);
+        }
+    };
+    let mut config = match seed_kind {
+        inv::SeedKind::Username => inv::InvestigationConfig::username(&seed_value),
+        inv::SeedKind::Domain => inv::InvestigationConfig {
+            seed_kind,
+            seed_value: seed_value.clone(),
+            depth: inv::DEFAULT_DEPTH,
+            max_entities: inv::DEFAULT_MAX_ENTITIES,
+            max_relationships: inv::DEFAULT_MAX_RELATIONSHIPS,
+            max_http_requests: inv::DEFAULT_MAX_HTTP_REQUESTS,
+            max_dns_queries: inv::DEFAULT_MAX_DNS_QUERIES,
+            max_providers: inv::DEFAULT_MAX_PROVIDERS,
+            deadline: inv::DEFAULT_INVESTIGATION_DEADLINE,
+            allow_test_loopback: false,
+            selected_providers: None,
+            excluded_providers: std::collections::BTreeSet::new(),
+            categories: std::collections::BTreeSet::new(),
+        },
+        inv::SeedKind::Url => inv::InvestigationConfig {
+            seed_kind,
+            seed_value: seed_value.clone(),
+            depth: inv::DEFAULT_DEPTH,
+            max_entities: inv::DEFAULT_MAX_ENTITIES,
+            max_relationships: inv::DEFAULT_MAX_RELATIONSHIPS,
+            max_http_requests: inv::DEFAULT_MAX_HTTP_REQUESTS,
+            max_dns_queries: inv::DEFAULT_MAX_DNS_QUERIES,
+            max_providers: inv::DEFAULT_MAX_PROVIDERS,
+            deadline: inv::DEFAULT_INVESTIGATION_DEADLINE,
+            allow_test_loopback: false,
+            selected_providers: None,
+            excluded_providers: std::collections::BTreeSet::new(),
+            categories: std::collections::BTreeSet::new(),
+        },
+    };
+    config.depth = depth;
+    config.deadline = deadline;
+    config.max_entities = max_entities;
+    config.max_relationships = max_relationships;
+    config.max_http_requests = max_http;
+    config.max_dns_queries = max_dns;
+    config.max_providers = max_providers;
+    config.selected_providers = selected;
+    config.excluded_providers = excluded;
+    config.categories = categories;
+    if let Err(error) = config.validate() {
+        err!("rxscan investigate: {error}");
+        std::process::exit(2);
+    }
+    if explain {
+        // Plan-only: no provider contact.
+        if json {
+            out_line!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "seed_kind": config.seed_kind,
+                    "seed": config.seed_value,
+                    "depth": config.depth,
+                    "max_depth": inv::MAX_DEPTH,
+                    "budgets": {
+                        "max_entities": config.max_entities,
+                        "max_relationships": config.max_relationships,
+                        "max_http_requests": config.max_http_requests,
+                        "max_dns_queries": config.max_dns_queries,
+                        "max_providers": config.max_providers,
+                    },
+                    "transforms": inv::TransformRegistry::new().infos(),
+                    "direct_network": false,
+                    "network_scans": 0,
+                }))
+                .unwrap()
+            );
+        } else {
+            out_line!("{}", inv::explain_plan(&config));
+        }
+        return;
+    }
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    let report = match inv::run_investigation(config, &cancelled) {
+        Ok(report) => report,
+        Err(error) => {
+            err!("rxscan investigate: {error}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(error) = report.accounting.check_invariant() {
+        err!("rxscan investigate: {error}");
+        std::process::exit(1);
+    }
+    if let Some(path) = project_db {
+        let mut db = match rxscan::project_db::ProjectDb::open(&path) {
+            Ok(db) => db,
+            Err(error) => {
+                err!("rxscan investigate: could not open project database: {error}");
+                std::process::exit(1);
+            }
+        };
+        if let Err(error) = inv::persist_investigation(&mut db, &report) {
+            err!("rxscan investigate: could not persist investigation: {error}");
+            std::process::exit(1);
+        }
+    }
+    if json {
+        out_line!("{}", serde_json::to_string_pretty(&report).unwrap());
+    } else if jsonl {
+        out!("{}", inv::render_jsonl(&report));
+    } else {
+        maybe_search_startup_mark(args, false);
+        out!("{}", inv::render_human(&report, show_all));
     }
 }

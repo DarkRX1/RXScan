@@ -152,6 +152,9 @@ pub fn probe() -> Capabilities {
             format!("{rules} rules in {packs} packs"),
         ),
     ];
+    for (name, available, detail) in crate::investigate::capability_entries() {
+        entries.push(entry(&name, available, detail));
+    }
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     Capabilities { platform, entries }
 }
