@@ -1,227 +1,780 @@
-# RXScan
+<p align="center">
+  <img src="RXScanlogo.png" alt="RXScan" width="460">
+</p>
 
-RXScan - Raw Excess Scan.
-Fast, bounded reconnaissance in Rust.
+<h1 align="center">RXScan</h1>
 
-## What It Does
+<p align="center">
+  <strong>Raw Excess Scan</strong>
+</p>
 
-RXScan normalizes a target, enforces scope, performs bounded host discovery,
-scans TCP ports with native connect probes, identifies services from observed
-protocol behavior, and records typed evidence for later reporting, diffing,
-analysis, and project graph workflows.
+<p align="center">
+  Fast, bounded reconnaissance and evidence correlation in Rust.
+</p>
 
-Current scanning includes:
+<p align="center">
+  <a href="https://github.com/DarkRX1/RXScan/releases">
+    <img src="https://img.shields.io/github/v/release/DarkRX1/RXScan?style=flat-square&label=release" alt="Release">
+  </a>
+  <a href="https://github.com/DarkRX1/RXScan/actions">
+    <img src="https://img.shields.io/github/actions/workflow/status/DarkRX1/RXScan/ci.yml?style=flat-square&label=build" alt="Build">
+  </a>
+  <img src="https://img.shields.io/badge/Rust-1.85%2B-orange?style=flat-square" alt="Rust 1.85+">
+  <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT License">
+  <img src="https://img.shields.io/badge/platform-Linux-lightgrey?style=flat-square" alt="Linux">
+</p>
 
-- host discovery with ICMP echo and TCP reachability evidence
-- TCP connect scanning for default, explicit, range, mixed, and all-port sets
-- service probing for SSH, HTTP, TLS/HTTPS, FTP, SMTP/SMTPS, Redis, MySQL,
-  PostgreSQL, and bounded unknown-service fingerprints
-- HTTP observations for status, headers, redirects, title, content type,
-  response size, cookies, links, forms, scripts, robots.txt, and sitemap.xml
-- DNS observations for A, AAAA, CNAME, MX, NS, TXT, and PTR records
-- bounded crawling, baseline response checks, managed content discovery, and
-  inert contextual GET query fuzzing when confirmed web evidence permits
-- JSONL output, checkpoints/resume, offline diff, offline analysis, offline
-  reports, and an offline project graph
+<p align="center">
+  <strong>Scan</strong> ·
+  <strong>Search</strong> ·
+  <strong>Investigate</strong> ·
+  <strong>Correlate</strong> ·
+  <strong>Persist</strong> ·
+  <strong>Explain</strong>
+</p>
+
+---
+
+## Overview
+
+RXScan is a reconnaissance and evidence engine built in Rust.
+
+It combines bounded network scanning, service identification, public-source search, investigation, correlation, and persistent project intelligence behind one evidence-driven workflow.
+
+```text
+Search → Discover → Scan → Fingerprint → Enrich → Correlate → Explain → Persist → Compare
+```
+
+RXScan is designed around a simple rule:
+
+> **Report what was observed, preserve uncertainty, and never make the output stronger than the evidence.**
+
+It is built for authorized reconnaissance without credential guessing, brute force, exploitation, authentication bypass, or destructive actions.
+
+---
 
 ## Quick Start
 
-```bash
-rxscan TARGET
-rxscan --ports 22,80,443 TARGET
-rxscan --ports 1-1024 TARGET
-rxscan --all-ports TARGET
-rxscan --goal web TARGET
-rxscan --explain TARGET
-```
-
-The default `rxscan TARGET` scan uses goal `recon`, level `3`, balanced speed,
-bounded host discovery, and TCP scanning against a level-derived common set.
-
-## Installation
-
-RXScan is currently a prerelease source build. Tested release artifacts are not
-published yet.
+### Scan a target
 
 ```bash
-cargo install --path . --locked
-rxscan --version
+rxscan example.test
 ```
 
-Requires Rust 1.85 or newer. The currently tested runtime target is Linux
-x86_64.
-
-## Examples
+Scan selected ports:
 
 ```bash
-rxscan 127.0.0.1 --scope 127.0.0.1 --ports 22,80,443
-rxscan 127.0.0.1 --scope 127.0.0.1 --ports 8000-8100
-rxscan example.test --goal services --level 4 --speed 70
-rxscan https://example.test --goal web --checkpoint scan.rxscan --output scan.jsonl
-rxscan report scan.rxscan
-rxscan diff old.rxscan new.rxscan
+rxscan example.test --ports 22,80,443
 ```
 
-Only scan systems you own or are explicitly authorized to assess.
+Scan all TCP ports:
 
-## Default contract (`rxscan TARGET`)
+```bash
+rxscan example.test --all-ports
+```
 
-The default scan is workflow `recon`, level `3`, balanced speed. It always:
+Add bounded UDP discovery:
 
-- normalizes the target and enforces deny-by-default scope;
-- runs bounded host discovery (lightweight: ICMP echo x2 plus TCP
-  reachability on 22, 80, 443);
-- runs TCP discovery over exactly `common-100` (100 ports, profile `v1`);
-- runs service identification for every open port found;
-- runs evidence-triggered follow-ups the evidence justifies at Recon/Level 3
-  (identified HTTP(S) services -> web observation; confirmed endpoints ->
-  crawl/baseline/content);
-- prints a human summary whose counts come from the same typed
-  `PortScanCompleted` / `ServiceIdentified` state as JSONL.
+```bash
+rxscan example.test --udp
+```
 
-It never: scans UDP unless `--udp` is passed, enumerates TLS ciphers, fingerprints OS/devices,
-authenticates, submits forms, runs JavaScript, assesses vulnerabilities,
-fuzzes (fuzz follow-ups require workflow `full`), or exceeds its budgets.
-Default behavior depends only on this contract, never on accidental planner
-details; `rxscan --explain TARGET` shows the effective plan.
+Explain exactly what RXScan plans to do:
 
-UDP discovery (`--udp`, explicit opt-in) uses connected sockets, a bounded
-socket window, and tiny protocol probes (DNS/NTP/SSDP); silence is reported
-as `open|filtered` uncertainty, never as open or closed.
+```bash
+rxscan example.test --explain
+```
 
-## Scan Controls
+### Search public sources
 
-`TARGET` may be an IP address, hostname, URL, CIDR, `-` for standard input, or
-targets supplied with `--targets FILE`.
+```bash
+rxscan search --username exampleuser
+```
 
-`--goal` selects a canonical workflow: `recon` (default), `discover`,
-`ports`, `services`, `web`, or `full`. Historical names (`discovery`,
-`service-map`, `inventory`, `baseline`, `monitoring`, `web-discovery`,
-`api`, `api-discovery`, `content`, `fuzz`, `research`, `custom`) remain
-accepted as compatibility aliases; `--explain` shows the canonical workflow
-they map to.
+RXScan prioritizes useful positive findings in normal terminal output:
 
-`--level 1-5` controls breadth and depth. `--speed slow|balanced|fast|auto|0-100`
-controls execution pressure only. Speed changes concurrency, timeouts, and
-retry pacing; it does not change the intended ports or findings.
+```text
+RXSCAN  /  PUBLIC SEARCH                              PASSIVE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-`--ports` accepts single ports, comma lists, ranges, and mixed input such as
-`22,80,443,8000-8100`. Explicit ports are operator intent and are not replaced
-by goal defaults. `--all-ports` scans TCP ports 1 through 65535 as one bounded
-port-discovery task, not 65535 scheduler tasks.
+TARGET
 
-`--scan-mode connect|syn|auto` (default `auto`) selects the TCP scan path.
-`auto` uses raw SYN for IPv4 on capable Linux hosts and connect scanning
-otherwise; `syn` without capability falls back to connect with an explicit
-reason instead of failing. Output records requested mode, effective mechanism,
-and fallback reason. Raw SYN is bounded, deadline-aware, and classifies
-SYN+ACK, RST, relevant ICMP unreachable, and silence distinctly. IPv6 raw SYN
-is not implemented and uses an explicitly reported connect fallback.
+  Username    exampleuser
+  Providers   100
+  Network     Disabled
 
-Default TCP policy:
+FINDINGS
 
-- level 1: validation-focused unless ports are explicit
-- level 2 through 3: `common-100`
-- level 4 through 5: `common-1000`, the well-known range 1-1000
+  ✓ github / exampleuser
+    Profile    https://github.com/exampleuser
+    high · 94% · public profile
 
-Higher levels deepen service, DNS, web, content, crawl, and fuzz follow-up
-within fixed bounds.
+  ? example-site / exampleuser
+    Candidate  https://example.test/u/exampleuser
+    low · 25% · weak evidence
 
-`--scope` adds permitted hosts, URLs, IPs, or CIDRs. `--exclude` removes them.
-Out-of-scope work is rejected before network contact.
+  + additional findings
+
+COVERAGE
+
+  Completed      99 / 100
+  Confirmed      14
+  Possible       11
+  Blocked        20
+  Unknown        49
+```
+
+Confirmed profiles, observed resources, and unverified candidate URLs are represented differently so the terminal does not imply more certainty than RXScan actually has.
+
+Use:
+
+```bash
+rxscan search --username exampleuser --all
+```
+
+for the complete human result set, or:
+
+```bash
+rxscan search --username exampleuser --explain
+```
+
+to inspect execution and classification reasoning.
+
+### Investigate an identity
+
+```bash
+rxscan investigate --username exampleuser
+```
+
+Investigation correlates public evidence into entities and relationships while remaining passive by default.
+
+```text
+ACCOUNTS
+
+  GitHub / exampleuser
+  ├─ Profile
+  │  https://github.com/exampleuser
+  └─ Confidence
+     high · 94%
+
+CORRELATION
+
+  ENTITY                 REFERENCES
+  ─────────────────────  ──────────
+  example.test                    8
+  api.example.test                3
+```
+
+Secondary static assets and implementation-level graph details stay out of the default view while remaining available through detailed output.
+
+---
+
+## Why RXScan?
+
+Traditional reconnaissance often means switching between unrelated tools and manually correlating their output.
+
+RXScan instead keeps observations connected.
+
+| Capability | RXScan |
+|---|---|
+| Host discovery | ✓ |
+| TCP connect scanning | ✓ |
+| Linux IPv4 raw SYN | ✓ |
+| Native bounded UDP discovery | ✓ |
+| Service identification | ✓ |
+| HTTP / TLS / SSH intelligence | ✓ |
+| DNS observations | ✓ |
+| Public-source username search | ✓ |
+| Investigation workflows | ✓ |
+| Evidence graph | ✓ |
+| Relationship correlation | ✓ |
+| Persistent projects | ✓ |
+| Coverage-aware diffing | ✓ |
+| JSON / JSONL | ✓ |
+| Explainable planning | ✓ |
+| Global execution budgets | ✓ |
+| Credential brute force | **No** |
+| Automatic exploitation | **No** |
+
+RXScan favors **bounded evidence collection and correlation** over aggressive or destructive behavior.
+
+---
+
+## Network Reconnaissance
+
+RXScan normalizes targets, applies scope policy, performs bounded discovery, scans ports, identifies services, and schedules evidence-triggered follow-ups.
+
+### TCP
+
+Supported TCP selection includes:
+
+```bash
+rxscan example.test --ports 443
+rxscan example.test --ports 22,80,443
+rxscan example.test --ports 1-1024
+rxscan example.test --ports 22,80,443,8000-8100
+rxscan example.test --all-ports
+```
+
+`--scan-mode` controls the TCP mechanism:
+
+```bash
+rxscan example.test --scan-mode auto
+rxscan example.test --scan-mode connect
+rxscan example.test --scan-mode syn
+```
+
+`auto` selects raw SYN where supported and permitted, otherwise falling back to connect scanning with the effective mechanism and reason preserved in evidence.
+
+### UDP
+
+UDP is explicit opt-in:
+
+```bash
+rxscan example.test --udp
+```
+
+UDP discovery is bounded and conservative.
+
+Silence is uncertainty.
+
+RXScan does **not** reinterpret an unanswered UDP probe as proof that a port is open or closed.
+
+### Service identification
+
+Open ports can trigger evidence-based service identification.
+
+RXScan can recognize and collect bounded observations for protocols including:
+
+- SSH
+- HTTP / HTTPS
+- TLS
+- FTP
+- SMTP / SMTPS
+- Redis
+- MySQL
+- PostgreSQL
+- SMB
+- RDP
+- MongoDB
+- MQTT
+- generic / unknown services
+
+When useful evidence exists, the human report exposes it directly:
+
+```text
+PORTS
+
+  22/tcp  OPEN  SSH
+    Product    OpenSSH
+    Version    9.x
+
+  443/tcp OPEN  HTTPS
+    Endpoint   https://example.test/
+    Product    nginx
+    TLS name   example.test
+```
+
+Fields are shown only when supported by collected evidence.
+
+Unknown services remain unknown rather than inheriting identity from their port number.
+
+---
+
+## Public-Source Search
+
+RXScan includes a bounded public-source search engine with a curated provider corpus.
+
+```bash
+rxscan search --username exampleuser
+```
+
+Search results distinguish outcomes such as:
+
+- confirmed
+- possible
+- not found
+- unknown
+- blocked
+- rate limited
+- authentication required
+- error
+- cancelled
+- unscanned
+
+An HTTP `200` alone is never treated as sufficient proof that an account exists.
+
+Normal terminal output prioritizes confirmed and possible findings while provider failures and negative outcomes remain summarized under coverage.
+
+---
+
+## Investigation & Correlation
+
+Search findings can be correlated into an evidence graph containing entities such as:
+
+- usernames
+- accounts
+- email addresses
+- domains
+- hostnames
+- IP addresses
+- URLs
+- network endpoints
+- services
+- web endpoints
+- certificates
+- SSH host keys
+- software identities
+- DNS observations
+- repositories
+- organizations
+- ASNs
+
+Relationships preserve provenance and confidence instead of silently merging weak identities.
+
+Investigation is passive by default.
+
+Network activity discovered from public-source evidence requires explicit network enablement and scope authorization.
+
+---
+
+## Evidence-First Design
+
+RXScan separates:
+
+```text
+observation
+    ↓
+evidence
+    ↓
+classification
+    ↓
+correlation
+    ↓
+human interpretation
+```
+
+This matters because reconnaissance is full of ambiguous signals.
+
+RXScan therefore follows several rules:
+
+- port numbers alone do not create service confidence;
+- HTTP success alone does not prove an account exists;
+- UDP silence does not prove open or closed;
+- weak identity similarity does not automatically merge entities;
+- certificate reuse relates assets rather than merging hosts;
+- unknown versions remain unknown during vulnerability correlation;
+- incomplete coverage does not become a false removal during project diffing.
+
+---
+
+## Scope & Safety
+
+RXScan is intended for systems you own or are explicitly authorized to assess.
+
+Scope is enforced before network contact.
+
+```bash
+rxscan example.test --scope example.test
+```
+
+Additional authorized scope can be explicitly provided:
+
+```bash
+rxscan example.test --scope api.example.test
+```
+
+Targets can also be excluded:
+
+```bash
+rxscan example.test --exclude api.example.test
+```
+
+### Permanent boundaries
+
+RXScan does not provide:
+
+- credential guessing
+- password brute force
+- authentication bypass
+- automatic exploitation
+- destructive actions
+- malware deployment
+- session theft
+
+Public-source investigation does not automatically become active network scanning.
+
+---
+
+## Execution Is Bounded
+
+RXScan is designed to remain bounded even when the requested target space is large.
+
+Controls include:
+
+```text
+--max-tasks
+--max-retries
+--max-concurrency
+--max-hosts
+--max-execution-time
+--max-evidence-bytes
+```
+
+For example:
+
+```bash
+rxscan example.test --all-ports --max-execution-time 30s
+```
+
+When a deadline or resource budget is reached, RXScan preserves partial evidence and reports unscanned work rather than pretending the scan completed.
+
+---
 
 ## Output
 
-Normal output is human-readable and derived from the same typed state used for
-JSONL and checkpoints.
+### Human
 
-```text
-RXScan
+Interactive terminals automatically receive RXScan's styled human report.
 
-Target: 127.0.0.1
-Workflow: recon
-Level: 3
-Speed: Balanced
-
-HOST 127.0.0.1
-PORT      SERVICE     PRODUCT
-22/tcp    ssh         OpenSSH
-8080/tcp  http        nginx
-
-TCP discovery (level-automatic): 100 requested, 100 attempted, 2 open, 98 closed, 0 filtered/timed out, 0 errors, 0 unscanned [TCP scan time: 13ms max per task]
-Services: 2 identified
-Duration: 412ms
-
-Diagnostics
-  tasks: 5 completed, 0 failed, 0 cancelled, 0 timed out, 0 skipped
-  jsonl bytes: 0
-```
-
-Machine output:
+No theme setup is required.
 
 ```bash
-rxscan TARGET --format jsonl
-rxscan TARGET --output scan.jsonl
-rxscan TARGET --checkpoint scan.rxscan
+rxscan example.test
 ```
 
-## Current Capabilities
+Color behavior can be controlled explicitly:
 
-Working: target normalization, scope guard, bounded scheduler, speed governor,
-host discovery (ICMP echo, TCP reachability, active on-link ARP, NDP, local
-neighbor cache, link-scope awareness), native TCP connect scanning and Linux
-IPv4 raw SYN with capability-gated syn/auto selection, service probes
-(SSH/HTTP/TLS/FTP/SMTP/Redis/MySQL/PostgreSQL/SMB/
-RDP/MongoDB/MQTT/generic, no auth), TLS observation, DNS observation
-(A/AAAA/CNAME/MX/NS/TXT/PTR/SRV), HTTP probing with technology
-normalization, crawling, content discovery, contextual GET fuzzing,
-persistence/resume, diff, analysis, reporting, project graph, and per-entity
-project explain.
+```bash
+rxscan --color auto example.test
+rxscan --color always example.test
+rxscan --color never example.test
+```
 
-Partial: raw SYN is Linux IPv4 only; adaptive pacing is applied inside the raw
-SYN engine but remains diagnostic-only for connect and UDP scans; TLS captures
-handshake and certificate facts but not cipher-suite enumeration; DNS has
-bounded record lookups but no TCP fallback after UDP truncation; IPv6 is
-supported across parsing, CIDR, scope, NDP, ICMPv6, TCP connect, UDP, DNS,
-URL, graph, and TLS/SNI paths.
+`auto` is the default.
 
-Not implemented: OS/device active fingerprint probes (passive correlation
-only), browser-assisted inspection, POST workflows, prebuilt release
-artifacts, Windows/macOS support, GUI, plugins, and updater.
+`NO_COLOR` is respected.
 
-Permanent boundaries: no automatic exploitation, no destructive actions, and no
-credential brute forcing.
+### Explain
 
-## Roadmap
+```bash
+rxscan example.test --explain
+```
 
-See `docs/ROADMAP.md` for planned scanner, distribution, and product work.
+`--explain` exposes planning, policy, budgets, fallbacks, and reasoning that are intentionally omitted from the normal findings-first report.
 
-## Authorization
+### JSONL
 
-RXScan is for systems you own or are authorized to test. Scope controls are
-enforced by the scanner, but authorization is still the operator's
-responsibility.
+```bash
+rxscan example.test --format jsonl
+```
 
-## Building From Source
+or:
+
+```bash
+rxscan example.test --output scan.jsonl
+```
+
+Machine-readable output remains ANSI-free and is not truncated by human presentation limits.
+
+### Checkpoints
+
+```bash
+rxscan example.test --checkpoint scan.rxscan
+```
+
+Resume:
+
+```bash
+rxscan --resume scan.rxscan
+```
+
+---
+
+## Projects & History
+
+RXScan can persist reconnaissance into a project database:
+
+```bash
+rxscan example.test --project-db project.db
+```
+
+Project intelligence supports persisted evidence, graph relationships, coverage-aware history, classification provenance, and change tracking.
+
+The core rule for historical comparison is:
+
+> **Absence without equivalent coverage is unknown, not removal.**
+
+This prevents incomplete scans from creating false change events.
+
+---
+
+## Intelligence
+
+RXScan can derive bounded intelligence from collected evidence, including:
+
+### Operating system candidates
+
+Passive OS correlation uses observed service/banner evidence.
+
+No active OS fingerprint probe is required.
+
+### Device candidates
+
+Device role/vendor/model inference remains evidence-gated and confidence-bounded.
+
+### SSH identity
+
+RXScan can parse SSH banners and collect bounded host-key evidence without authentication.
+
+### TLS posture
+
+TLS intelligence can include observed certificate and handshake facts such as:
+
+- certificate identity
+- certificate reuse
+- expiry state
+- hostname mismatch
+- self-signed state
+- deprecated protocol evidence
+- weak signature evidence
+- short-key evidence
+
+RXScan does not claim exhaustive cipher enumeration.
+
+### Software inventory
+
+Observed services can produce normalized software identities for correlation and history.
+
+### Vulnerability correlation
+
+RXScan supports offline vulnerability correlation against configured datasets.
+
+Matches are potential correlations based on observed software identity/version—not exploitation results or vulnerability verdicts.
+
+---
+
+## Installation
+
+### From source
+
+RXScan requires Rust **1.85 or newer**.
+
+```bash
+git clone https://github.com/DarkRX1/RXScan.git
+cd RXScan
+cargo install --path . --locked
+```
+
+Verify:
+
+```bash
+rxscan --version
+```
+
+### Build manually
 
 ```bash
 cargo build --release --locked
 ./target/release/rxscan --help
+```
+
+The currently supported/tested runtime target is Linux.
+
+---
+
+## Release
+
+The current published release line is **1.x**.
+
+See:
+
+**GitHub → Releases**
+
+for published versions and release notes.
+
+Historical note: earlier 1.x tags may contain package metadata that predates the corrected 1.x package versioning. Current releases should be evaluated using their committed package metadata and release notes.
+
+---
+
+## Useful Commands
+
+<details>
+<summary><strong>Network scanning</strong></summary>
+
+```bash
+rxscan example.test
+rxscan example.test --ports 22,80,443
+rxscan example.test --all-ports
+rxscan example.test --udp
+rxscan example.test --scan-mode auto
+rxscan example.test --explain
+```
+
+</details>
+
+<details>
+<summary><strong>Public search</strong></summary>
+
+```bash
+rxscan search --username exampleuser
+rxscan search --username exampleuser --all
+rxscan search --username exampleuser --explain
+```
+
+</details>
+
+<details>
+<summary><strong>Investigation</strong></summary>
+
+```bash
+rxscan investigate --username exampleuser
+```
+
+</details>
+
+<details>
+<summary><strong>Machine output</strong></summary>
+
+```bash
+rxscan example.test --format jsonl
+rxscan example.test --output scan.jsonl
+rxscan example.test --checkpoint scan.rxscan
+```
+
+</details>
+
+---
+
+## Capabilities
+
+Inspect capabilities available in the current build/runtime:
+
+```bash
+rxscan capabilities
+```
+
+RXScan reports capabilities rather than silently assuming they exist.
+
+Platform-, privilege-, and capability-dependent behavior is represented explicitly.
+
+---
+
+## Configuration
+
+RXScan supports global and project configuration:
+
+```bash
+rxscan --config rxscan.toml example.test
+rxscan --project-config project.toml example.test
+```
+
+CLI arguments take precedence where applicable.
+
+---
+
+## Development
+
+Build:
+
+```bash
+cargo build --release --locked
+```
+
+Run the complete test suite:
+
+```bash
 cargo test --locked
 ```
 
-The release check is:
+Engineering gates:
 
 ```bash
-scripts/release-check.sh
+cargo fmt --check
+cargo check --all-targets --all-features
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --locked
+git diff --check
+cargo run -- search lint
 ```
+
+Tests should prefer deterministic local fixtures over public Internet dependencies.
+
+Network behavior should be proven through local synthetic services whenever practical.
+
+---
+
+## Project Principles
+
+RXScan development follows a few core principles:
+
+**Evidence over assumption.**  
+Claims should be traceable to observations.
+
+**Bounded by default.**  
+Concurrency, retries, tasks, evidence, and execution time remain controlled.
+
+**Uncertainty is information.**  
+Unknown, filtered, blocked, incomplete, and unscanned are meaningful states.
+
+**Passive does not silently become active.**  
+Public investigation and network scanning remain distinct unless explicitly bridged.
+
+**Human output is findings-first.**  
+The normal terminal tells you what RXScan found and where.
+
+**Machine output is complete.**  
+Presentation limits do not discard structured evidence.
+
+**Explainability matters.**  
+`--explain` exposes why RXScan planned or classified something the way it did.
+
+---
+
+## Roadmap
+
+See [`docs/ROADMAP.md`](docs/ROADMAP.md) for planned work.
+
+---
 
 ## Contributing
 
-Keep changes evidence-driven and bounded. Add local fixtures for network
-behavior, avoid public Internet dependencies in tests, and do not claim
-protocol or platform support without executable proof.
+Contributions should remain evidence-driven, bounded, deterministic, and testable.
+
+When changing network behavior:
+
+- use local fixtures where possible;
+- avoid public Internet dependencies in tests;
+- preserve scope enforcement;
+- preserve cancellation/deadline behavior;
+- do not strengthen claims without stronger evidence;
+- add regression coverage for behavior changes.
+
+Before submitting changes:
+
+```bash
+cargo fmt --check
+cargo check --all-targets --all-features
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --locked
+git diff --check
+cargo run -- search lint
+```
+
+---
+
+## Authorization
+
+> RXScan is intended only for systems and resources you own or are explicitly authorized to assess.
+
+Scope controls reduce accidental contact, but authorization remains the operator's responsibility.
+
+---
 
 ## License
 
-MIT. See `LICENSE`.
+MIT. See [`LICENSE`](LICENSE).
+
+<p align="center">
+  <sub>RXScan · Raw Excess Scan · Evidence-driven reconnaissance in Rust</sub>
+</p>
