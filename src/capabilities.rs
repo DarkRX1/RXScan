@@ -251,14 +251,68 @@ pub fn human_group(name: &str) -> &'static str {
     }
 }
 
+/// Plain-language detail for an unavailable capability.
+///
+/// Default human output avoids implementation-specific failure text;
+/// the exact runtime reason stays available via `--explain` and machine
+/// output. Never pretends an unavailable capability is available.
+pub fn friendly_detail(name: &str, available: bool, detail: &str) -> String {
+    if available {
+        return detail.to_owned();
+    }
+    match name {
+        "raw_syn" | "raw_syn_ipv6" => "Requires raw-socket permission".to_owned(),
+        "arp_active" | "ndp" | "raw_icmp" => "Requires raw-socket permission".to_owned(),
+        "exposure_http_api" => "Requires API configuration (optional)".to_owned(),
+        "exposure_secret_retention" => "Disabled by design".to_owned(),
+        "investigation_direct_network" => {
+            "Disabled by default; passive investigation never port scans".to_owned()
+        }
+        _ => {
+            // Fall back to the stored detail when no plain mapping exists,
+            // but strip `snake_case` prefixes that leak internals.
+            if let Some((_, rest)) = detail.split_once(": ") {
+                let first = detail.split(':').next().unwrap_or("");
+                if first.contains('_') && !first.contains(' ') {
+                    return rest.to_owned();
+                }
+            }
+            detail.to_owned()
+        }
+    }
+}
+
 /// Capabilities-aware runtime report: workflow header, `RUNTIME`
 /// metadata, grouped human `NETWORK` / `SEARCH` / `INVESTIGATION` /
 /// `INTELLIGENCE` / `PROJECT` tables with human labels, and a summary bar.
 /// Styled only when `caps.color` is set; machine output never passes
 /// through here. Stable IDs stay unchanged for machine output.
+///
+/// Default output uses [`friendly_detail`] for unavailable features;
+/// see [`render_human_explain_caps`] for exact runtime reasons.
 pub fn render_human_caps(
     capabilities: &Capabilities,
     caps: crate::terminal::TerminalCapabilities,
+) -> String {
+    render_human_inner(capabilities, caps, false)
+}
+
+/// Detailed capabilities rendering for `--explain`.
+///
+/// Contains everything default shows plus the exact runtime reason for
+/// unavailable features. The model is unchanged; only presentation
+/// differs.
+pub fn render_human_explain_caps(
+    capabilities: &Capabilities,
+    caps: crate::terminal::TerminalCapabilities,
+) -> String {
+    render_human_inner(capabilities, caps, true)
+}
+
+fn render_human_inner(
+    capabilities: &Capabilities,
+    caps: crate::terminal::TerminalCapabilities,
+    explain: bool,
 ) -> String {
     use crate::terminal::Style;
     use crate::terminal::{
@@ -300,6 +354,13 @@ pub fn render_human_caps(
         out.push_str(&section_heading(caps, group));
         out.push('\n');
         out.push('\n');
+        let detail_for = |item: &&CapabilityEntry| {
+            if explain {
+                item.detail.clone()
+            } else {
+                friendly_detail(&item.name, item.available, &item.detail)
+            }
+        };
         if compact {
             for item in items {
                 let status = if item.available {
@@ -317,7 +378,7 @@ pub fn render_human_caps(
                     paint(color, style, status),
                     paint(color, Style::Identifier, &human_label(&item.name)),
                 ));
-                out.push_str(&format!("    Detail  {}\n", item.detail));
+                out.push_str(&format!("    Detail  {}\n", detail_for(&item)));
             }
         } else {
             let mut table = Table::new(&["CAPABILITY", "STATUS", "DETAIL"]);
@@ -336,7 +397,7 @@ pub fn render_human_caps(
                 table.cells(vec![
                     paint(color, Style::Identifier, &human_label(&item.name)),
                     paint(color, style, status),
-                    item.detail.clone(),
+                    detail_for(&item),
                 ]);
             }
             out.push_str(&table.render(caps));
@@ -367,12 +428,17 @@ pub fn render_human_caps(
                 } else {
                     Style::Muted
                 };
+                let detail = if explain {
+                    item.detail.clone()
+                } else {
+                    friendly_detail(&item.name, item.available, &item.detail)
+                };
                 out.push_str(&format!(
                     "  {} {}\n",
                     paint(color, style, status),
                     paint(color, Style::Identifier, &human_label(&item.name)),
                 ));
-                out.push_str(&format!("    Detail  {}\n", item.detail));
+                out.push_str(&format!("    Detail  {detail}\n"));
             }
         } else {
             let mut table = Table::new(&["CAPABILITY", "STATUS", "DETAIL"]);
@@ -388,10 +454,15 @@ pub fn render_human_caps(
                 } else {
                     Style::Muted
                 };
+                let detail = if explain {
+                    item.detail.clone()
+                } else {
+                    friendly_detail(&item.name, item.available, &item.detail)
+                };
                 table.cells(vec![
                     paint(color, Style::Identifier, &human_label(&item.name)),
                     paint(color, style, status),
-                    item.detail.clone(),
+                    detail,
                 ]);
             }
             out.push_str(&table.render(caps));

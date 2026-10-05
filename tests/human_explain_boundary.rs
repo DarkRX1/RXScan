@@ -199,15 +199,15 @@ fn deadline_truncation_stays_visible_in_default() {
         2_000,
     );
     let human = rxscan::run::human_summary(&report);
-    // Material incompleteness is never hidden.
+    // Material incompleteness is never hidden (plain language).
     assert!(human.contains("65,471"), "unscanned stays visible: {human}");
     assert!(human.contains("64"), "attempted stays visible: {human}");
     assert!(
-        human.to_lowercase().contains("deadline"),
-        "deadline warning stays visible: {human}"
+        human.to_lowercase().contains("time limit"),
+        "time-limit warning stays visible: {human}"
     );
     assert!(
-        human.contains("Partial evidence preserved"),
+        human.contains("Partial results are shown below."),
         "preservation note stays visible: {human}"
     );
     // But legacy telemetry still stays out of default.

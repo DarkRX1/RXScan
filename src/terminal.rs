@@ -1210,10 +1210,35 @@ fn render_search_report_inner(
     ));
     out.push('\n');
 
-    let positives: Vec<&SearchRow> = rows
+    // Progressive disclosure: default human output shows ONE findings
+    // table with ONE total display budget (10 rows). Confirmed findings
+    // sort before possible findings; up to 2 rows are reserved for
+    // possible findings when they exist, and unused confirmed capacity
+    // flows to possible findings. Blocked/unknown/rate-limited/error
+    // rows are secondary: they stay in COVERAGE totals and JSON/JSONL,
+    // and show individually only with `--all` (or `--explain` for
+    // reasoning). Presentation limits never affect execution or the
+    // evidence model.
+    const DEFAULT_FINDINGS_BUDGET: usize = 10;
+    const POSSIBLE_RESERVE: usize = 2;
+    let mut confirmed: Vec<&SearchRow> = rows
         .iter()
-        .filter(|row| row.tier == RowTier::Positive)
+        .filter(|row| row.status == "confirmed")
         .collect();
+    confirmed.sort_by(|a, b| {
+        b.confidence
+            .cmp(&a.confidence)
+            .then(a.provider.cmp(&b.provider))
+    });
+    let mut possible: Vec<&SearchRow> = rows
+        .iter()
+        .filter(|row| row.status == "possible" || row.status == "probable")
+        .collect();
+    possible.sort_by(|a, b| {
+        b.confidence
+            .cmp(&a.confidence)
+            .then(a.provider.cmp(&b.provider))
+    });
     let attention: Vec<&SearchRow> = rows
         .iter()
         .filter(|row| row.tier == RowTier::Attention)
@@ -1222,12 +1247,37 @@ fn render_search_report_inner(
         .iter()
         .filter(|row| row.tier == RowTier::Quiet)
         .collect();
+    // Whether any primary finding exists (used for the empty hint).
+    let has_primary = !confirmed.is_empty() || !possible.is_empty();
+    // Whether attention/quiet detail is visible in this rendering.
+    // Default hides secondary rows; `--all` reveals full human detail;
+    // `--explain` reveals provider reasoning (attention) plus raw
+    // accounting below.
+    let show_attention = show_all || explain;
+    let show_quiet = show_all;
 
     // FINDINGS ---------------------------------------------------------
     out.push('\n');
     out.push_str(&section_heading(caps, "Findings"));
     out.push('\n');
-    if positives.is_empty() && attention.is_empty() && (!show_all || quiet.is_empty()) {
+    if !has_primary && !show_attention && (!show_quiet || quiet.is_empty()) {
+        // No primary findings and secondary detail hidden: concise hint.
+        // When secondary rows exist but are hidden, COVERAGE below still
+        // carries their totals plus a plain-language warning.
+        out.push('\n');
+        out.push_str(&format!(
+            "  {}\n",
+            paint(
+                color,
+                Style::Muted,
+                "no public accounts found - use --all to list negative results"
+            )
+        ));
+    } else if !has_primary
+        && show_attention
+        && attention.is_empty()
+        && (!show_quiet || quiet.is_empty())
+    {
         out.push('\n');
         out.push_str(&format!(
             "  {}\n",
@@ -1239,34 +1289,44 @@ fn render_search_report_inner(
         ));
     } else {
         out.push('\n');
-        out.push_str(&render_search_table(caps, mode, &positives));
-        // Bound attention noise: blocked/unknown/rate-limited rows are
-        // summarized in COVERAGE; only a sample shows by default.
-        const ATTENTION_PREVIEW: usize = 8;
-        let (shown_attention, hidden_attention) = if show_all {
-            (attention.as_slice(), 0usize)
-        } else if attention.len() > ATTENTION_PREVIEW {
-            (
-                &attention[..ATTENTION_PREVIEW],
-                attention.len() - ATTENTION_PREVIEW,
-            )
+        // One FINDINGS table: confirmed first, then possible, under one
+        // total budget unless `--all`. The header renders exactly once
+        // because the two status groups share a single table.
+        let (shown_confirmed, shown_possible): (&[&SearchRow], &[&SearchRow]) = if show_all {
+            (confirmed.as_slice(), possible.as_slice())
+        } else if possible.is_empty() {
+            let take = confirmed.len().min(DEFAULT_FINDINGS_BUDGET);
+            (&confirmed[..take], &[][..])
         } else {
-            (attention.as_slice(), 0usize)
+            let reserve = possible.len().min(POSSIBLE_RESERVE);
+            let take_confirmed = confirmed
+                .len()
+                .min(DEFAULT_FINDINGS_BUDGET.saturating_sub(reserve));
+            let remaining = DEFAULT_FINDINGS_BUDGET.saturating_sub(take_confirmed);
+            let take_possible = possible.len().min(remaining);
+            (&confirmed[..take_confirmed], &possible[..take_possible])
         };
-        out.push_str(&render_search_table(caps, mode, shown_attention));
-        if hidden_attention > 0 {
+        let mut combined: Vec<&SearchRow> =
+            Vec::with_capacity(shown_confirmed.len() + shown_possible.len());
+        combined.extend_from_slice(shown_confirmed);
+        combined.extend_from_slice(shown_possible);
+        out.push_str(&render_search_table(caps, mode, &combined));
+        let total_primary = confirmed.len() + possible.len();
+        let hidden_findings = total_primary.saturating_sub(combined.len());
+        if hidden_findings > 0 {
             out.push_str(&format!(
                 "  {}\n",
                 paint(
                     color,
                     Style::Muted,
-                    &format!(
-                        "+ {hidden_attention} further provider notes hidden (use --all for full detail)"
-                    )
+                    &format!("+ {hidden_findings} additional findings"),
                 )
             ));
         }
-        if show_all {
+        if show_attention {
+            out.push_str(&render_search_table(caps, mode, &attention));
+        }
+        if show_quiet {
             out.push_str(&render_search_rows_muted(caps, &quiet));
         }
     }
@@ -1294,14 +1354,22 @@ fn render_search_report_inner(
         out.push_str(&key_value(caps, label, &styled, 13));
         out.push('\n');
     }
+    let counts_for_warning = SearchCoverage::from_rows(rows, summary);
+    let secondary_failures = counts_for_warning.blocked
+        + counts_for_warning.unknown
+        + counts_for_warning.rate_limited
+        + counts_for_warning.errors
+        + summary.unscanned;
     let incomplete =
         summary.unscanned > 0 || summary.truncated || summary.completed < summary.requested;
-    if incomplete {
+    if secondary_failures > 0 || incomplete {
+        // Plain language for first-time users; internal accounting stays in
+        // COVERAGE totals, `--explain`, and machine output.
         out.push('\n');
         out.push_str(&warning_block(
             caps,
-            "Incomplete coverage",
-            Some("partial evidence preserved; see --explain for provider detail"),
+            "Some providers could not be verified.",
+            None,
         ));
         out.push('\n');
     }
@@ -1715,7 +1783,16 @@ mod tests {
         assert!(text.contains("COVERAGE"));
         assert!(text.contains("CONFIRMED"));
         assert!(text.contains("provider-a"));
-        assert!(text.contains("BLOCKED"));
+        // First-time UX: blocked/unknown/rate-limited rows are secondary.
+        // Default hides individual failure rows; COVERAGE totals plus a
+        // plain-language warning carry the signal.
+        assert!(
+            !text.contains("BLOCKED"),
+            "blocked rows need --all, coverage carries totals"
+        );
+        assert!(!text.contains("provider-d"), "attention needs --all");
+        assert!(text.contains("Blocked"), "coverage preserves blocked total");
+        assert!(text.contains("Some providers could not be verified."));
         // Default is concise: footer recap stays, raw accounting moves to --explain.
         assert!(text.contains("2/2") || text.contains("4 / 4") || text.contains("completed"));
         assert!(
@@ -1728,6 +1805,19 @@ mod tests {
         );
         assert!(!text.contains("provider-e"), "negatives need --all");
         assert!(!contains_ansi(&text));
+        // `--all` reveals full human provider detail.
+        let all = render_search_report(
+            "exampleuser",
+            4,
+            &sample_rows(),
+            sample_summary(),
+            true,
+            false,
+            true,
+        );
+        assert!(all.contains("BLOCKED"));
+        assert!(all.contains("provider-d"));
+        assert!(all.contains("provider-e"));
         // Explain retains the full provider accounting.
         let explained = render_search_report_explain(
             "exampleuser",
@@ -1817,9 +1907,9 @@ mod tests {
         );
         assert!(!ascii.contains('─'));
         assert!(!ascii.contains('━'));
-        // Default signals truncation via the incomplete-coverage warning;
+        // Default signals truncation via a plain-language warning;
         // the raw "(truncated)" marker lives in --explain.
-        assert!(ascii.contains("Incomplete coverage"));
+        assert!(ascii.contains("Some providers could not be verified."));
         assert!(
             !ascii.contains("(truncated)"),
             "raw marker lives in --explain"

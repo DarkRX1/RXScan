@@ -89,6 +89,25 @@ fn main() {
     // scans all args and manual parsers accept `--color` anywhere, so the
     // relocation preserves semantics (relative color-flag order kept).
     let args = normalize_global_color(args);
+    // Friendly root: `rxscan` with no arguments shows a compact
+    // welcome/help screen, never a confusing `target is empty` error.
+    // Only `--color` flags are ignored for emptiness so
+    // `rxscan --color always` still welcomes (styled).
+    if is_empty_invocation(&args) {
+        let caps = resolve_human_caps(&args);
+        out!("{}", render_welcome(caps));
+        return;
+    }
+    // Obsolete/wrong form that strongly resembles an existing workflow:
+    // suggest the correct form instead of a generic Clap error.
+    // Never silently reinterprets; only suggests.
+    if args.iter().any(|arg| arg == "--investigate") {
+        err!("error: `--investigate` is not a flag");
+        err!("");
+        err!("Try:");
+        err!("  rxscan investigate --username exampleuser");
+        std::process::exit(2);
+    }
     if args.get(1).is_some_and(|arg| arg == "diff") {
         run_diff(&args);
         return;
@@ -111,10 +130,53 @@ fn main() {
     }
     if args.get(1).is_some_and(|arg| arg == "capabilities") {
         validate_color_flags("capabilities", &args);
+        if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+            out_line!(
+                "RXSCAN\nReconnaissance / Evidence Engine\n\nUSAGE\n  rxscan capabilities [--explain] [--json] [--color MODE]\n\nEXAMPLES\n  rxscan capabilities\n\nOPTIONS\n  --explain      Show exact runtime reasons (default explains plainly)\n  --json         Machine output (never styled)\n  --color MODE   auto (TTY only), always, or never"
+            );
+            return;
+        }
         let json = args.iter().any(|arg| arg == "--json");
+        let explain = args.iter().any(|arg| arg == "--explain");
+        // Only --json/--explain/--color/--help are accepted here.
+        {
+            let mut idx = 2usize;
+            let mut prev_was_color = false;
+            while idx < args.len() {
+                let arg = args[idx].as_str();
+                if prev_was_color && ["auto", "always", "never"].contains(&arg) {
+                    prev_was_color = false;
+                    idx += 1;
+                    continue;
+                }
+                prev_was_color = false;
+                if arg == "--json" || arg == "--explain" || arg == "--help" || arg == "-h" {
+                    idx += 1;
+                    continue;
+                }
+                if arg == "--color" {
+                    prev_was_color = true;
+                    idx += 1;
+                    continue;
+                }
+                if arg.starts_with("--color=") {
+                    idx += 1;
+                    continue;
+                }
+                err!("rxscan capabilities: unknown option '{arg}'");
+                std::process::exit(2);
+            }
+            if prev_was_color {
+                err!("rxscan capabilities: --color requires one of auto, always, never");
+                std::process::exit(2);
+            }
+        }
         let report = capabilities::probe();
         if json {
             out_line!("{}", serde_json::to_string_pretty(&report).unwrap());
+        } else if explain {
+            let caps = resolve_human_caps(&args);
+            out!("{}", capabilities::render_human_explain_caps(&report, caps));
         } else {
             let caps = resolve_human_caps(&args);
             out!("{}", capabilities::render_human_caps(&report, caps));
@@ -139,6 +201,28 @@ fn main() {
     if args.get(1).is_some_and(|arg| arg == "exposure") {
         run_exposure_cli(&args);
         return;
+    }
+    // Deterministic command suggestions: a bare first argument that
+    // strongly resembles a known subcommand is treated as a typo, not a
+    // scan target. Suggestions never execute automatically.
+    if let Some(first) = args.get(1) {
+        if !first.starts_with('-')
+            && !first.contains('.')
+            && !first.contains('/')
+            && !first.contains(':')
+            && !first.contains('@')
+        {
+            if let Some(suggestion) = suggest_command(first) {
+                // Don't shadow real subcommands (already dispatched above).
+                if first != &suggestion {
+                    err!("Unknown command `{first}`.");
+                    err!("");
+                    err!("Did you mean?");
+                    err!("  rxscan {suggestion}");
+                    std::process::exit(2);
+                }
+            }
+        }
     }
     // `rxscan scan <target> ...` is an explicit alias for the default
     // network-recon workflow (`rxscan <target> ...`).
@@ -199,6 +283,122 @@ fn main() {
             std::process::exit(error.exit_code());
         }
     }
+}
+
+/// Whether this invocation carries no workflow and no target.
+///
+/// Only `--color` flags (with values) are ignored for emptiness so
+/// `rxscan --color always` still welcomes. `--help`/`-h` are not empty:
+/// they fall through to Clap's full help.
+fn is_empty_invocation(args: &[String]) -> bool {
+    let mut index = 1usize;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if arg == "--color" {
+            index += 1;
+            // Skip the value when present (`--color always`).
+            if args.get(index).is_some_and(|v| {
+                !v.starts_with('-') || ["auto", "always", "never"].contains(&v.as_str())
+            }) {
+                index += 1;
+            }
+            continue;
+        }
+        if arg.starts_with("--color=") {
+            index += 1;
+            continue;
+        }
+        return false;
+    }
+    true
+}
+
+/// Compact welcome/help for an empty invocation.
+///
+/// Never dumps the full Clap reference; points at workflows and examples.
+/// Respects terminal capabilities: styled only when color is enabled,
+/// plain when piped.
+fn render_welcome(caps: rxscan::terminal::TerminalCapabilities) -> String {
+    use rxscan::terminal::{Style, paint};
+    let color = caps.color;
+    let brand = paint(color, Style::Accent, "RXSCAN");
+    let tagline = paint(color, Style::Muted, "Reconnaissance & Evidence Engine");
+    let mut out = String::new();
+    out.push_str(&brand);
+    out.push('\n');
+    out.push_str(&tagline);
+    out.push_str("\n\nUsage\n");
+    out.push_str("  rxscan <target>                     Scan a host or network\n");
+    out.push_str("  rxscan search --username <name>    Search public sources\n");
+    out.push_str("  rxscan investigate --username <name>  Correlate public evidence\n");
+    out.push_str("  rxscan capabilities                Show available capabilities\n");
+    out.push_str("\nExamples\n");
+    out.push_str("  rxscan example.test\n");
+    out.push_str("  rxscan 192.0.2.10 --ports 22,80,443\n");
+    out.push_str("  rxscan search --username exampleuser\n");
+    out.push_str("  rxscan investigate --username exampleuser\n");
+    out.push_str("\nRun `rxscan --help` for all options.\n");
+    out
+}
+
+/// Deterministic command suggestion for a likely typo.
+///
+/// Returns the suggested subcommand name (e.g. `capabilities` for
+/// `capability`). Pure suggestion: callers print it and exit, never
+/// execute automatically. Returns `None` when the input is not close to
+/// any known subcommand.
+fn suggest_command(input: &str) -> Option<String> {
+    const KNOWN: &[&str] = &[
+        "search",
+        "investigate",
+        "exposure",
+        "project",
+        "project-db",
+        "capabilities",
+        "report",
+        "analyze",
+        "diff",
+        "unknown",
+        "scan",
+    ];
+    // Fast path for the most common singular/plural mistake.
+    if input == "capability" {
+        return Some("capabilities".to_owned());
+    }
+    if input == "searches" {
+        return Some("search".to_owned());
+    }
+    let lowered = input.to_ascii_lowercase();
+    let mut best: Option<(&str, usize)> = None;
+    for candidate in KNOWN {
+        let distance = edit_distance(&lowered, candidate);
+        // Thresholds are deliberately tight so suggestions stay
+        // predictable and never trigger on hostnames.
+        let allowed = if candidate.len() >= 10 { 3 } else { 2 };
+        if distance <= allowed && distance > 0 && best.is_none_or(|(_, d)| distance < d) {
+            best = Some((candidate, distance));
+        }
+    }
+    best.map(|(name, _)| name.to_owned())
+}
+
+/// Small deterministic Levenshtein distance over bytes.
+///
+/// Inputs are short CLI tokens; quadratic time is irrelevant.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut curr = vec![0usize; b.len() + 1];
+    for (i, &ca) in a.iter().enumerate() {
+        curr[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            curr[j + 1] = (prev[j] + cost).min((curr[j] + 1).min(prev[j + 1] + 1));
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b.len()]
 }
 
 /// Relocate `--color` flags to the end of `args` so a global color flag
@@ -926,11 +1126,29 @@ fn run_search(args: &[String]) {
             }
             "--help" | "-h" => {
                 out_line!(
-                    "RXSCAN\nReconnaissance / Evidence Engine\n\nUSAGE\n  rxscan search --username NAME [options]\n  rxscan search username NAME [options]\n\nWORKFLOWS\n  search         Public-source search\n\nEXAMPLES\n  rxscan search --username exampleuser\n  rxscan search --username exampleuser --all\n\nOPTIONS\n  --username NAME            Target username (or `search username NAME`)\n  --providers IDS            Comma-separated provider allowlist\n  --exclude-provider IDS     Comma-separated provider denylist\n  --category CATEGORIES      Comma-separated category filter\n  --deadline 30s             Per-search deadline\n  --project-db PATH          Persist the report to a project database\n  --all                      Include negative (not-found) results\n  --color MODE               auto (TTY only), always, or never\n  --json | --jsonl           Machine output (never styled)\n  --explain                  Show the search plan without contacting providers\n\nLEAF COMMANDS\n  rxscan search providers [--json] [--health STATE] [--category CAT] [--stale] [--color MODE]\n  rxscan search stats [--json] [--color MODE]\n  rxscan search lint [--json] [--corpus-root DIR] [--color MODE]\n  rxscan --username NAME [same options]"
+                    "RXSCAN\nReconnaissance / Evidence Engine\n\nUSAGE\n  rxscan search --username NAME [options]\n  rxscan search username NAME [options]\n\nWORKFLOWS\n  search         Public-source search\n\nEXAMPLES\n  rxscan search --username exampleuser\n  rxscan search --username exampleuser --all\n\nOPTIONS\n  --username NAME            Target username (or `search username NAME`)\n  --providers IDS            Comma-separated provider allowlist\n  --exclude-provider IDS     Comma-separated provider denylist\n  --category CATEGORIES      Comma-separated category filter\n  --deadline 30s             Per-search deadline\n  --project-db PATH          Persist the report to a project database\n  --all                      Show complete human detail (all findings + provider notes)\n  --color MODE               auto (TTY only), always, or never\n  --json | --jsonl           Machine output (never styled, always complete)\n  --explain                  Show the search plan without contacting providers\n\nLEAF COMMANDS\n  rxscan search providers [--json] [--health STATE] [--category CAT] [--stale] [--color MODE]\n  rxscan search stats [--json] [--color MODE]\n  rxscan search lint [--json] [--corpus-root DIR] [--color MODE]\n  rxscan --username NAME [same options]"
                 );
                 return;
             }
             unknown => {
+                // Friendly guidance: a bare positional like
+                // `rxscan search exampleuser` strongly resembles the
+                // username workflow. Suggest the correct form instead of
+                // a bare "unknown option". Never silently reinterprets.
+                if !unknown.starts_with('-') && username.is_none() && unknown != "username" {
+                    err!("error: search needs a search type");
+                    err!("");
+                    err!("Try:");
+                    err!("  rxscan search --username exampleuser");
+                    err!("");
+                    err!("Other types:");
+                    err!("  --domain");
+                    err!("  --email");
+                    err!("  --url");
+                    err!("  --ip");
+                    err!("  --asn");
+                    std::process::exit(2);
+                }
                 err!("rxscan search: unknown option '{unknown}'");
                 std::process::exit(2);
             }
@@ -942,7 +1160,10 @@ fn run_search(args: &[String]) {
         std::process::exit(2);
     }
     let Some(username) = username else {
-        err!("rxscan search: --username is required");
+        err!("Missing username.");
+        err!("");
+        err!("Try:");
+        err!("  rxscan search --username exampleuser");
         std::process::exit(2);
     };
     let pack = match rxscan::search::embedded_username_pack() {
@@ -2395,6 +2616,23 @@ fn run_investigate(args: &[String]) {
                 return;
             }
             unknown => {
+                // Friendly guidance for a bare positional like
+                // `rxscan investigate exampleuser`.
+                if !unknown.starts_with('-')
+                    && username.is_none()
+                    && domain.is_none()
+                    && url.is_none()
+                {
+                    err!("error: investigate needs a seed type");
+                    err!("");
+                    err!("Try:");
+                    err!("  rxscan investigate --username exampleuser");
+                    err!("");
+                    err!("Other types:");
+                    err!("  --domain");
+                    err!("  --url");
+                    std::process::exit(2);
+                }
                 err!("rxscan investigate: unknown option '{unknown}'");
                 std::process::exit(2);
             }
@@ -2410,7 +2648,10 @@ fn run_investigate(args: &[String]) {
         (None, Some(value), None) => (inv::SeedKind::Domain, value),
         (None, None, Some(value)) => (inv::SeedKind::Url, value),
         _ => {
-            err!("rxscan investigate: exactly one of --username, --domain, --url is required");
+            err!("Missing username.");
+            err!("");
+            err!("Try:");
+            err!("  rxscan investigate --username exampleuser");
             std::process::exit(2);
         }
     };

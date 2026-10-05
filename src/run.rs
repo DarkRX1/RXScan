@@ -1871,14 +1871,15 @@ fn human_summary_inner(
             }
         }
     }
-    // Concise exceptional warnings (default): material uncertainty stays
-    // visible without `--explain`. Detailed accounting lives in explain.
+    // Concise exceptional warnings (default): plain language for
+    // first-time users, no scheduler terminology. Detailed accounting
+    // lives in `--explain`. Material incompleteness is never hidden.
     if scheduler.termination != crate::execution::TerminationReason::Completed {
         out.push('\n');
         out.push_str(&warning_block(
             caps,
             &human_termination_title(report),
-            Some("Partial evidence preserved."),
+            Some("Partial results are shown below."),
         ));
         out.push('\n');
     }
@@ -1887,10 +1888,10 @@ fn human_summary_inner(
         out.push_str(&warning_block(
             caps,
             &format!(
-                "{} requested ports were not scanned.",
+                "{} ports were not scanned.",
                 format_count_u64(tcp_totals.unscanned)
             ),
-            Some("Partial evidence preserved."),
+            Some("Partial results are shown below."),
         ));
         out.push('\n');
     }
@@ -2156,8 +2157,8 @@ fn human_summary_inner(
 
 /// Concise human title for a non-completed termination.
 ///
-/// Default output shows this short warning; full accounting lives in
-/// `--explain`. Never hides material truncation.
+/// Plain language for first-time users (no scheduler terminology);
+/// full accounting lives in `--explain`. Never hides material truncation.
 fn human_termination_title(report: &RunReport) -> String {
     use crate::terminal::humanize_duration_ms;
     match report.scheduler_report.termination {
@@ -2169,18 +2170,26 @@ fn human_termination_title(report: &RunReport) -> String {
                 report.duration_ms
             };
             format!(
-                "Execution deadline reached after {}",
+                "Scan stopped after reaching the {} time limit.",
                 humanize_duration_ms(basis)
             )
         }
-        crate::execution::TerminationReason::UserCancelled => "Scan was cancelled".to_owned(),
-        crate::execution::TerminationReason::TaskBudget => "Task budget reached".to_owned(),
-        crate::execution::TerminationReason::RetryBudget => "Retry budget exhausted".to_owned(),
-        crate::execution::TerminationReason::EvidenceBudget => {
-            "Evidence budget exhausted".to_owned()
+        crate::execution::TerminationReason::UserCancelled => "Scan was cancelled.".to_owned(),
+        crate::execution::TerminationReason::TaskBudget => {
+            "Scan stopped: task limit reached.".to_owned()
         }
-        crate::execution::TerminationReason::OutputBudget => "Output budget exhausted".to_owned(),
-        crate::execution::TerminationReason::InternalFailure => "Internal failure".to_owned(),
+        crate::execution::TerminationReason::RetryBudget => {
+            "Scan stopped: retry limit reached.".to_owned()
+        }
+        crate::execution::TerminationReason::EvidenceBudget => {
+            "Scan stopped: evidence limit reached.".to_owned()
+        }
+        crate::execution::TerminationReason::OutputBudget => {
+            "Scan stopped: output limit reached.".to_owned()
+        }
+        crate::execution::TerminationReason::InternalFailure => {
+            "Scan stopped: internal error.".to_owned()
+        }
     }
 }
 
