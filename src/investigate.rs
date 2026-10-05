@@ -2671,6 +2671,147 @@ pub fn render_human(
     )
 }
 
+/// Presentation classification for related resources. Internal only:
+/// the graph is never modified, collection never stops, and counts never
+/// change. Default human output hides static web-asset noise; `--all`
+/// exposes the complete evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelatedKind {
+    /// Canonical account/profile URL. Has its own tree branch, never in
+    /// the related list.
+    Primary,
+    /// Meaningful relationship: repository, domain, organization, email,
+    /// non-static endpoint, DNS, network endpoint, etc. Survives default
+    /// filtering.
+    Relevant,
+    /// Static web asset: JS/CSS/images/fonts/source maps/framework
+    /// chunks/favicons. Valid graph evidence but hidden from default
+    /// human output; visible with `--all` and in JSON/JSONL.
+    Asset,
+    /// Internal-only noise. Reserved; currently unused beyond assets.
+    InternalNoise,
+}
+
+/// Returns true when `url` is a static web asset: JS/CSS/images/fonts/
+/// source maps/framework chunks/favicons. Presentation filtering only.
+fn is_static_asset_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    let path = lower
+        .split("://")
+        .nth(1)
+        .unwrap_or(&lower)
+        .split('?')
+        .next()
+        .unwrap_or("")
+        .split('#')
+        .next()
+        .unwrap_or("");
+    // Strip host: keep path for extension checks.
+    let path_only = path.split('/').skip(1).collect::<Vec<_>>().join("/");
+    let path_only = format!("/{path_only}");
+    // Favicon by name anywhere.
+    if path_only.contains("favicon") {
+        return true;
+    }
+    // Framework/static bundle markers.
+    if path_only.contains("/_next/static/")
+        || path_only.contains(".chunk.")
+        || path_only.contains("-chunk-")
+        || path_only.contains(".bundle.")
+    {
+        return true;
+    }
+    // Extension check on the final segment.
+    let last = path_only.rsplit('/').next().unwrap_or("");
+    let ext = last
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("");
+    // Only treat as asset when an extension is actually present.
+    if !last.contains('.') {
+        return false;
+    }
+    matches!(
+        ext,
+        "js" | "mjs"
+            | "css"
+            | "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "svg"
+            | "ico"
+            | "webp"
+            | "avif"
+            | "bmp"
+            | "woff"
+            | "woff2"
+            | "ttf"
+            | "otf"
+            | "eot"
+            | "map"
+    )
+}
+
+/// Classify a related entity for presentation. Non-endpoint kinds
+/// (domain, repository, organization, email, IP, DNS, etc.) are always
+/// relevant. Endpoints are relevant unless they are static assets.
+fn classify_related_endpoint(entity: &InvestigationEntity) -> RelatedKind {
+    if entity
+        .attributes
+        .get("source")
+        .is_some_and(|source| source == "profile_canonical")
+    {
+        return RelatedKind::Primary;
+    }
+    if entity.kind != EntityKind::WebEndpoint && entity.kind != EntityKind::NetworkEndpoint {
+        return RelatedKind::Relevant;
+    }
+    let url = entity
+        .attributes
+        .get("url")
+        .cloned()
+        .unwrap_or_else(|| entity.canonical_value.clone());
+    if url.trim().is_empty() {
+        return RelatedKind::InternalNoise;
+    }
+    if is_static_asset_url(&url) {
+        RelatedKind::Asset
+    } else {
+        RelatedKind::Relevant
+    }
+}
+
+/// Honest account URL label for investigation: `Profile` for high-confidence
+/// public pages, `Resource` for high-confidence API/resource URLs,
+/// `Candidate` for low-confidence (possible) accounts.
+fn account_url_label(profile_url: &str, confidence: Option<u8>) -> &'static str {
+    let conf = confidence.unwrap_or(0);
+    if conf < 50 {
+        return "Candidate";
+    }
+    // Reuse the search API-resource heuristic for honest labeling.
+    let lower = profile_url.to_ascii_lowercase();
+    let host = lower
+        .split("://")
+        .nth(1)
+        .unwrap_or(&lower)
+        .split('/')
+        .next()
+        .unwrap_or("");
+    let api_like = host.starts_with("api.")
+        || host.contains(".api.")
+        || lower.contains("/api/")
+        || lower.contains("/xrpc/")
+        || lower.contains("about.json")
+        || lower.contains("lookup.json")
+        || lower.trim_end_matches('/').ends_with(".json");
+    if api_like { "Resource" } else { "Profile" }
+}
+
 /// Capabilities-aware investigation renderer (responsive + styled).
 ///
 /// Default human output is concise: seed, accounts tree, correlation,
@@ -2728,8 +2869,20 @@ fn render_human_inner(
 ) -> String {
     use crate::terminal::{
         Align, Style, Table, TerminalCapabilities, WorkflowMode, confidence_label, footer_block,
-        format_count, key_value, paint, section_heading, style_for_confidence, warning_block,
-        workflow_header,
+        format_count, key_value, paint, sanitize_human_text, sanitize_url_for_display,
+        section_heading, style_for_confidence, truncate_display, warning_block, workflow_header,
+    };
+    // Terminal-safe display: externally derived labels/URLs must never inject
+    // control sequences. Stored evidence is unchanged; only human display is
+    // sanitized and width-bounded.
+    let safe_label =
+        |text: &str, max: usize| -> String { truncate_display(&sanitize_human_text(text), max) };
+    let safe_url = |url: &str, max: usize| -> String {
+        let clean = sanitize_url_for_display(url);
+        if clean.is_empty() {
+            return String::new();
+        }
+        truncate_display(&clean, max)
     };
     let color = caps.color;
     let ascii = caps.ascii;
@@ -2764,7 +2917,7 @@ fn render_human_inner(
     out.push_str(&key_value(
         caps,
         "Value",
-        &paint(color, Style::Identifier, &truncate(&seed_value, 64)),
+        &paint(color, Style::Identifier, &safe_label(&seed_value, 64)),
         8,
     ));
     out.push('\n');
@@ -2784,7 +2937,7 @@ fn render_human_inner(
         out.push_str(&key_value(
             caps,
             "Network",
-            &paint(color, Style::Warning, &truncate(&scopes, 64)),
+            &paint(color, Style::Warning, &safe_label(&scopes, 64)),
             8,
         ));
     } else {
@@ -2822,10 +2975,11 @@ fn render_human_inner(
     } else {
         for account in accounts.iter().take(account_limit) {
             out.push('\n');
-            // Account/provider name: bold primary.
+            // Account/provider name: bold primary. Sanitized: provider text
+            // must never inject terminal controls.
             out.push_str(&format!(
                 "  {}\n",
-                paint(color, Style::Value, &truncate(&account.label, 64))
+                paint(color, Style::Value, &safe_label(&account.label, 64))
             ));
             // Seed->account confidence for this account.
             let seed_conf = report
@@ -2851,7 +3005,7 @@ fn render_human_inner(
             for rel in outgoing.iter() {
                 if let Some(entity) = report.entities.get(&rel.to) {
                     // Skip the canonical profile duplicate in related list;
-                    // it has its own Profile branch.
+                    // it has its own Profile/Candidate/Resource branch.
                     if !profile_url.is_empty()
                         && (entity.canonical_value == profile_url || entity.label == profile_url)
                     {
@@ -2860,30 +3014,54 @@ fn render_human_inner(
                     related.push((entity, rel.confidence));
                 }
             }
-            let link_limit = if show_all { related.len() } else { 6 };
-            let related_shown = related.iter().take(link_limit).count();
-            // Build branch list: Profile?, Related?, Confidence.
+            // Presentation filtering only: default hides static web-asset
+            // noise (JS/CSS/images/fonts/maps/chunks/favicons). The graph,
+            // counts, and JSON/JSONL are unchanged; `--all` exposes the
+            // complete related detail.
+            let related_visible: Vec<(&InvestigationEntity, u8)> = if show_all {
+                related.clone()
+            } else {
+                related
+                    .iter()
+                    .filter(|(entity, _)| {
+                        !matches!(
+                            classify_related_endpoint(entity),
+                            RelatedKind::Asset | RelatedKind::InternalNoise
+                        )
+                    })
+                    .cloned()
+                    .collect()
+            };
+            let link_limit = if show_all { related_visible.len() } else { 6 };
+            let related_shown = related_visible.iter().take(link_limit).count();
+            // Build branch list: Profile/Candidate/Resource?, Related?, Confidence.
+            // Entity-first default: account, profile/resource URL,
+            // confidence, important relationships. Static assets never
+            // create a Related branch on their own.
             enum Branch {
-                Profile(String),
-                Related(Vec<(String, String)>),
+                Profile(String, &'static str),
+                Related(Vec<(String, String)>, bool),
                 Confidence(Option<u8>),
             }
             let mut branches: Vec<Branch> = Vec::new();
             if !profile_url.is_empty() {
-                branches.push(Branch::Profile(profile_url.clone()));
+                let label = account_url_label(&profile_url, seed_conf);
+                branches.push(Branch::Profile(profile_url.clone(), label));
             }
             if related_shown > 0 {
-                let items: Vec<(String, String)> = related
+                let items: Vec<(String, String)> = related_visible
                     .iter()
                     .take(link_limit)
                     .map(|(entity, _)| {
                         (
-                            human_entity_kind(entity.kind),
-                            truncate(&human_entity_display(entity), 56),
+                            safe_label(&human_entity_kind(entity.kind), 24),
+                            safe_label(&human_entity_display(entity), 56),
                         )
                     })
                     .collect();
-                branches.push(Branch::Related(items));
+                // `true` when this rendering was asset-filtered (default);
+                // `--all` shows the complete `Related endpoints` detail.
+                branches.push(Branch::Related(items, !show_all));
             }
             branches.push(Branch::Confidence(seed_conf));
             let branch_glyph = |last: bool| {
@@ -2900,24 +3078,36 @@ fn render_human_inner(
                 let last_branch = bi + 1 == branches.len();
                 let stem = branch_glyph(last_branch);
                 match branch {
-                    Branch::Profile(url) => {
+                    Branch::Profile(url, label) => {
                         out.push_str(&format!(
                             "  {}{}\n",
                             stem,
-                            paint(color, Style::Muted, "Profile")
+                            paint(color, Style::Muted, label)
                         ));
                         let prefix = if last_branch { "   " } else { cont_glyph };
-                        out.push_str(&format!(
-                            "  {}{}\n",
-                            prefix,
-                            paint(color, Style::Identifier, &truncate(url, 64))
-                        ));
+                        let shown = safe_url(url, 64);
+                        if !shown.is_empty() {
+                            out.push_str(&format!(
+                                "  {}{}\n",
+                                prefix,
+                                paint(color, Style::Identifier, &shown)
+                            ));
+                        }
                     }
-                    Branch::Related(items) => {
+                    Branch::Related(items, filtered) => {
+                        // Default shows the entity-first `Related` summary
+                        // of meaningful endpoints; `--all` exposes the
+                        // complete `Related endpoints` detail including
+                        // static assets.
+                        let heading = if *filtered {
+                            "Related"
+                        } else {
+                            "Related endpoints"
+                        };
                         out.push_str(&format!(
                             "  {}{}\n",
                             stem,
-                            paint(color, Style::Muted, "Related endpoints")
+                            paint(color, Style::Muted, heading)
                         ));
                         let prefix = if last_branch { "   " } else { cont_glyph };
                         for (ii, (kind, display)) in items.iter().enumerate() {
@@ -2935,13 +3125,13 @@ fn render_human_inner(
                                 paint(color, Style::Identifier, display),
                             ));
                         }
-                        if !show_all && related.len() > link_limit {
+                        if !show_all && related_visible.len() > link_limit {
                             out.push_str(&format!(
                                 "  {prefix}   {}\n",
                                 paint(
                                     color,
                                     Style::Muted,
-                                    &format!("+{} more", related.len() - link_limit)
+                                    &format!("+{} more", related_visible.len() - link_limit)
                                 )
                             ));
                         }
@@ -2996,7 +3186,8 @@ fn render_human_inner(
         out.push('\n');
         out.push('\n');
         let limit = if show_all { correlations.len() } else { 10 };
-        // Resolve human-readable names for entity IDs.
+        // Resolve human-readable names for entity IDs. Never exposes raw
+        // graph IDs: labels are preferred, IDs are humanized to values.
         let mut rows: Vec<(String, usize)> = Vec::new();
         for (id, sources) in correlations.iter().take(limit) {
             let display = report
@@ -3004,7 +3195,7 @@ fn render_human_inner(
                 .get(id)
                 .map(human_entity_display)
                 .unwrap_or_else(|| humanize_entity_id(id));
-            rows.push((truncate(&display, 48), sources.len()));
+            rows.push((safe_label(&display, 48), sources.len()));
         }
         rows.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         if caps.width_mode() == crate::terminal::WidthMode::Compact {
@@ -3050,7 +3241,7 @@ fn render_human_inner(
         for entity in exposures.iter().take(limit) {
             out.push_str(&format!(
                 "  {} (secrets retained: no)\n",
-                truncate(&human_entity_display(entity), 88)
+                safe_label(&human_entity_display(entity), 88)
             ));
         }
     }

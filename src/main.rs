@@ -769,30 +769,115 @@ fn search_status_key(status: &SearchStatus) -> &'static str {
 
 /// Map a search report onto presentation rows. The terminal renderer only
 /// ever sees these plain rows, never search internals.
+///
+/// Presentation view-model: exposes the useful honest URL without changing
+/// detection semantics, confidence, or machine schemas. Ranking is
+/// deterministic: observed identity-specific public profile >
+/// observed identity-specific API/resource > candidate identity-specific
+/// profile > no default URL. Generic provider/API endpoints are never
+/// preferred merely because they were the final HTTP URL; they are omitted
+/// from the default URL (renderer states the honest absence).
 fn search_report_rows(
     report: &rxscan::search::UsernameSearchReport,
 ) -> Vec<rxscan::terminal::SearchRow> {
-    use rxscan::terminal::{RowTier, SearchRow};
+    use rxscan::terminal::{RowTier, SearchRow, is_api_resource_url, is_identity_specific_url};
+    let username = report.seed.display_value.as_str();
     report
         .results
         .iter()
         .map(|result| {
             let key = search_status_key(&result.status);
-            let (tier, detail) = match key {
-                "confirmed" | "probable" => (RowTier::Positive, "profile".to_owned()),
-                "possible" => (RowTier::Positive, "weak evidence".to_owned()),
-                "blocked" | "rate_limited" | "error" | "authentication_required" | "unknown" => (
-                    RowTier::Attention,
-                    result.evidence.first().cloned().unwrap_or_default(),
-                ),
-                _ => (RowTier::Quiet, String::new()),
-            };
-            SearchRow {
-                status: key,
-                provider: result.provider_id.clone(),
-                confidence: result.confidence,
-                detail,
-                tier,
+            let profile_url = result
+                .attributes
+                .get("profile_url")
+                .map(String::as_str)
+                .unwrap_or("");
+            let final_url = result
+                .attributes
+                .get("final_url")
+                .map(String::as_str)
+                .unwrap_or("");
+            let profile_trim = profile_url.trim();
+            let final_trim = final_url.trim();
+            let final_identity = is_identity_specific_url(final_trim, username);
+            let profile_identity = is_identity_specific_url(profile_trim, username);
+            let final_api = is_api_resource_url(final_trim);
+            let profile_api = is_api_resource_url(profile_trim);
+            match key {
+                "confirmed" | "probable" => {
+                    // Honest observed selection: prefer identity-specific
+                    // public profile over API resource; never prefer a
+                    // generic endpoint merely because it was final.
+                    let (url, detail) = if final_identity && !final_api {
+                        (final_trim.to_owned(), "public profile".to_owned())
+                    } else if profile_identity && !profile_api {
+                        (profile_trim.to_owned(), "public profile".to_owned())
+                    } else if final_identity && final_api {
+                        (final_trim.to_owned(), "public account resource".to_owned())
+                    } else if profile_identity && profile_api {
+                        (
+                            profile_trim.to_owned(),
+                            "public account resource".to_owned(),
+                        )
+                    } else {
+                        // No identity-specific URL: omit (renderer states
+                        // the honest absence). Never invent or show generic.
+                        (String::new(), "public profile".to_owned())
+                    };
+                    let observed = !url.is_empty();
+                    SearchRow {
+                        status: key,
+                        provider: result.provider_id.clone(),
+                        confidence: result.confidence,
+                        detail,
+                        tier: RowTier::Positive,
+                        url,
+                        url_observed: observed,
+                    }
+                }
+                "possible" => {
+                    // Candidate only: evidence does not establish the
+                    // account. Prefer the canonical candidate profile;
+                    // never show a generic endpoint as the candidate.
+                    let url = if profile_identity {
+                        profile_trim.to_owned()
+                    } else if final_identity {
+                        final_trim.to_owned()
+                    } else {
+                        String::new()
+                    };
+                    SearchRow {
+                        status: key,
+                        provider: result.provider_id.clone(),
+                        confidence: result.confidence,
+                        detail: "weak evidence".to_owned(),
+                        tier: RowTier::Positive,
+                        // Candidate: fetched URL exists but does not establish the
+                        // account. Renderer must not label it as observed.
+                        url,
+                        url_observed: false,
+                    }
+                }
+                "blocked" | "rate_limited" | "error" | "authentication_required" | "unknown" => {
+                    SearchRow {
+                        status: key,
+                        provider: result.provider_id.clone(),
+                        confidence: result.confidence,
+                        detail: result.evidence.first().cloned().unwrap_or_default(),
+                        tier: RowTier::Attention,
+                        url: String::new(),
+                        url_observed: false,
+                    }
+                }
+                _ => SearchRow {
+                    status: key,
+                    provider: result.provider_id.clone(),
+                    confidence: result.confidence,
+                    detail: String::new(),
+                    tier: RowTier::Quiet,
+                    url: String::new(),
+                    url_observed: false,
+                },
             }
         })
         .collect()

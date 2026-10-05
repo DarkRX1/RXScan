@@ -10,8 +10,10 @@ fn confirmed_row(index: usize) -> SearchRow {
         status: "confirmed",
         provider: format!("confirmed-provider-{index:02}"),
         confidence: 94,
-        detail: "profile".to_owned(),
+        detail: "public profile".to_owned(),
         tier: RowTier::Positive,
+        url: format!("https://example.test/c{index:02}/exampleuser"),
+        url_observed: true,
     }
 }
 
@@ -22,6 +24,8 @@ fn possible_row(index: usize) -> SearchRow {
         confidence: 25,
         detail: "weak evidence".to_owned(),
         tier: RowTier::Positive,
+        url: format!("https://example.test/p{index:02}/exampleuser"),
+        url_observed: false,
     }
 }
 
@@ -39,6 +43,8 @@ fn attention_row(status: &'static str, provider: String) -> SearchRow {
         confidence: 0,
         detail: detail.to_owned(),
         tier: RowTier::Attention,
+        url: String::new(),
+        url_observed: false,
     }
 }
 
@@ -49,6 +55,8 @@ fn quiet_row(provider: String) -> SearchRow {
         confidence: 0,
         detail: String::new(),
         tier: RowTier::Quiet,
+        url: String::new(),
+        url_observed: false,
     }
 }
 
@@ -129,9 +137,14 @@ fn default_renders_findings_header_exactly_once() {
     let text = render_default(&rows, &summary);
     assert!(text.contains("FINDINGS"), "FINDINGS section: {text}");
     assert_eq!(
-        text.matches("STATUS").count(),
+        text.matches("FINDINGS").count(),
         1,
-        "one FINDINGS table header: {text}"
+        "one FINDINGS section: {text}"
+    );
+    // Findings-first cards: no database-like STATUS table for positives.
+    assert!(
+        !text.contains("STATUS"),
+        "cards replace STATUS table for positives: {text}"
     );
 }
 

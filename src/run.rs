@@ -113,6 +113,11 @@ pub struct RunReport {
     pub fingerprint_files_rejected: usize,
     /// Stable scan id used for project persistence and JSONL records.
     pub scan_id: String,
+    /// Structured service intelligence per open port for findings-first
+    /// human output (product/version/banner/endpoint/title/tech/TLS/SSH).
+    /// Internal view-model only: derived from the same typed evidence JSONL
+    /// serializes, never changes machine schemas, never invented.
+    pub port_details: Vec<PortServiceDetail>,
     /// Optional project import summary (`--project-db`): path plus
     /// entity/observation counts imported this run.
     pub project_import: Option<ProjectImportSummary>,
@@ -129,6 +134,28 @@ pub struct ProjectImportSummary {
     pub entities_upserted: usize,
     pub observations_added: usize,
     pub relationships_upserted: usize,
+}
+
+/// Findings-first service intelligence for one open TCP port.
+///
+/// Internal presentation view-model: every field is `Option` and only set
+/// when the underlying typed evidence actually observed it. The renderer
+/// shows a small useful subset (endpoint/product/title/tech/TLS for HTTP,
+/// product/version/banner/key for SSH) and never fabricates missing values.
+/// Stored evidence and JSON/JSONL are never truncated by human display.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PortServiceDetail {
+    pub port: u16,
+    pub service: String,
+    pub product: Option<String>,
+    pub version: Option<String>,
+    pub banner: Option<String>,
+    pub endpoint: Option<String>,
+    pub title: Option<String>,
+    pub technologies: Vec<String>,
+    pub tls_name: Option<String>,
+    pub tls_issuer: Option<String>,
+    pub ssh_key: Option<String>,
 }
 
 /// Execute the discovery plane from CLI.
@@ -205,6 +232,7 @@ pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
             fingerprint_rules: 0,
             fingerprint_files_rejected: 0,
             scan_id,
+            port_details: Vec::new(),
             project_import: None,
             project_changes: Vec::new(),
             attention: Vec::new(),
@@ -751,6 +779,7 @@ pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
         fingerprint_rules: fingerprint_db.stats().rules_accepted,
         fingerprint_files_rejected: fingerprint_db.stats().files_rejected,
         scan_id,
+        port_details: collect_port_details(&module_outputs),
         project_import,
         project_changes,
         attention,
@@ -1644,7 +1673,7 @@ fn human_summary_inner(
     explain: bool,
 ) -> String {
     use crate::terminal::{
-        Align, Table, WorkflowMode, error_block, footer_block, format_count, format_count_u64,
+        Align, WorkflowMode, error_block, footer_block, format_count, format_count_u64,
         humanize_duration_ms, key_value, paint, section_heading, style_for_port_state,
         warning_block, workflow_header,
     };
@@ -1728,6 +1757,9 @@ fn human_summary_inner(
     // (No duplicate duration line here.)
 
     // PORTS -------------------------------------------------------------
+    // Findings-first: each open port shows the useful observed service
+    // intelligence underneath it (product/version/endpoint/title/tech/TLS).
+    // Only evidence-backed fields render; unknown stays honest.
     out.push('\n');
     out.push_str(&section_heading(caps, "Ports"));
     out.push('\n');
@@ -1749,44 +1781,67 @@ fn human_summary_inner(
                 )
             ));
         }
-    } else if mode == crate::terminal::WidthMode::Compact {
-        out.push('\n');
-        for row in &port_rows {
-            let state_label = row.state.to_ascii_uppercase();
-            out.push_str(&format!(
-                "  {}  {}\n",
-                paint(color, Style::Identifier, &row.port_label),
-                paint(color, style_for_port_state(&row.state), &state_label),
-            ));
-            out.push_str(&format!("    Service    {}\n", row.service));
-            out.push_str(&format!("    Version    {}\n", row.version));
-        }
     } else {
         out.push('\n');
-        // Wide and normal terminals show the full PORT / STATE / SERVICE /
-        // VERSION table (version truncates to fit); compact terminals fall
-        // back to vertical blocks so nothing is lost.
-        let mut table = Table::new(&["PORT", "STATE", "SERVICE", "VERSION"]);
-        // Right-align nothing; keep stable left alignment.
+        let details: Vec<PortServiceDetail> = match module_outputs {
+            Some(outputs) if !outputs.is_empty() => collect_port_details(outputs),
+            _ => report.port_details.clone(),
+        };
+        let details_map: std::collections::BTreeMap<u16, &PortServiceDetail> =
+            details.iter().map(|d| (d.port, d)).collect();
+        let _ = mode;
         let _ = Align::Left;
-        table.max_widths = vec![10, 10, 16, 40];
         for row in &port_rows {
-            let port_cell = paint(color, Style::Identifier, &row.port_label);
-            let state_cell = paint(
-                color,
-                style_for_port_state(&row.state),
-                &row.state.to_ascii_uppercase(),
-            );
-            let service_cell = row.service.clone();
-            table.cells(vec![
-                port_cell,
-                state_cell,
-                service_cell,
-                row.version.clone(),
-            ]);
+            let state_label = row.state.to_ascii_uppercase();
+            let service_clean = crate::terminal::sanitize_human_text(&row.service);
+            let service_label = if service_clean.is_empty() {
+                "unknown".to_owned()
+            } else {
+                service_clean
+            };
+            out.push_str(&format!(
+                "  {}  {}  {}\n",
+                paint(color, Style::Identifier, &row.port_label),
+                paint(color, style_for_port_state(&row.state), &state_label),
+                paint(color, Style::Value, &service_label),
+            ));
+            let port_num = row
+                .port_label
+                .split('/')
+                .next()
+                .and_then(|s| s.parse::<u16>().ok())
+                .unwrap_or(0);
+            if let Some(detail) = details_map.get(&port_num) {
+                for (label, value, is_url) in port_detail_lines(detail, caps) {
+                    let styled_label = paint(color, Style::Secondary, &label);
+                    let styled_value = if is_url {
+                        paint(color, Style::Identifier, &value)
+                    } else {
+                        paint(color, Style::Primary, &value)
+                    };
+                    // Pad label to 10 visible columns for scannability.
+                    let pad = 10usize.saturating_sub(label.len());
+                    out.push_str(&format!(
+                        "    {styled_label}{}  {styled_value}\n",
+                        " ".repeat(pad)
+                    ));
+                }
+            } else if row.version.trim() != "-" && !row.version.trim().is_empty() {
+                // Fallback from stored summary (product only, no invented
+                // version/endpoint/TLS). Honest: shows only what the summary
+                // preserved.
+                let clean = crate::terminal::truncate_display(
+                    &crate::terminal::sanitize_human_text(&row.version),
+                    40,
+                );
+                if !clean.is_empty() && clean != "-" {
+                    let styled_label = paint(color, Style::Secondary, "Product");
+                    let styled_value = paint(color, Style::Primary, &clean);
+                    out.push_str(&format!("    {styled_label}     {styled_value}\n"));
+                }
+            }
+            out.push('\n');
         }
-        out.push_str(&table.render(caps));
-        out.push('\n');
     }
 
     // SCAN SUMMARY ------------------------------------------------------
@@ -2292,6 +2347,404 @@ fn scan_port_rows_from_outputs(
     rows
 }
 
+/// Collect findings-first service intelligence per open port.
+///
+/// Only values actually observed in typed findings/events/evidence are kept;
+/// missing stays `None` and the renderer omits it. Never invents products,
+/// versions, URLs, titles, TLS names, banners, or technologies.
+pub fn collect_port_details(
+    outputs: &[(crate::execution::TaskId, crate::execution::ModuleOutput)],
+) -> Vec<PortServiceDetail> {
+    use std::collections::BTreeMap;
+    let mut map: BTreeMap<u16, PortServiceDetail> = BTreeMap::new();
+    fn ensure_detail(
+        map: &mut BTreeMap<u16, PortServiceDetail>,
+        port: u16,
+    ) -> &mut PortServiceDetail {
+        map.entry(port).or_insert_with(|| PortServiceDetail {
+            port,
+            service: "unknown".to_owned(),
+            ..Default::default()
+        })
+    }
+    fn set_if_empty(slot: &mut Option<String>, value: Option<String>) {
+        if slot.is_none() {
+            if let Some(v) = value {
+                let t = v.trim().to_owned();
+                if !t.is_empty() && t != "-" {
+                    *slot = Some(t);
+                }
+            }
+        }
+    }
+    for (_, output) in outputs {
+        // Findings: authoritative service/product/version + HTTP endpoints.
+        for finding in &output.findings {
+            let port = finding
+                .metadata
+                .get("port")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as u16;
+            if finding.title.starts_with("Open TCP port") {
+                if port > 0 {
+                    ensure_detail(&mut map, port);
+                }
+                continue;
+            }
+            let is_service = finding.title.ends_with("service on port")
+                || finding.title.contains(" service on port ");
+            let is_http = finding.title.starts_with("HTTP ");
+            if is_service && port > 0 {
+                let entry = ensure_detail(&mut map, port);
+                if let Some(svc) = finding
+                    .metadata
+                    .get("service")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    if !svc.trim().is_empty() && entry.service == "unknown" {
+                        entry.service = svc.trim().to_owned();
+                    }
+                }
+                let product = finding
+                    .metadata
+                    .get("product")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned);
+                set_if_empty(&mut entry.product, product);
+                let version = finding
+                    .metadata
+                    .get("version")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned);
+                set_if_empty(&mut entry.version, version);
+                let ssh_key = finding
+                    .metadata
+                    .get("ssh_host_key_sha256")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned);
+                set_if_empty(&mut entry.ssh_key, ssh_key);
+            } else if is_http {
+                // HTTP finding carries url but not always port; derive port
+                // from URL when metadata lacks it, else match via evidence.
+                let url = finding
+                    .metadata
+                    .get("url")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_owned();
+                let derived_port = if port > 0 {
+                    port
+                } else {
+                    url_port(&url).unwrap_or(0)
+                };
+                if derived_port > 0 && !url.trim().is_empty() {
+                    let entry = ensure_detail(&mut map, derived_port);
+                    if entry.service == "unknown" {
+                        if let Some(svc) = finding
+                            .metadata
+                            .get("service")
+                            .and_then(serde_json::Value::as_str)
+                        {
+                            if !svc.trim().is_empty() {
+                                entry.service = svc.trim().to_owned();
+                            }
+                        }
+                    }
+                    if entry.endpoint.is_none() && !url.trim().is_empty() {
+                        entry.endpoint = Some(url.trim().to_owned());
+                    }
+                }
+            }
+        }
+        // Events: banners, service identity, TLS, SSH keys, endpoints.
+        for event in &output.events {
+            let data = &event.details.data;
+            let port = data
+                .get("port")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as u16;
+            match event.kind {
+                crate::model::EventKind::BannerObserved => {
+                    if port > 0 {
+                        let banner = data
+                            .get("banner")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned);
+                        let entry = ensure_detail(&mut map, port);
+                        set_if_empty(&mut entry.banner, banner);
+                    }
+                }
+                crate::model::EventKind::ServiceIdentified => {
+                    if port > 0 {
+                        let entry = ensure_detail(&mut map, port);
+                        if let Some(svc) = data.get("service").and_then(serde_json::Value::as_str) {
+                            if !svc.trim().is_empty() && entry.service == "unknown" {
+                                entry.service = svc.trim().to_owned();
+                            }
+                        }
+                        let product = data
+                            .get("product_hint")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned);
+                        set_if_empty(&mut entry.product, product);
+                        let version = data
+                            .get("version_hint")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned);
+                        set_if_empty(&mut entry.version, version);
+                    }
+                }
+                crate::model::EventKind::SshHostKeyObserved => {
+                    if port > 0 {
+                        let fp = data
+                            .get("sha256")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned);
+                        let entry = ensure_detail(&mut map, port);
+                        set_if_empty(&mut entry.ssh_key, fp);
+                    }
+                }
+                crate::model::EventKind::EndpointObserved => {
+                    let url = data
+                        .get("url")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("")
+                        .to_owned();
+                    let title = data
+                        .get("title")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned);
+                    let p = if port > 0 {
+                        port
+                    } else {
+                        url_port(&url).unwrap_or(0)
+                    };
+                    if p > 0 && !url.trim().is_empty() {
+                        let entry = ensure_detail(&mut map, p);
+                        if entry.endpoint.is_none() {
+                            entry.endpoint = Some(url.trim().to_owned());
+                        }
+                        set_if_empty(&mut entry.title, title);
+                    }
+                }
+                crate::model::EventKind::TlsObserved => {
+                    // Both service-probe (sni) and web-probe (subject/issuer).
+                    let subject = data
+                        .get("subject")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned);
+                    let issuer = data
+                        .get("issuer")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned);
+                    let sni = data
+                        .get("sni")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned);
+                    // Attach to matching port when known; otherwise attach to
+                    // TLS-ish ports already open (443/8443) only if exactly
+                    // one such port exists (avoids misattribution).
+                    let mut targets: Vec<u16> = Vec::new();
+                    if port > 0 {
+                        targets.push(port);
+                    } else if let Some(url) = data.get("url").and_then(serde_json::Value::as_str) {
+                        if let Some(p) = url_port(url) {
+                            targets.push(p);
+                        }
+                    }
+                    if targets.is_empty() {
+                        let tls_ports: Vec<u16> = map
+                            .iter()
+                            .filter(|(_, d)| {
+                                d.service.eq_ignore_ascii_case("https")
+                                    || d.service.eq_ignore_ascii_case("tls")
+                                    || d.service.eq_ignore_ascii_case("smtps")
+                            })
+                            .map(|(p, _)| *p)
+                            .collect();
+                        if tls_ports.len() == 1 {
+                            targets.push(tls_ports[0]);
+                        }
+                    }
+                    for p in targets {
+                        let entry = ensure_detail(&mut map, p);
+                        if entry.tls_name.is_none() {
+                            if let Some(s) = subject.clone() {
+                                if !s.trim().is_empty() {
+                                    entry.tls_name = Some(s.trim().to_owned());
+                                }
+                            }
+                        }
+                        if entry.tls_name.is_none() {
+                            set_if_empty(&mut entry.tls_name, sni.clone());
+                        }
+                        set_if_empty(&mut entry.tls_issuer, issuer.clone());
+                    }
+                }
+                crate::model::EventKind::HttpObserved if port > 0 => {
+                    let product = data
+                        .get("product_hint")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned);
+                    let entry = ensure_detail(&mut map, port);
+                    set_if_empty(&mut entry.product, product);
+                }
+                _ => {}
+            }
+        }
+        // Evidence: full observations (service + web + cert).
+        for evidence in &output.evidence {
+            let data = &evidence.details.data;
+            let port = data
+                .get("port")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as u16;
+            // ServiceObservation shape.
+            if (data.get("service_label").is_some() || data.get("product_hint").is_some())
+                && port > 0
+            {
+                let entry = ensure_detail(&mut map, port);
+                if let Some(svc) = data
+                    .get("service_label")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    if !svc.trim().is_empty() && entry.service == "unknown" {
+                        entry.service = svc.trim().to_owned();
+                    }
+                }
+                let product = data
+                    .get("product_hint")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned);
+                set_if_empty(&mut entry.product, product);
+                let version = data
+                    .get("version_hint")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned);
+                set_if_empty(&mut entry.version, version);
+                let banner = data
+                    .get("banner")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned);
+                set_if_empty(&mut entry.banner, banner);
+            }
+            // WebProbe shape: url/title/server/technologies/tls.
+            if let Some(url) = data.get("url").and_then(serde_json::Value::as_str) {
+                if !url.trim().is_empty()
+                    && (data.get("title").is_some()
+                        || data.get("technologies").is_some()
+                        || data.get("server").is_some()
+                        || data.get("status").is_some())
+                {
+                    let p = if port > 0 {
+                        port
+                    } else {
+                        url_port(url).unwrap_or(0)
+                    };
+                    if p > 0 {
+                        let entry = ensure_detail(&mut map, p);
+                        if entry.endpoint.is_none() {
+                            entry.endpoint = Some(url.trim().to_owned());
+                        }
+                        let title = data
+                            .get("title")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned);
+                        set_if_empty(&mut entry.title, title);
+                        // Server header as product fallback (observed).
+                        if entry.product.is_none() {
+                            let server = data
+                                .get("server")
+                                .and_then(serde_json::Value::as_str)
+                                .map(|s| s.split('/').next().unwrap_or(s).trim().to_owned());
+                            set_if_empty(&mut entry.product, server);
+                        }
+                        // Technologies: first two names only, scannable.
+                        if entry.technologies.is_empty() {
+                            if let Some(arr) = data.get("technologies").and_then(|v| v.as_array()) {
+                                for tech in arr.iter().take(2) {
+                                    let name = if let Some(s) = tech.as_str() {
+                                        s.trim().to_owned()
+                                    } else {
+                                        tech.get("name")
+                                            .and_then(serde_json::Value::as_str)
+                                            .unwrap_or("")
+                                            .trim()
+                                            .to_owned()
+                                    };
+                                    if !name.is_empty()
+                                        && !entry.technologies.contains(&name)
+                                        && entry.technologies.len() < 2
+                                    {
+                                        entry.technologies.push(name);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Certificate shape: subject/issuer/san_dns.
+            if data.get("subject").is_some() && data.get("fingerprint_sha256").is_some()
+                || (data.get("subject").is_some() && data.get("issuer").is_some())
+            {
+                let mut targets: Vec<u16> = Vec::new();
+                if port > 0 {
+                    targets.push(port);
+                } else if let Some(url) = data.get("url").and_then(serde_json::Value::as_str) {
+                    if let Some(p) = url_port(url) {
+                        targets.push(p);
+                    }
+                }
+                if targets.is_empty() {
+                    let tls_ports: Vec<u16> = map
+                        .iter()
+                        .filter(|(_, d)| {
+                            d.service.eq_ignore_ascii_case("https")
+                                || d.service.eq_ignore_ascii_case("tls")
+                        })
+                        .map(|(p, _)| *p)
+                        .collect();
+                    if tls_ports.len() == 1 {
+                        targets.push(tls_ports[0]);
+                    }
+                }
+                for p in targets {
+                    let entry = ensure_detail(&mut map, p);
+                    if entry.tls_name.is_none() {
+                        // Prefer first SAN DNS (useful identifier) over raw DN.
+                        if let Some(sans) = data.get("san_dns").and_then(|v| v.as_array()) {
+                            if let Some(first) = sans.iter().filter_map(|v| v.as_str()).next() {
+                                if !first.trim().is_empty() {
+                                    entry.tls_name = Some(first.trim().to_owned());
+                                }
+                            }
+                        }
+                    }
+                    if entry.tls_name.is_none() {
+                        let subject = data
+                            .get("subject")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned);
+                        set_if_empty(&mut entry.tls_name, subject);
+                    }
+                    let issuer = data
+                        .get("issuer")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned);
+                    set_if_empty(&mut entry.tls_issuer, issuer);
+                }
+            }
+        }
+    }
+    map.into_values().collect()
+}
+
+fn url_port(url: &str) -> Option<u16> {
+    let parsed = url::Url::parse(url.trim()).ok()?;
+    parsed.port_or_known_default()
+}
+
 /// Fallback parser for the stored plain service summary
 /// (`HOST … / PORT SERVICE PRODUCT / 22/tcp ssh …`).
 fn scan_port_rows_from_summary(summary: &str) -> Vec<ScanPortRow> {
@@ -2329,4 +2782,185 @@ fn scan_port_rows_from_summary(summary: &str) -> Vec<ScanPortRow> {
         });
     }
     rows
+}
+
+/// Ordered, bounded detail lines for one open port.
+///
+/// Returns `(label, value, is_url)` triples. Priority follows the finding
+/// type (HTTP: endpoint/product/title/tech/TLS; SSH: product/version/banner
+/// /key; TLS: name/issuer; generic: product/version/banner). At most 4
+/// lines keep output scannable; detailed provenance stays in `--explain`
+/// and JSON/JSONL. All values are sanitized and width-bounded; stored
+/// evidence is never modified.
+fn port_detail_lines(
+    detail: &PortServiceDetail,
+    caps: crate::terminal::TerminalCapabilities,
+) -> Vec<(String, String, bool)> {
+    use crate::terminal::{sanitize_human_text, sanitize_url_for_display, truncate_display};
+    let max_text = caps.width.saturating_sub(18).clamp(20, 80);
+    let max_url = caps.width.saturating_sub(18).clamp(20, 120);
+    let clean_opt = |v: &Option<String>, max: usize| -> Option<String> {
+        v.as_ref().and_then(|raw| {
+            let clean = sanitize_human_text(raw);
+            if clean.is_empty() || clean == "-" {
+                return None;
+            }
+            let shown = truncate_display(&clean, max);
+            if shown.is_empty() || shown == "-" {
+                None
+            } else {
+                Some(shown)
+            }
+        })
+    };
+    let clean_url = |v: &Option<String>| -> Option<String> {
+        v.as_ref().and_then(|raw| {
+            let clean = sanitize_url_for_display(raw);
+            if clean.is_empty() {
+                return None;
+            }
+            Some(truncate_display(&clean, max_url))
+        })
+    };
+    fn push_line(
+        lines: &mut Vec<(String, String, bool)>,
+        label: &str,
+        value: Option<String>,
+        is_url: bool,
+    ) {
+        if lines.len() >= 4 {
+            return;
+        }
+        if let Some(v) = value {
+            lines.push((label.to_owned(), v, is_url));
+        }
+    }
+    let service = detail.service.to_ascii_lowercase();
+    let mut lines: Vec<(String, String, bool)> = Vec::new();
+    if service == "http" || service == "https" {
+        push_line(&mut lines, "Endpoint", clean_url(&detail.endpoint), true);
+        push_line(
+            &mut lines,
+            "Product",
+            clean_opt(&detail.product, max_text),
+            false,
+        );
+        push_line(
+            &mut lines,
+            "Title",
+            clean_opt(&detail.title, max_text),
+            false,
+        );
+        if !detail.technologies.is_empty() && lines.len() < 4 {
+            let techs: Vec<String> = detail
+                .technologies
+                .iter()
+                .map(|t| sanitize_human_text(t))
+                .filter(|t| !t.is_empty())
+                .take(2)
+                .collect();
+            if !techs.is_empty() {
+                let joined = truncate_display(&techs.join(", "), max_text);
+                lines.push(("Technology".to_owned(), joined, false));
+            }
+        }
+        push_line(
+            &mut lines,
+            "TLS name",
+            clean_opt(&detail.tls_name, max_text),
+            true,
+        );
+        // Version/banner only if room remains (priority lower for HTTP).
+        if lines.len() < 4 {
+            push_line(
+                &mut lines,
+                "Version",
+                clean_opt(&detail.version, max_text),
+                false,
+            );
+        }
+        if lines.len() < 4 {
+            push_line(
+                &mut lines,
+                "Banner",
+                clean_opt(&detail.banner, max_text),
+                false,
+            );
+        }
+    } else if service == "ssh" {
+        push_line(
+            &mut lines,
+            "Product",
+            clean_opt(&detail.product, max_text),
+            false,
+        );
+        push_line(
+            &mut lines,
+            "Version",
+            clean_opt(&detail.version, max_text),
+            false,
+        );
+        push_line(
+            &mut lines,
+            "Banner",
+            clean_opt(&detail.banner, max_text),
+            false,
+        );
+        if lines.len() < 4 {
+            if let Some(key) = clean_opt(&detail.ssh_key, max_text) {
+                lines.push(("SSH key".to_owned(), key, false));
+            }
+        }
+    } else if service == "tls" || service == "smtps" {
+        push_line(
+            &mut lines,
+            "TLS name",
+            clean_opt(&detail.tls_name, max_text),
+            true,
+        );
+        push_line(
+            &mut lines,
+            "Issuer",
+            clean_opt(&detail.tls_issuer, max_text),
+            false,
+        );
+        push_line(&mut lines, "Endpoint", clean_url(&detail.endpoint), true);
+        push_line(
+            &mut lines,
+            "Product",
+            clean_opt(&detail.product, max_text),
+            false,
+        );
+    } else {
+        push_line(
+            &mut lines,
+            "Product",
+            clean_opt(&detail.product, max_text),
+            false,
+        );
+        push_line(
+            &mut lines,
+            "Version",
+            clean_opt(&detail.version, max_text),
+            false,
+        );
+        push_line(
+            &mut lines,
+            "Banner",
+            clean_opt(&detail.banner, max_text),
+            false,
+        );
+        if lines.len() < 4 {
+            push_line(&mut lines, "Endpoint", clean_url(&detail.endpoint), true);
+        }
+        if lines.len() < 4 {
+            push_line(
+                &mut lines,
+                "TLS name",
+                clean_opt(&detail.tls_name, max_text),
+                true,
+            );
+        }
+    }
+    lines
 }

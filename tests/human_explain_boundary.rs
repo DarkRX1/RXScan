@@ -64,6 +64,7 @@ fn recon_report(
         fingerprint_rules: 10,
         fingerprint_files_rejected: 0,
         scan_id: "scan_test".to_owned(),
+        port_details: Vec::new(),
         project_import: None,
         project_changes: Vec::new(),
         attention: Vec::new(),
@@ -284,8 +285,10 @@ fn search_default_omits_raw_accounting_while_explain_keeps_it() {
             status: "confirmed",
             provider: "example-provider".to_owned(),
             confidence: 90,
-            detail: "profile".to_owned(),
+            detail: "public profile".to_owned(),
             tier: RowTier::Positive,
+            url: "https://example.test/example-provider/exampleuser".to_owned(),
+            url_observed: true,
         },
         SearchRow {
             status: "possible",
@@ -293,6 +296,8 @@ fn search_default_omits_raw_accounting_while_explain_keeps_it() {
             confidence: 30,
             detail: "weak evidence".to_owned(),
             tier: RowTier::Positive,
+            url: "https://example.test/other-provider/exampleuser".to_owned(),
+            url_observed: false,
         },
     ];
     let summary = SearchSummary {

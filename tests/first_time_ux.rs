@@ -265,8 +265,10 @@ fn synthetic_search_rows() -> (
             status: "confirmed",
             provider: format!("confirmed-provider-{i:02}"),
             confidence: 94,
-            detail: "profile".to_owned(),
+            detail: "public profile".to_owned(),
             tier: RowTier::Positive,
+            url: format!("https://example.test/c{i:02}/exampleuser"),
+            url_observed: true,
         });
     }
     for i in 0..7 {
@@ -276,6 +278,8 @@ fn synthetic_search_rows() -> (
             confidence: 25,
             detail: "weak evidence".to_owned(),
             tier: RowTier::Positive,
+            url: format!("https://example.test/p{i:02}/exampleuser"),
+            url_observed: false,
         });
     }
     for i in 0..18 {
@@ -285,6 +289,8 @@ fn synthetic_search_rows() -> (
             confidence: 0,
             detail: "provider rejected request".to_owned(),
             tier: RowTier::Attention,
+            url: String::new(),
+            url_observed: false,
         });
     }
     for i in 0..50 {
@@ -294,6 +300,8 @@ fn synthetic_search_rows() -> (
             confidence: 0,
             detail: "no signal".to_owned(),
             tier: RowTier::Attention,
+            url: String::new(),
+            url_observed: false,
         });
     }
     let summary = SearchSummary {

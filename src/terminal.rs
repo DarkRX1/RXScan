@@ -1047,15 +1047,238 @@ pub enum RowTier {
 }
 
 /// One rendered search finding.
+///
+/// Presentation view-model only: the search engine never constructs these;
+/// the CLI maps its report onto rows. Machine schemas are unchanged; human
+/// truncation/sanitization here never affects JSON/JSONL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchRow {
     /// Lowercase status key (`confirmed`, `blocked`, `not_found`, ...).
     pub status: &'static str,
     pub provider: String,
     pub confidence: u8,
-    /// Short evidence kind (`profile`, `weak evidence`) or a reason.
+    /// Short evidence kind (`public profile`, `weak evidence`) or a reason.
     pub detail: String,
     pub tier: RowTier,
+    /// Canonical observed or candidate URL for this finding, when available.
+    /// Empty when no URL evidence exists (never invented).
+    pub url: String,
+    /// True when `url` was actually observed as the public resource
+    /// (confirmed/probable). False for constructed candidates (possible)
+    /// that must never be labeled as observed profiles.
+    pub url_observed: bool,
+}
+
+impl SearchRow {
+    /// Positive finding with an observed or candidate URL.
+    pub fn positive(
+        status: &'static str,
+        provider: String,
+        confidence: u8,
+        detail: String,
+        url: String,
+        url_observed: bool,
+    ) -> Self {
+        Self {
+            status,
+            provider,
+            confidence,
+            detail,
+            tier: RowTier::Positive,
+            url,
+            url_observed,
+        }
+    }
+}
+
+/// Human URL semantics for search findings. Presentation metadata only:
+/// the engine never constructs this, machine schemas never carry it, and
+/// it never changes confidence or status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchUrlKind {
+    /// RXScan contacted or received an identity-specific resource and
+    /// existing evidence supports treating it as the observed account
+    /// location (public profile page).
+    ObservedProfile,
+    /// Identity-specific resource was observed but it is an API/resource
+    /// URL, not a public profile page. Render as `Resource`, never as
+    /// `Profile`.
+    ObservedResource,
+    /// Identity-specific URL exists but evidence does not establish the
+    /// account. Render as `Candidate`, never as observed.
+    CandidateProfile,
+    /// Operationally useful but NOT an identity-specific profile location
+    /// (homepage, generic API/search endpoint, unrelated redirect).
+    /// Default human output omits it; `--explain` may expose it.
+    ProviderEndpoint,
+    /// No meaningful URL available. Never invent one.
+    None,
+}
+
+/// Returns true when `url` is identity-specific for `username`: it
+/// contains the username (case-insensitive, raw or percent-encoded).
+/// Absence means generic/provider endpoint, never a profile.
+pub fn is_identity_specific_url(url: &str, username: &str) -> bool {
+    let user = username.trim();
+    if user.is_empty() || url.trim().is_empty() {
+        return false;
+    }
+    let url_lower = url.to_ascii_lowercase();
+    let user_lower = user.to_ascii_lowercase();
+    if url_lower.contains(&user_lower) {
+        return true;
+    }
+    // Provider templates percent-encode non-unreserved bytes; match the
+    // encoded form as well so `exampleuser` variants still join.
+    let mut encoded = String::with_capacity(user.len());
+    for byte in user.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(*byte).to_ascii_lowercase());
+        } else {
+            encoded.push('%');
+            encoded
+                .push(char::from(b"0123456789ABCDEF"[(byte >> 4) as usize]).to_ascii_lowercase());
+            encoded
+                .push(char::from(b"0123456789ABCDEF"[(byte & 15) as usize]).to_ascii_lowercase());
+        }
+    }
+    if encoded != user_lower && url_lower.contains(&encoded) {
+        return true;
+    }
+    false
+}
+
+/// Returns true when `url` looks like an API/resource endpoint rather than
+/// a public profile page: `/api/` or `/xrpc/` paths, `api.` hosts,
+/// versioned user-API paths, or `.json` resource suffixes. Heuristic only
+/// for honest labeling (`Profile` vs `Resource`); never changes status or
+/// confidence.
+pub fn is_api_resource_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    // Host part for api-subdomain detection.
+    let host = lower
+        .split("://")
+        .nth(1)
+        .unwrap_or(&lower)
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split('?')
+        .next()
+        .unwrap_or("")
+        .split('#')
+        .next()
+        .unwrap_or("");
+    let path_query = lower.split("://").nth(1).unwrap_or(&lower);
+    let path = path_query.split('?').next().unwrap_or(path_query);
+    if host.starts_with("api.") || host.contains(".api.") {
+        return true;
+    }
+    if path.contains("/api/")
+        || path.contains("/xrpc/")
+        || path.contains("/v1/users/")
+        || path.contains("/v2/users/")
+        || path.contains("/v1/user/")
+        || path.contains("about.json")
+        || path.contains("lookup.json")
+    {
+        return true;
+    }
+    if path.trim_end_matches('/').ends_with(".json") {
+        return true;
+    }
+    false
+}
+
+/// Classify a search-result URL for human presentation. `observed` must
+/// reflect existing evidence semantics (confirmed/probable with a fetched
+/// URL), never URL shape alone: a username in the URL, HTTP 200, or a
+/// template-generated URL is NOT sufficient to mark observed.
+pub fn classify_search_url(url: &str, username: &str, observed: bool) -> SearchUrlKind {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return SearchUrlKind::None;
+    }
+    if !is_identity_specific_url(trimmed, username) {
+        return SearchUrlKind::ProviderEndpoint;
+    }
+    if observed {
+        if is_api_resource_url(trimmed) {
+            SearchUrlKind::ObservedResource
+        } else {
+            SearchUrlKind::ObservedProfile
+        }
+    } else {
+        SearchUrlKind::CandidateProfile
+    }
+}
+
+/// Honest human label for a classified search URL.
+pub fn search_url_label(kind: SearchUrlKind) -> &'static str {
+    match kind {
+        SearchUrlKind::ObservedProfile => "Profile",
+        SearchUrlKind::ObservedResource => "Resource",
+        SearchUrlKind::CandidateProfile => "Candidate",
+        SearchUrlKind::ProviderEndpoint => "Provider endpoint",
+        SearchUrlKind::None => "",
+    }
+}
+
+/// Sanitize externally derived text for safe single-line terminal display.
+///
+/// Strips ANSI escapes, replaces control characters (including
+/// carriage-return tricks and terminal title sequences) with spaces,
+/// collapses whitespace, and trims. Never panics on untrusted bytes.
+pub fn sanitize_human_text(text: &str) -> String {
+    // Strip ANSI CSI first so styled payloads cannot affect width.
+    let stripped = strip_ansi(text);
+    // Drop lone ESC chars (OSC/title sequences start with ESC ]).
+    let no_esc: String = stripped.chars().filter(|c| *c != '\x1b').collect();
+    let mut out = String::with_capacity(no_esc.len());
+    for ch in no_esc.chars() {
+        if ch == '\x07' {
+            // BEL terminates OSC sequences: drop it.
+            continue;
+        }
+        if ch.is_control() {
+            out.push(' ');
+        } else {
+            out.push(ch);
+        }
+    }
+    // Collapse runs of whitespace (including newlines/tabs) to one space.
+    let mut collapsed = String::with_capacity(out.len());
+    let mut last_space = false;
+    for ch in out.chars() {
+        if ch.is_whitespace() {
+            if !last_space {
+                collapsed.push(' ');
+            }
+            last_space = true;
+        } else {
+            collapsed.push(ch);
+            last_space = false;
+        }
+    }
+    collapsed.trim().to_owned()
+}
+
+/// Sanitize a URL for display: single-line, readable, bounded.
+/// Returns empty when no usable URL remains.
+pub fn sanitize_url_for_display(url: &str) -> String {
+    let clean = sanitize_human_text(url);
+    if clean.is_empty() {
+        return String::new();
+    }
+    // URLs never contain spaces; a space indicates injection or garbage.
+    // Keep only the first token to avoid multiline tricks.
+    clean.split_whitespace().next().unwrap_or("").to_owned()
+}
+
+/// Truncate display text to `max_chars` visible columns with ellipsis.
+/// Sanitized text is expected; this only bounds width.
+pub fn truncate_display(text: &str, max_chars: usize) -> String {
+    truncate_chars(text, max_chars)
 }
 
 /// Totals for the search summary line. Always complete, even when rows
@@ -1177,7 +1400,6 @@ fn render_search_report_inner(
     caps: TerminalCapabilities,
     explain: bool,
 ) -> String {
-    let mode = caps.width_mode();
     let color = caps.color;
     let mut out = String::new();
     out.push_str(&workflow_header(
@@ -1257,6 +1479,9 @@ fn render_search_report_inner(
     let show_quiet = show_all;
 
     // FINDINGS ---------------------------------------------------------
+    // Findings-first cards: each positive finding shows the useful observed
+    // value (profile/candidate URL) plus confidence and evidence type.
+    // One total display budget (10 rows) across confirmed + possible.
     out.push('\n');
     out.push_str(&section_heading(caps, "Findings"));
     out.push('\n');
@@ -1270,7 +1495,7 @@ fn render_search_report_inner(
             paint(
                 color,
                 Style::Muted,
-                "no public accounts found - use --all to list negative results"
+                "No confirmed or possible accounts found."
             )
         ));
     } else if !has_primary
@@ -1284,14 +1509,13 @@ fn render_search_report_inner(
             paint(
                 color,
                 Style::Muted,
-                "no public accounts found - use --all to list negative results"
+                "No confirmed or possible accounts found."
             )
         ));
     } else {
         out.push('\n');
-        // One FINDINGS table: confirmed first, then possible, under one
-        // total budget unless `--all`. The header renders exactly once
-        // because the two status groups share a single table.
+        // One FINDINGS list: confirmed first, then possible, under one
+        // total budget unless `--all`.
         let (shown_confirmed, shown_possible): (&[&SearchRow], &[&SearchRow]) = if show_all {
             (confirmed.as_slice(), possible.as_slice())
         } else if possible.is_empty() {
@@ -1310,7 +1534,7 @@ fn render_search_report_inner(
             Vec::with_capacity(shown_confirmed.len() + shown_possible.len());
         combined.extend_from_slice(shown_confirmed);
         combined.extend_from_slice(shown_possible);
-        out.push_str(&render_search_table(caps, mode, &combined));
+        out.push_str(&render_search_cards(caps, target, &combined));
         let total_primary = confirmed.len() + possible.len();
         let hidden_findings = total_primary.saturating_sub(combined.len());
         if hidden_findings > 0 {
@@ -1324,7 +1548,7 @@ fn render_search_report_inner(
             ));
         }
         if show_attention {
-            out.push_str(&render_search_table(caps, mode, &attention));
+            out.push_str(&render_search_table(caps, caps.width_mode(), &attention));
         }
         if show_quiet {
             out.push_str(&render_search_rows_muted(caps, &quiet));
@@ -1482,9 +1706,133 @@ impl SearchCoverage {
     }
 }
 
-/// Findings table via the shared [`Table`] renderer (ANSI-aware).
-/// Wide shows STATUS / PROVIDER / CONFIDENCE / EVIDENCE; normal drops
-/// EVIDENCE; compact renders vertical blocks.
+/// Findings-first cards for positive search findings.
+///
+/// Each displayed positive finding shows the useful observed value:
+/// `provider / username`, the honestly labeled URL (`Profile`,
+/// `Resource`, or `Candidate`) when available, and
+/// `confidence · score · evidence`. No redundant `Provider:`/`Status:`
+/// labels; the glyph (`✓`/`?`) plus evidence wording carries honesty:
+/// confirmed/probable use observed profile/resource URLs, possible uses
+/// cautious candidate wording and never claims `public profile`.
+/// Generic provider endpoints are omitted from the default URL line;
+/// when no identity-specific URL exists the card states so explicitly.
+fn render_search_cards(caps: TerminalCapabilities, target: &str, rows: &[&SearchRow]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+    let color = caps.color;
+    let bullet = if caps.ascii { "-" } else { "·" };
+    let max_url = caps.width.saturating_sub(4).clamp(20, 120);
+    let target_clean = truncate_display(&sanitize_human_text(target), 64);
+    let mut out = String::new();
+    for row in rows {
+        let provider_clean = truncate_display(&sanitize_human_text(&row.provider), 48);
+        let header_value = if target_clean.is_empty() {
+            provider_clean.clone()
+        } else {
+            format!("{provider_clean} / {target_clean}")
+        };
+        let glyph_text = glyph(row.status, caps.ascii);
+        let header = format!(
+            "  {} {}",
+            paint(color, style_for(row.status), &glyph_text),
+            paint(color, Style::Primary, &header_value),
+        );
+        out.push_str(&header);
+        out.push('\n');
+        // Honest URL line: classify for presentation only. Generic
+        // provider endpoints are omitted from the default URL line;
+        // identity-specific URLs render with Profile/Resource/Candidate
+        // labels. Never invented; omitted when absent.
+        let kind = classify_search_url(&row.url, target, row.url_observed);
+        // A possible finding must never render as an observed Profile,
+        // even if a caller mistakenly marked it observed.
+        let kind = match (row.status, kind, row.url_observed) {
+            ("possible", SearchUrlKind::ObservedProfile, _)
+            | ("possible", SearchUrlKind::ObservedResource, _) => SearchUrlKind::CandidateProfile,
+            _ => kind,
+        };
+        match kind {
+            SearchUrlKind::ObservedProfile
+            | SearchUrlKind::ObservedResource
+            | SearchUrlKind::CandidateProfile => {
+                let clean = sanitize_url_for_display(row.url.trim());
+                if !clean.is_empty() {
+                    let shown = truncate_display(&clean, max_url.saturating_sub(14).max(20));
+                    // Pad the plain label first so ANSI styling never
+                    // affects column alignment (stripped output matches).
+                    let padded = format!("{:<9}", search_url_label(kind));
+                    out.push_str(&format!(
+                        "    {}  {}\n",
+                        paint(color, Style::Muted, &padded),
+                        paint(color, Style::Identifier, &shown)
+                    ));
+                } else {
+                    out.push_str(&format!(
+                        "    {}\n",
+                        paint(
+                            color,
+                            Style::Muted,
+                            "No identity-specific profile URL verified"
+                        )
+                    ));
+                }
+            }
+            SearchUrlKind::ProviderEndpoint | SearchUrlKind::None => {
+                // Default omits generic endpoints entirely; state the
+                // honest absence compactly for positive findings.
+                out.push_str(&format!(
+                    "    {}\n",
+                    paint(
+                        color,
+                        Style::Muted,
+                        "No identity-specific profile URL verified"
+                    )
+                ));
+            }
+        }
+        // Confidence + evidence line. Normalizes legacy `profile` detail.
+        let evidence_raw = sanitize_human_text(&row.detail);
+        let evidence = if evidence_raw == "profile" {
+            // Legacy detail: keep honest for API resources.
+            if is_api_resource_url(row.url.trim()) && row.url_observed {
+                "public account resource".to_owned()
+            } else {
+                "public profile".to_owned()
+            }
+        } else if evidence_raw.is_empty() {
+            // Positive findings always carry evidence; fallback stays honest.
+            if row.status == "possible" || row.status == "probable" {
+                "weak evidence".to_owned()
+            } else if is_api_resource_url(row.url.trim()) && row.url_observed {
+                "public account resource".to_owned()
+            } else {
+                "public profile".to_owned()
+            }
+        } else {
+            truncate_display(&evidence_raw, 48)
+        };
+        let conf_line = format!(
+            "{} {}% {} {}",
+            confidence_label(row.confidence),
+            row.confidence,
+            bullet,
+            evidence
+        );
+        // Truncate confidence line to terminal width (indent 4).
+        let conf_shown = truncate_display(&conf_line, caps.width.saturating_sub(4).clamp(20, 120));
+        out.push_str(&format!(
+            "    {}\n",
+            paint(color, Style::Muted, &conf_shown)
+        ));
+        out.push('\n');
+    }
+    out
+}
+
+/// Secondary findings table for `--all`/`--explain` attention rows.
+/// Sanitized; never used for default positive findings (cards above).
 fn render_search_table(caps: TerminalCapabilities, mode: WidthMode, rows: &[&SearchRow]) -> String {
     if rows.is_empty() {
         return String::new();
@@ -1502,9 +1850,10 @@ fn render_search_table(caps: TerminalCapabilities, mode: WidthMode, rows: &[&Sea
                 ),
                 paint(caps.color, style_for(row.status), &status),
             ));
+            let provider_clean = truncate_display(&sanitize_human_text(&row.provider), 48);
             out.push_str(&format!(
                 "    Provider    {}\n",
-                paint(caps.color, Style::Identifier, &row.provider)
+                paint(caps.color, Style::Identifier, &provider_clean)
             ));
             let conf = format!("{} {}%", confidence_label(row.confidence), row.confidence);
             out.push_str(&format!(
@@ -1512,7 +1861,8 @@ fn render_search_table(caps: TerminalCapabilities, mode: WidthMode, rows: &[&Sea
                 paint(caps.color, style_for_confidence(row.confidence), &conf)
             ));
             if !row.detail.is_empty() {
-                let short = truncate_chars(&row.detail, 48);
+                let clean = sanitize_human_text(&row.detail);
+                let short = truncate_display(&clean, 48);
                 out.push_str(&format!("    Evidence    {short}\n"));
             }
         }
@@ -1537,14 +1887,15 @@ fn render_search_table(caps: TerminalCapabilities, mode: WidthMode, rows: &[&Sea
             paint(caps.color, style_for(row.status), &glyph_text),
             paint(caps.color, style_for(row.status), &status_label),
         );
-        let provider_cell = paint(caps.color, Style::Identifier, &row.provider);
+        let provider_clean = truncate_display(&sanitize_human_text(&row.provider), 28);
+        let provider_cell = paint(caps.color, Style::Identifier, &provider_clean);
         let conf_text = format!("{} {}%", confidence_label(row.confidence), row.confidence);
         let conf_cell = paint(caps.color, style_for_confidence(row.confidence), &conf_text);
         if show_detail {
             let evidence = if row.detail.is_empty() {
                 paint(caps.color, Style::Muted, "-")
             } else {
-                truncate_chars(&row.detail, 36)
+                truncate_display(&sanitize_human_text(&row.detail), 36)
             };
             table.cells(vec![status_cell, provider_cell, conf_cell, evidence]);
         } else {
@@ -1579,11 +1930,12 @@ fn search_status_label(status: &str) -> String {
 fn render_search_rows_muted(caps: TerminalCapabilities, rows: &[&SearchRow]) -> String {
     let mut out = String::new();
     for row in rows {
+        let provider_clean = truncate_display(&sanitize_human_text(&row.provider), 48);
         out.push_str(&format!(
             "  {} {}  {}\n",
             paint(caps.color, Style::Muted, &glyph(row.status, caps.ascii)),
             paint(caps.color, Style::Muted, &search_status_label(row.status)),
-            row.provider,
+            provider_clean,
         ));
     }
     out
@@ -1727,8 +2079,10 @@ mod tests {
                 status: "confirmed",
                 provider: "provider-a".to_owned(),
                 confidence: 94,
-                detail: "profile".to_owned(),
+                detail: "public profile".to_owned(),
                 tier: RowTier::Positive,
+                url: "https://example.test/provider-a/exampleuser".to_owned(),
+                url_observed: true,
             },
             SearchRow {
                 status: "possible",
@@ -1736,6 +2090,8 @@ mod tests {
                 confidence: 25,
                 detail: "weak evidence".to_owned(),
                 tier: RowTier::Positive,
+                url: "https://example.test/provider-b/exampleuser".to_owned(),
+                url_observed: false,
             },
             SearchRow {
                 status: "blocked",
@@ -1743,6 +2099,8 @@ mod tests {
                 confidence: 0,
                 detail: "provider rejected request".to_owned(),
                 tier: RowTier::Attention,
+                url: String::new(),
+                url_observed: false,
             },
             SearchRow {
                 status: "not_found",
@@ -1750,6 +2108,8 @@ mod tests {
                 confidence: 0,
                 detail: String::new(),
                 tier: RowTier::Quiet,
+                url: String::new(),
+                url_observed: false,
             },
         ]
     }
@@ -1781,8 +2141,17 @@ mod tests {
         assert!(text.contains("TARGET"));
         assert!(text.contains("FINDINGS"));
         assert!(text.contains("COVERAGE"));
-        assert!(text.contains("CONFIRMED"));
+        // Findings-first cards: provider + observed URL + confidence.
         assert!(text.contains("provider-a"));
+        assert!(
+            text.contains("https://example.test/provider-a/exampleuser"),
+            "confirmed URL visible: {text}"
+        );
+        assert!(text.contains("94%"), "confidence visible: {text}");
+        assert!(
+            text.contains("public profile"),
+            "evidence type visible: {text}"
+        );
         // First-time UX: blocked/unknown/rate-limited rows are secondary.
         // Default hides individual failure rows; COVERAGE totals plus a
         // plain-language warning carry the signal.
@@ -1883,7 +2252,7 @@ mod tests {
             false,
             false,
         );
-        assert!(text.contains("no public accounts found"));
+        assert!(text.contains("No confirmed or possible accounts found."));
         // Frame rules use heavy Unicode by default.
         assert!(
             text.contains('━') || text.contains('─'),
