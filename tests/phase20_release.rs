@@ -275,7 +275,6 @@ fn version_matches_cargo_metadata() {
         stdout.trim() == format!("rxscan {}", env!("CARGO_PKG_VERSION")),
         "unexpected version output: {stdout:?}"
     );
-    assert_eq!(env!("CARGO_PKG_VERSION"), "0.1.0");
     std::fs::remove_dir_all(&dir).ok();
 }
 
