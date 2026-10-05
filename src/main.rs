@@ -2404,7 +2404,18 @@ fn run_investigate(args: &[String]) {
         out!("{}", inv::render_jsonl(&report));
     } else {
         maybe_search_startup_mark(args, false);
-        out!("{}", inv::render_human(&report, show_all));
+        let mode = rxscan::terminal::parse_color_mode(args);
+        let tty = rxscan::terminal::stdout_is_tty();
+        let color = rxscan::terminal::color_enabled(mode, rxscan::terminal::no_color_env(), tty);
+        out!(
+            "{}",
+            inv::render_human(
+                &report,
+                show_all,
+                color,
+                !rxscan::terminal::unicode_supported()
+            )
+        );
     }
 }
 

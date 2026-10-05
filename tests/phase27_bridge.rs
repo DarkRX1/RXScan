@@ -258,7 +258,7 @@ fn bridge_output_is_deterministic_and_structured() {
         serde_json::from_str::<serde_json::Value>(line).unwrap();
     }
     assert!(!jsonl.contains('\x1b'));
-    let human = investigate::render_human(&first, false);
+    let human = investigate::render_human(&first, false, false, true);
     assert!(human.contains("AUTHORIZED"));
     assert!(!human.contains('\x1b'));
 }

@@ -2649,10 +2649,24 @@ pub fn explain_plan(config: &InvestigationConfig) -> String {
 
 /// Compact graph-oriented human rendering. Bounded: interesting entities,
 /// strong relationships, correlations, warnings, and truncation first;
-/// complete data lives in JSON/JSONL. Never emits ANSI.
-pub fn render_human(report: &InvestigationReport, show_all: bool) -> String {
+/// complete data lives in JSON/JSONL. Styled only when `color` is true
+/// (TTY); piped and `--color never` output stays plain. `ascii` selects
+/// ASCII separators for `NO_UNICODE` environments.
+pub fn render_human(
+    report: &InvestigationReport,
+    show_all: bool,
+    color: bool,
+    ascii: bool,
+) -> String {
+    use crate::terminal::{Style, paint};
+    let sep = if ascii { "-" } else { "\u{00B7}" };
     let mut out = String::new();
-    out.push_str("RXSCAN INVESTIGATION \u{00B7} passive evidence graph\n");
+    out.push_str(&paint(
+        color,
+        Style::Heading,
+        &format!("RXSCAN INVESTIGATION {sep} passive evidence graph"),
+    ));
+    out.push('\n');
     out.push_str(&format!(
         "seed       {}:{}\n",
         report.seed_kind.as_str(),
@@ -2710,7 +2724,10 @@ pub fn render_human(report: &InvestigationReport, show_all: bool) -> String {
     }
     let correlations = report.correlations();
     if !correlations.is_empty() {
-        out.push_str("\nCORRELATION\n");
+        out.push_str(&format!(
+            "\n{}\n",
+            paint(color, Style::Heading, "CORRELATION")
+        ));
         let limit = if show_all { correlations.len() } else { 10 };
         for (id, sources) in correlations.iter().take(limit) {
             out.push_str(&format!(
@@ -2727,7 +2744,10 @@ pub fn render_human(report: &InvestigationReport, show_all: bool) -> String {
         .collect();
     exposures.sort_by(|a, b| a.id.cmp(&b.id));
     if !exposures.is_empty() {
-        out.push_str("\nEXPOSURE INTELLIGENCE\n");
+        out.push_str(&format!(
+            "\n{}\n",
+            paint(color, Style::Warning, "EXPOSURE INTELLIGENCE")
+        ));
         let limit = if show_all { exposures.len() } else { 10 };
         for entity in exposures.iter().take(limit) {
             out.push_str(&format!(
@@ -2740,16 +2760,23 @@ pub fn render_human(report: &InvestigationReport, show_all: bool) -> String {
         let mut reasons: Vec<&String> = report.accounting.truncation_reasons.iter().collect();
         reasons.sort();
         out.push_str(&format!(
-            "\nTRUNCATED ({})\n",
-            reasons
-                .iter()
-                .map(|r| r.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+            "\n{}\n",
+            paint(
+                color,
+                Style::Warning,
+                &format!(
+                    "TRUNCATED ({})",
+                    reasons
+                        .iter()
+                        .map(|r| r.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            )
         ));
     }
     out.push_str(&format!(
-        "\n----------------------------------------\n{} entities \u{00B7} {} relationships\n{} HTTP \u{00B7} {} DNS \u{00B7} {} network scans\n",
+        "\n----------------------------------------\n{} entities {sep} {} relationships\n{} HTTP {sep} {} DNS {sep} {} network scans\n",
         report.entities.len(),
         report.relationships.len(),
         report.accounting.http_requests,
@@ -2758,7 +2785,7 @@ pub fn render_human(report: &InvestigationReport, show_all: bool) -> String {
     ));
     if report.accounting.exposure_lookups > 0 || report.accounting.exposures_found > 0 {
         out.push_str(&format!(
-            "exposure      {} lookups \u{00B7} {} found \u{00B7} secrets stored: 0\n",
+            "exposure      {} lookups {sep} {} found {sep} secrets stored: 0\n",
             report.accounting.exposure_lookups, report.accounting.exposures_found
         ));
     }

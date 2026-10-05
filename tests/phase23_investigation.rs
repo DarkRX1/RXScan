@@ -323,7 +323,7 @@ fn investigation_structured_output_is_clean_and_reconciles() {
     assert_eq!(kinds.last().unwrap(), "investigation_summary");
     assert_eq!(investigate::render_jsonl(&report), jsonl);
     // Human: bounded, no ANSI, truncation surfaced when present.
-    let human = investigate::render_human(&report, false);
+    let human = investigate::render_human(&report, false, false, true);
     assert!(!human.contains('\x1b'));
     assert!(human.contains("0 network scans"));
 }
@@ -466,6 +466,6 @@ fn benchmark_large_graph_insertion_and_serialization() {
     let report =
         investigate::run_investigation_with(depth_config(3), &search, &profile, &dns, &cancelled)
             .unwrap();
-    let human = investigate::render_human(&report, false);
+    let human = investigate::render_human(&report, false, false, true);
     assert!(human.lines().count() < 200, "renderer must stay bounded");
 }
