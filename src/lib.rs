@@ -15,6 +15,7 @@ pub mod diff;
 pub mod discovery;
 pub mod dns;
 pub mod execution;
+pub mod exposure;
 pub mod extract;
 pub mod fingerprints;
 pub mod fuzz;

@@ -50,6 +50,8 @@ pub enum EntityKind {
     Fingerprint,
     OsCandidate,
     DeviceCandidate,
+    Exposure,
+    ExposureSource,
 }
 
 impl std::fmt::Display for EntityKind {
@@ -76,6 +78,8 @@ impl std::fmt::Display for EntityKind {
             Self::Fingerprint => "fingerprint",
             Self::OsCandidate => "os_candidate",
             Self::DeviceCandidate => "device_candidate",
+            Self::Exposure => "exposure",
+            Self::ExposureSource => "exposure_source",
         };
         f.write_str(name)
     }
@@ -107,6 +111,8 @@ impl EntityKind {
             "fingerprint" => Some(Self::Fingerprint),
             "os_candidate" => Some(Self::OsCandidate),
             "device_candidate" => Some(Self::DeviceCandidate),
+            "exposure" => Some(Self::Exposure),
+            "exposure_source" => Some(Self::ExposureSource),
             _ => None,
         }
     }
@@ -143,6 +149,16 @@ pub enum EdgeRelation {
     /// endpoint (`port:<transport>:<ip>:<port>`). The port entity doubles
     /// as the network endpoint: no parallel entity universe is created.
     ResolvesToEndpoint,
+    /// Identifier was reported exposed in a breach/dataset.
+    ExposedIn,
+    /// Identifier was observed in infostealer/malware telemetry.
+    ObservedIn,
+    /// Exposure affects a domain (breach scope).
+    Affects,
+    /// Exposure was reported by an intelligence source.
+    ReportedBy,
+    /// Malware observation targets a domain.
+    TargetedDomain,
 }
 
 impl std::fmt::Display for EdgeRelation {
@@ -170,6 +186,11 @@ impl std::fmt::Display for EdgeRelation {
             Self::References => "references",
             Self::ServedBy => "served_by",
             Self::ResolvesToEndpoint => "resolves_to_endpoint",
+            Self::ExposedIn => "exposed_in",
+            Self::ObservedIn => "observed_in",
+            Self::Affects => "affects",
+            Self::ReportedBy => "reported_by",
+            Self::TargetedDomain => "targeted_domain",
         };
         f.write_str(name)
     }
@@ -201,6 +222,11 @@ impl EdgeRelation {
             "references" => Some(Self::References),
             "served_by" => Some(Self::ServedBy),
             "resolves_to_endpoint" => Some(Self::ResolvesToEndpoint),
+            "exposed_in" => Some(Self::ExposedIn),
+            "observed_in" => Some(Self::ObservedIn),
+            "affects" => Some(Self::Affects),
+            "reported_by" => Some(Self::ReportedBy),
+            "targeted_domain" => Some(Self::TargetedDomain),
             _ => None,
         }
     }

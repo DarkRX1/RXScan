@@ -128,6 +128,10 @@ fn main() {
         run_investigate(&args);
         return;
     }
+    if args.get(1).is_some_and(|arg| arg == "exposure") {
+        run_exposure_cli(&args);
+        return;
+    }
     // `rxscan scan <target> ...` is an explicit alias for the default
     // network-recon workflow (`rxscan <target> ...`).
     let mut owned_args: Vec<String> = Vec::new();
@@ -1924,6 +1928,8 @@ fn run_investigate(args: &[String]) {
     let mut excluded = std::collections::BTreeSet::<String>::new();
     let mut categories = std::collections::BTreeSet::<String>::new();
     let mut project_db: Option<std::path::PathBuf> = None;
+    let mut exposure = false;
+    let mut exposure_dataset: Option<std::path::PathBuf> = None;
     let mut index = 2usize;
     while index < args.len() {
         match args[index].as_str() {
@@ -2130,6 +2136,15 @@ fn run_investigate(args: &[String]) {
                 };
                 project_db = Some(value.into());
             }
+            "--exposure" => exposure = true,
+            "--exposure-dataset" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    err!("rxscan investigate: --exposure-dataset requires a path");
+                    std::process::exit(2);
+                };
+                exposure_dataset = Some(value.into());
+            }
             "--color" => {
                 index += 1;
                 let Some(value) = args.get(index) else {
@@ -2152,7 +2167,7 @@ fn run_investigate(args: &[String]) {
             }
             "--help" | "-h" => {
                 out_line!(
-                    "rxscan investigate --username NAME [--depth 0-{}] [--deadline 60s] [--max-entities N] [--max-relationships N] [--max-http-requests N] [--max-dns-queries N] [--max-providers N] [--providers IDS] [--exclude-provider IDS] [--category CATS] [--project-db PATH] [--all] [--color MODE] [--json|--jsonl] [--explain]\nrxscan investigate --domain NAME [same options]\nrxscan investigate --url URL [same options]\nrxscan investigate transforms [--json]\n\nPassive by default: never port scans discovered infrastructure. DNS queries are DnsQuery, not DirectNetwork.",
+                    "rxscan investigate --username NAME [--depth 0-{}] [--deadline 60s] [--max-entities N] [--max-relationships N] [--max-http-requests N] [--max-dns-queries N] [--max-providers N] [--providers IDS] [--exclude-provider IDS] [--category CATS] [--project-db PATH] [--exposure] [--exposure-dataset PATH] [--all] [--color MODE] [--json|--jsonl] [--explain]\nrxscan investigate --domain NAME [same options]\nrxscan investigate --url URL [same options]\nrxscan investigate transforms [--json]\n\nPassive by default: never port scans discovered infrastructure. DNS queries are DnsQuery, not DirectNetwork. Exposure lookups that send identifiers to third parties run only with --exposure.",
                     inv::MAX_DEPTH
                 );
                 return;
@@ -2193,6 +2208,8 @@ fn run_investigate(args: &[String]) {
             selected_providers: None,
             excluded_providers: std::collections::BTreeSet::new(),
             categories: std::collections::BTreeSet::new(),
+            exposure: false,
+            exposure_dataset: None,
         },
         inv::SeedKind::Url => inv::InvestigationConfig {
             seed_kind,
@@ -2208,6 +2225,8 @@ fn run_investigate(args: &[String]) {
             selected_providers: None,
             excluded_providers: std::collections::BTreeSet::new(),
             categories: std::collections::BTreeSet::new(),
+            exposure: false,
+            exposure_dataset: None,
         },
     };
     config.depth = depth;
@@ -2220,6 +2239,8 @@ fn run_investigate(args: &[String]) {
     config.selected_providers = selected;
     config.excluded_providers = excluded;
     config.categories = categories;
+    config.exposure = exposure;
+    config.exposure_dataset = exposure_dataset;
     if let Err(error) = config.validate() {
         err!("rxscan investigate: {error}");
         std::process::exit(2);
@@ -2284,5 +2305,322 @@ fn run_investigate(args: &[String]) {
     } else {
         maybe_search_startup_mark(args, false);
         out!("{}", inv::render_human(&report, show_all));
+    }
+}
+
+/// Defensive exposure intelligence (`rxscan exposure ...`).
+///
+/// Queries legitimate configured exposure sources for one identifier.
+/// External queries that send identifiers to third parties are explicit:
+/// this command IS the opt-in. `--explain` discloses identifier-sending
+/// before any contact. Secret material is never retained or displayed.
+fn run_exposure_cli(args: &[String]) {
+    use rxscan::exposure as exp;
+    let mut email: Option<String> = None;
+    let mut username: Option<String> = None;
+    let mut domain: Option<String> = None;
+    let mut dataset: Option<std::path::PathBuf> = None;
+    let mut explain = false;
+    let mut json = false;
+    let mut jsonl = false;
+    let mut deadline = std::time::Duration::from_secs(30);
+    let mut project_db: Option<std::path::PathBuf> = None;
+    let mut index = 2usize;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--email" => {
+                index += 1;
+                let Some(value) = args.get(index).cloned() else {
+                    err!("rxscan exposure: --email requires a value");
+                    std::process::exit(2);
+                };
+                if email.is_some() || username.is_some() || domain.is_some() {
+                    err!("rxscan exposure: only one of --email, --username, --domain");
+                    std::process::exit(2);
+                }
+                email = Some(value);
+            }
+            "--username" => {
+                index += 1;
+                let Some(value) = args.get(index).cloned() else {
+                    err!("rxscan exposure: --username requires a value");
+                    std::process::exit(2);
+                };
+                if email.is_some() || username.is_some() || domain.is_some() {
+                    err!("rxscan exposure: only one of --email, --username, --domain");
+                    std::process::exit(2);
+                }
+                username = Some(value);
+            }
+            "--domain" => {
+                index += 1;
+                let Some(value) = args.get(index).cloned() else {
+                    err!("rxscan exposure: --domain requires a value");
+                    std::process::exit(2);
+                };
+                if email.is_some() || username.is_some() || domain.is_some() {
+                    err!("rxscan exposure: only one of --email, --username, --domain");
+                    std::process::exit(2);
+                }
+                domain = Some(value);
+            }
+            "--dataset" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    err!("rxscan exposure: --dataset requires a path");
+                    std::process::exit(2);
+                };
+                dataset = Some(value.into());
+            }
+            "--deadline" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    err!("rxscan exposure: --deadline requires a duration");
+                    std::process::exit(2);
+                };
+                deadline = match rxscan::config::parse_duration_ms(value) {
+                    Ok(ms) => std::time::Duration::from_millis(ms),
+                    Err(error) => {
+                        err!("rxscan exposure: invalid deadline: {error}");
+                        std::process::exit(2);
+                    }
+                };
+            }
+            "--project-db" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    err!("rxscan exposure: --project-db requires a path");
+                    std::process::exit(2);
+                };
+                project_db = Some(value.into());
+            }
+            "--explain" => explain = true,
+            "--json" => json = true,
+            "--jsonl" => jsonl = true,
+            "--color" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    err!("rxscan exposure: --color requires one of auto, always, never");
+                    std::process::exit(2);
+                };
+                if !matches!(value.as_str(), "auto" | "always" | "never") {
+                    err!("rxscan exposure: --color must be one of auto, always, never");
+                    std::process::exit(2);
+                }
+            }
+            arg if arg.starts_with("--color=") => {
+                if !matches!(
+                    arg.trim_start_matches("--color="),
+                    "auto" | "always" | "never"
+                ) {
+                    err!("rxscan exposure: --color must be one of auto, always, never");
+                    std::process::exit(2);
+                }
+            }
+            "--help" | "-h" => {
+                out_line!(
+                    "rxscan exposure --email ADDR|--username NAME|--domain NAME [--dataset PATH] [--deadline 30s] [--project-db PATH] [--color MODE] [--json|--jsonl] [--explain]\n\nDefensive exposure lookup. External providers that receive identifiers run only here (explicit opt-in), never during ordinary passive investigation. Secrets are never retained or displayed."
+                );
+                return;
+            }
+            unknown => {
+                err!("rxscan exposure: unknown option '{unknown}'");
+                std::process::exit(2);
+            }
+        }
+        index += 1;
+    }
+    if json && jsonl {
+        err!("rxscan exposure: --json and --jsonl conflict");
+        std::process::exit(2);
+    }
+    let (kind, identifier) = match (email, username, domain) {
+        (Some(value), None, None) => {
+            if !value.contains('@') || value.len() > 320 {
+                err!("rxscan exposure: invalid email address");
+                std::process::exit(2);
+            }
+            (exp::IdentifierKind::Email, value)
+        }
+        (None, Some(value), None) => {
+            if value.trim().is_empty() || value.len() > 128 {
+                err!("rxscan exposure: invalid username");
+                std::process::exit(2);
+            }
+            (exp::IdentifierKind::Username, value)
+        }
+        (None, None, Some(value)) => {
+            if rxscan::investigate::canonical_domain(&value).is_none() {
+                err!("rxscan exposure: invalid domain");
+                std::process::exit(2);
+            }
+            (exp::IdentifierKind::Domain, value)
+        }
+        _ => {
+            err!("rxscan exposure: exactly one of --email, --username, --domain is required");
+            std::process::exit(2);
+        }
+    };
+    let mut providers: Vec<Box<dyn exp::ExposureProvider>> = Vec::new();
+    if let Some(path) = dataset {
+        providers.push(Box::new(exp::LocalDatasetProvider {
+            label: "operator-dataset".to_owned(),
+            path,
+            max_entries: exp::LocalDatasetProvider::MAX_ENTRIES,
+        }));
+    }
+    providers.push(Box::new(exp::HttpApiProvider {
+        name: "configured-api".to_owned(),
+    }));
+    if explain {
+        out_line!("{}", exp::explain_exposure(kind, &providers));
+        return;
+    }
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    let report = exp::run_exposure(&identifier, kind, &providers, deadline, &cancelled);
+    if let Err(error) = report.accounting.check_invariant() {
+        err!("rxscan exposure: {error}");
+        std::process::exit(1);
+    }
+    if let Some(path) = project_db {
+        // Persist normalized exposure metadata only (never raw responses,
+        // never secrets) through the versioned project graph.
+        let mut graph = rxscan::graph::ScanGraph::default();
+        let anchor = format!(
+            "{}:{}",
+            kind.as_str(),
+            exp::identifier_hash(&identifier)
+                .chars()
+                .take(16)
+                .collect::<String>()
+        );
+        let proof = rxscan::graph::EntityProvenance {
+            scan_plan_id: report.run_id.clone(),
+            module: "exposure.lookup".to_owned(),
+            task_id: None,
+            target: Some(anchor.clone()),
+            timestamp: report.started_at,
+            reason: Some("operator-supplied exposure lookup".to_owned()),
+            rule_id: None,
+        };
+        let (entities, edges) = exp::to_graph_items(
+            &anchor,
+            match kind {
+                exp::IdentifierKind::Email => rxscan::graph::EntityKind::EmailAddress,
+                exp::IdentifierKind::Username => rxscan::graph::EntityKind::Username,
+                exp::IdentifierKind::Domain => rxscan::graph::EntityKind::Domain,
+            },
+            &report.exposures,
+            report.started_at,
+            1,
+        );
+        graph.upsert_entity(
+            anchor.clone(),
+            match kind {
+                exp::IdentifierKind::Email => rxscan::graph::EntityKind::EmailAddress,
+                exp::IdentifierKind::Username => rxscan::graph::EntityKind::Username,
+                exp::IdentifierKind::Domain => rxscan::graph::EntityKind::Domain,
+            },
+            identifier.clone(),
+            std::collections::BTreeMap::from([(
+                "identifier_hash".to_owned(),
+                report.identifier_hash.clone(),
+            )]),
+            &proof,
+        );
+        for entity in entities {
+            graph.upsert_entity(
+                entity.id.clone(),
+                entity.kind,
+                entity.label.clone(),
+                entity.attributes.clone(),
+                &entity.provenance.to_graph(&report.run_id),
+            );
+        }
+        for edge in edges {
+            graph.link(
+                edge.from.clone(),
+                edge.to.clone(),
+                edge.relation,
+                edge.confidence,
+                &edge.provenance.to_graph(&report.run_id),
+                edge.evidence.clone(),
+                edge.attributes.clone(),
+            );
+        }
+        let mut db = match rxscan::project_db::ProjectDb::open(&path) {
+            Ok(db) => db,
+            Err(error) => {
+                err!("rxscan exposure: could not open project database: {error}");
+                std::process::exit(1);
+            }
+        };
+        let import = rxscan::project_db::ScanImport {
+            scan_id: report.run_id.clone(),
+            plan_id: rxscan::assets::public_entity_id("exposure_plan", kind.as_str()),
+            started_at_ms: report.started_at.saturating_mul(1_000),
+            finished_at_ms: report.completed_at.saturating_mul(1_000),
+            scope_json: serde_json::json!({
+                "contact_class": "exposure_lookup",
+                "direct_network": false,
+                "identifier_type": kind.as_str(),
+            })
+            .to_string(),
+            workflow: "exposure".to_owned(),
+            level: 0,
+            termination: if report.accounting.truncated {
+                "deadline_or_budget"
+            } else {
+                "complete"
+            }
+            .to_owned(),
+            tasks_admitted: report.accounting.providers_requested as u64,
+            tasks_completed: report.accounting.providers_completed as u64,
+            coverage: rxscan::project_db::CoverageSnapshot {
+                modules_completed: report
+                    .observations
+                    .iter()
+                    .map(|o| format!("exposure.{}", o.provider_id))
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+                truncated: report.accounting.truncated,
+                ..rxscan::project_db::CoverageSnapshot::default()
+            },
+            classifier: rxscan::project_db::ClassifierProvenance {
+                tool_version: rxscan::project_db::TOOL_VERSION.to_owned(),
+                packs: vec![rxscan::project_db::PackProvenance {
+                    path: "internal:exposure/providers".to_owned(),
+                    schema_version: 1,
+                    rule_count: providers.len(),
+                }],
+                rules_used: report
+                    .observations
+                    .iter()
+                    .map(|o| o.provider_id.clone())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+            },
+            retention: rxscan::project_db::RetentionMode::Standard,
+        };
+        if let Err(error) = db.import_scan(&import, &graph) {
+            err!("rxscan exposure: could not persist exposure: {error}");
+            std::process::exit(1);
+        }
+    }
+    if json {
+        out_line!("{}", serde_json::to_string_pretty(&report).unwrap());
+    } else if jsonl {
+        out!("{}", exp::render_jsonl(&report));
+    } else {
+        let mode = rxscan::terminal::parse_color_mode(args);
+        let tty = rxscan::terminal::stdout_is_tty();
+        let color = rxscan::terminal::color_enabled(mode, rxscan::terminal::no_color_env(), tty);
+        maybe_search_startup_mark(args, false);
+        out!(
+            "{}",
+            exp::render_human(&report, color, !rxscan::terminal::unicode_supported())
+        );
     }
 }

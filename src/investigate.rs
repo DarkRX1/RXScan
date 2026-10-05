@@ -136,6 +136,12 @@ pub struct InvestigationConfig {
     pub selected_providers: Option<BTreeSet<String>>,
     pub excluded_providers: BTreeSet<String>,
     pub categories: BTreeSet<String>,
+    /// Opt-in defensive exposure enrichment. External queries that send
+    /// identifiers to third parties run ONLY when this is true; ordinary
+    /// passive investigation never performs them.
+    pub exposure: bool,
+    /// Operator-supplied local exposure dataset (local-only, never uploaded).
+    pub exposure_dataset: Option<std::path::PathBuf>,
 }
 
 impl InvestigationConfig {
@@ -154,6 +160,8 @@ impl InvestigationConfig {
             selected_providers: None,
             excluded_providers: BTreeSet::new(),
             categories: BTreeSet::new(),
+            exposure: false,
+            exposure_dataset: None,
         }
     }
 
@@ -380,6 +388,10 @@ pub struct InvestigationAccounting {
     pub dns_queries: usize,
     /// Passive investigation never performs network scans; always 0.
     pub network_scans: u64,
+    /// Opt-in exposure lookups completed (0 unless `--exposure`).
+    pub exposure_lookups: usize,
+    /// Normalized exposures found (metadata only; secrets never retained).
+    pub exposures_found: usize,
     pub truncated: bool,
     #[serde(default)]
     pub truncation_reasons: BTreeSet<String>,
@@ -1836,6 +1848,13 @@ impl<'a> InvestigationEngine<'a> {
             pending.dedup();
         }
 
+        // Opt-in defensive exposure enrichment (Stage 3). Runs only when
+        // the operator passed `--exposure`: external providers that send
+        // identifiers to third parties never activate silently.
+        if self.config.exposure {
+            self.enrich_exposure(cancelled, deadline);
+        }
+
         // Deterministic final ordering: never expose completion timing.
         self.observations.sort_by(|a, b| {
             a.transform_id
@@ -1886,6 +1905,160 @@ impl<'a> InvestigationEngine<'a> {
     fn mark_truncated(&mut self, reason: &str) {
         self.accounting.truncated = true;
         self.accounting.truncation_reasons.insert(reason.to_owned());
+    }
+
+    /// Opt-in exposure enrichment for the seed identifier. Normalized
+    /// exposures become graph entities with full provenance; secret
+    /// material cannot cross this boundary (providers return metadata
+    /// only, re-asserted here). Honors entity/relationship/HTTP budgets
+    /// and the global deadline like every other transform.
+    fn enrich_exposure(&mut self, cancelled: &AtomicBool, deadline: Instant) {
+        use crate::exposure::{
+            ExposureProvider, HttpApiProvider, IdentifierKind, LocalDatasetProvider,
+        };
+        let now = unix_now();
+        let seed_id = match self
+            .entities
+            .values()
+            .min_by(|a, b| a.depth.cmp(&b.depth).then(a.id.cmp(&b.id)))
+        {
+            Some(seed) => seed.id.clone(),
+            None => return,
+        };
+        let (identifier, kind, seed_depth) = match self.config.seed_kind {
+            SeedKind::Username => (
+                self.entities
+                    .get(&seed_id)
+                    .map(|e| e.canonical_value.clone())
+                    .unwrap_or_default(),
+                IdentifierKind::Username,
+                self.entities.get(&seed_id).map(|e| e.depth).unwrap_or(0),
+            ),
+            SeedKind::Domain => (
+                self.entities
+                    .get(&seed_id)
+                    .map(|e| e.canonical_value.clone())
+                    .unwrap_or_default(),
+                IdentifierKind::Domain,
+                self.entities.get(&seed_id).map(|e| e.depth).unwrap_or(0),
+            ),
+            SeedKind::Url => {
+                self.observations.push(observation(
+                    "exposure_lookup",
+                    &self.seed_entity(now),
+                    ContactClass::PassivePublic,
+                    "skipped",
+                    0,
+                    now,
+                    vec!["exposure lookup needs an email/username/domain seed".to_owned()],
+                ));
+                return;
+            }
+        };
+        let child_depth = seed_depth.saturating_add(1);
+        if child_depth > self.config.depth {
+            self.observations.push(observation(
+                "exposure_lookup",
+                &self.seed_entity(now),
+                ContactClass::PassivePublic,
+                "skipped",
+                0,
+                now,
+                vec![format!(
+                    "exposure enrichment needs depth {}, configured {}",
+                    child_depth, self.config.depth
+                )],
+            ));
+            return;
+        }
+        let mut providers: Vec<Box<dyn ExposureProvider>> = Vec::new();
+        if let Some(dataset) = self.config.exposure_dataset.clone() {
+            providers.push(Box::new(LocalDatasetProvider {
+                label: "operator-dataset".to_owned(),
+                path: dataset,
+                max_entries: LocalDatasetProvider::MAX_ENTRIES,
+            }));
+        }
+        providers.push(Box::new(HttpApiProvider {
+            name: "configured-api".to_owned(),
+        }));
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let report =
+            crate::exposure::run_exposure(&identifier, kind, &providers, remaining, cancelled);
+        self.accounting.exposure_lookups += report.accounting.providers_completed;
+        self.accounting.exposures_found += report.exposures.len();
+        // Completed third-party/API contacts count toward the HTTP budget.
+        for obs in &report.observations {
+            if matches!(
+                obs.contact_class,
+                ContactClass::AuthenticatedApi | ContactClass::PublicHttp
+            ) && matches!(obs.status.as_str(), "matched" | "no_match")
+            {
+                if self.accounting.http_requests >= self.config.max_http_requests {
+                    self.mark_truncated("http_budget");
+                } else {
+                    self.accounting.http_requests += 1;
+                }
+            }
+            self.observations.push(InvestigationObservation {
+                transform_id: "exposure_lookup".to_owned(),
+                input_entity_id: seed_id.clone(),
+                contact_class: obs.contact_class,
+                status: obs.status.clone(),
+                confidence: 0,
+                timestamp: obs.timestamp,
+                evidence: obs.evidence.clone(),
+                attributes: BTreeMap::from([
+                    ("provider".to_owned(), obs.provider_id.clone()),
+                    (
+                        "sends_identifier".to_owned(),
+                        obs.sends_identifier.to_string(),
+                    ),
+                ]),
+            });
+        }
+        let seed_kind = self
+            .entities
+            .get(&seed_id)
+            .map(|e| e.kind)
+            .unwrap_or(EntityKind::Username);
+        let (entities, edges) = crate::exposure::to_graph_items(
+            &seed_id,
+            seed_kind,
+            &report.exposures,
+            now,
+            child_depth,
+        );
+        for entity in entities {
+            if self.entities.contains_key(&entity.id) {
+                if let Some(existing) = self.entities.get_mut(&entity.id) {
+                    existing.observations = existing.observations.saturating_add(1);
+                }
+                continue;
+            }
+            if self.entities.len() >= self.config.max_entities {
+                self.mark_truncated("entity_budget");
+                break;
+            }
+            self.entities.insert(entity.id.clone(), entity);
+            self.accounting.entities_created += 1;
+        }
+        for rel in edges {
+            let key = (rel.from.clone(), rel.to.clone(), rel.relation.to_string());
+            if self.edge_keys.contains(&key) {
+                continue;
+            }
+            if !self.entities.contains_key(&rel.from) || !self.entities.contains_key(&rel.to) {
+                continue;
+            }
+            if self.relationships.len() >= self.config.max_relationships {
+                self.mark_truncated("relationship_budget");
+                break;
+            }
+            self.edge_keys.insert(key);
+            self.relationships.push(rel);
+            self.accounting.relationships_created += 1;
+        }
     }
 }
 
@@ -2013,6 +2186,21 @@ pub fn explain_plan(config: &InvestigationConfig) -> String {
     ));
     out.push_str("contact classes   passive_public, public_http, dns_query\n");
     out.push_str("forbidden         direct_network, authenticated_api\n");
+    if config.exposure {
+        out.push_str("\nexposure          ENABLED (opt-in)\n");
+        if let Some(dataset) = &config.exposure_dataset {
+            out.push_str(&format!(
+                "  local dataset {} (sends nothing)\n",
+                dataset.display()
+            ));
+        }
+        out.push_str(
+            "  http-api      sends identifier to RXSCAN_EXPOSURE_ENDPOINT (env credentials)\n",
+        );
+        out.push_str("  secret storage disabled; raw responses never persisted\n");
+    } else {
+        out.push_str("\nexposure          disabled (pass --exposure to opt in)\n");
+    }
     out.push_str(
         "note              rxscan investigate never port scans discovered infrastructure\n",
     );
@@ -2081,6 +2269,22 @@ pub fn render_human(report: &InvestigationReport, show_all: bool) -> String {
             ));
         }
     }
+    let mut exposures: Vec<&InvestigationEntity> = report
+        .entities
+        .values()
+        .filter(|e| e.kind == EntityKind::Exposure)
+        .collect();
+    exposures.sort_by(|a, b| a.id.cmp(&b.id));
+    if !exposures.is_empty() {
+        out.push_str("\nEXPOSURE INTELLIGENCE\n");
+        let limit = if show_all { exposures.len() } else { 10 };
+        for entity in exposures.iter().take(limit) {
+            out.push_str(&format!(
+                "  {} (secrets retained: no)\n",
+                truncate(&entity.label, 88)
+            ));
+        }
+    }
     if report.accounting.truncated {
         let mut reasons: Vec<&String> = report.accounting.truncation_reasons.iter().collect();
         reasons.sort();
@@ -2100,6 +2304,12 @@ pub fn render_human(report: &InvestigationReport, show_all: bool) -> String {
         report.accounting.http_requests,
         report.accounting.dns_queries,
     ));
+    if report.accounting.exposure_lookups > 0 || report.accounting.exposures_found > 0 {
+        out.push_str(&format!(
+            "exposure      {} lookups \u{00B7} {} found \u{00B7} secrets stored: 0\n",
+            report.accounting.exposure_lookups, report.accounting.exposures_found
+        ));
+    }
     out
 }
 
