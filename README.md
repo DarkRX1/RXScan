@@ -39,7 +39,7 @@ coverage as a negative finding.
 > Check the release notes and `rxscan --help` for the build you are running.
 
 <p align="center">
-  <img src="docs/images/rxscan-web-dashboard.png" alt="RXScan local web console dashboard" width="100%">
+  <img src="rxscan-web-dashboard.png" alt="RXScan local web console dashboard" width="100%">
 </p>
 
 <p align="center">
