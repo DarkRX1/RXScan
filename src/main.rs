@@ -202,6 +202,10 @@ fn main() {
         run_exposure_cli(&args);
         return;
     }
+    if args.get(1).is_some_and(|arg| arg == "web") {
+        run_web(&args);
+        return;
+    }
     // Deterministic command suggestions: a bare first argument that
     // strongly resembles a known subcommand is treated as a typo, not a
     // scan target. Suggestions never execute automatically.
@@ -331,6 +335,7 @@ fn render_welcome(caps: rxscan::terminal::TerminalCapabilities) -> String {
     out.push_str("  rxscan <target>                     Scan a host or network\n");
     out.push_str("  rxscan search --username <name>    Search public sources\n");
     out.push_str("  rxscan investigate --username <name>  Correlate public evidence\n");
+    out.push_str("  rxscan web                            Serve the local console + API\n");
     out.push_str("  rxscan capabilities                Show available capabilities\n");
     out.push_str("\nExamples\n");
     out.push_str("  rxscan example.test\n");
@@ -360,6 +365,7 @@ fn suggest_command(input: &str) -> Option<String> {
         "diff",
         "unknown",
         "scan",
+        "web",
     ];
     // Fast path for the most common singular/plural mistake.
     if input == "capability" {
@@ -1090,25 +1096,74 @@ fn run_search(args: &[String]) {
         return;
     }
     let mut username: Option<String> = None;
+    // Passive local entity seeds (Phase 1 expansion, zero network).
+    let mut email: Option<String> = None;
+    let mut domain: Option<String> = None;
+    let mut hostname: Option<String> = None;
+    let mut ip: Option<String> = None;
+    let mut asn: Option<String> = None;
+    let mut url: Option<String> = None;
+    let mut repo: Option<String> = None;
+    let mut org: Option<String> = None;
     let mut json = false;
     let mut jsonl = false;
     let mut show_all = false;
     let mut explain = false;
     let mut deadline = std::time::Duration::from_secs(30);
+    let mut deadline_set = false;
     let mut selected: Option<std::collections::BTreeSet<String>> = None;
     let mut excluded = std::collections::BTreeSet::<String>::new();
     let mut categories = std::collections::BTreeSet::<String>::new();
     let mut project_db: Option<std::path::PathBuf> = None;
     let mut index = offset;
+    // Helper: ensure only one entity type is selected (additive; username
+    // path keeps its exact prior semantics).
+    macro_rules! set_passive {
+        ($slot:ident, $value:expr, $flag:expr) => {{
+            if username.is_some()
+                || email.is_some()
+                || domain.is_some()
+                || hostname.is_some()
+                || ip.is_some()
+                || asn.is_some()
+                || url.is_some()
+                || repo.is_some()
+                || org.is_some()
+            {
+                err!("rxscan search: only one of --username, --email, --domain, --hostname, --ip, --asn, --url, --repo, --org");
+                std::process::exit(2);
+            }
+            if $slot.is_some() {
+                err!("rxscan search: duplicate value for {}", $flag);
+                std::process::exit(2);
+            }
+            $slot = Some($value);
+        }};
+    }
     while index < args.len() {
         match args[index].as_str() {
             "--username" => {
                 index += 1;
-                username = args.get(index).cloned();
-                if username.is_none() {
+                let Some(value) = args.get(index).cloned() else {
                     err!("rxscan search: --username requires a value");
                     std::process::exit(2);
+                };
+                if username.is_some()
+                    || email.is_some()
+                    || domain.is_some()
+                    || hostname.is_some()
+                    || ip.is_some()
+                    || asn.is_some()
+                    || url.is_some()
+                    || repo.is_some()
+                    || org.is_some()
+                {
+                    err!(
+                        "rxscan search: only one of --username, --email, --domain, --hostname, --ip, --asn, --url, --repo, --org"
+                    );
+                    std::process::exit(2);
                 }
+                username = Some(value);
             }
             "username" => {
                 // Positional form: `rxscan search username <name>`.
@@ -1117,11 +1172,105 @@ fn run_search(args: &[String]) {
                     err!("rxscan search username: requires a username value");
                     std::process::exit(2);
                 };
-                if username.is_some() {
-                    err!("rxscan search: duplicate username value");
+                if username.is_some()
+                    || email.is_some()
+                    || domain.is_some()
+                    || hostname.is_some()
+                    || ip.is_some()
+                    || asn.is_some()
+                    || url.is_some()
+                    || repo.is_some()
+                    || org.is_some()
+                {
+                    err!(
+                        "rxscan search: only one of --username, --email, --domain, --hostname, --ip, --asn, --url, --repo, --org"
+                    );
                     std::process::exit(2);
                 }
                 username = Some(name);
+            }
+            "--email" => {
+                index += 1;
+                let Some(value) = args.get(index).cloned() else {
+                    err!("rxscan search: --email requires a value");
+                    std::process::exit(2);
+                };
+                set_passive!(email, value, "--email");
+            }
+            "--domain" => {
+                index += 1;
+                let Some(value) = args.get(index).cloned() else {
+                    err!("rxscan search: --domain requires a value");
+                    std::process::exit(2);
+                };
+                set_passive!(domain, value, "--domain");
+            }
+            "--hostname" => {
+                index += 1;
+                let Some(value) = args.get(index).cloned() else {
+                    err!("rxscan search: --hostname requires a value");
+                    std::process::exit(2);
+                };
+                set_passive!(hostname, value, "--hostname");
+            }
+            "--ip" => {
+                index += 1;
+                let Some(value) = args.get(index).cloned() else {
+                    err!("rxscan search: --ip requires a value");
+                    std::process::exit(2);
+                };
+                set_passive!(ip, value, "--ip");
+            }
+            "--asn" => {
+                index += 1;
+                let Some(value) = args.get(index).cloned() else {
+                    err!("rxscan search: --asn requires a value");
+                    std::process::exit(2);
+                };
+                set_passive!(asn, value, "--asn");
+            }
+            "--url" => {
+                index += 1;
+                let Some(value) = args.get(index).cloned() else {
+                    err!("rxscan search: --url requires a value");
+                    std::process::exit(2);
+                };
+                set_passive!(url, value, "--url");
+            }
+            "--repo" => {
+                index += 1;
+                let Some(value) = args.get(index).cloned() else {
+                    err!("rxscan search: --repo requires a value");
+                    std::process::exit(2);
+                };
+                set_passive!(repo, value, "--repo");
+            }
+            "--org" => {
+                index += 1;
+                let Some(value) = args.get(index).cloned() else {
+                    err!("rxscan search: --org requires a value");
+                    std::process::exit(2);
+                };
+                set_passive!(org, value, "--org");
+            }
+            "email" | "domain" | "hostname" | "ip" | "asn" | "url" | "repo" | "org" => {
+                // Positional form: `rxscan search domain example.test`.
+                let kind = args[index].clone();
+                index += 1;
+                let Some(value) = args.get(index).cloned() else {
+                    err!("rxscan search {kind}: requires a value");
+                    std::process::exit(2);
+                };
+                match kind.as_str() {
+                    "email" => set_passive!(email, value, "email"),
+                    "domain" => set_passive!(domain, value, "domain"),
+                    "hostname" => set_passive!(hostname, value, "hostname"),
+                    "ip" => set_passive!(ip, value, "ip"),
+                    "asn" => set_passive!(asn, value, "asn"),
+                    "url" => set_passive!(url, value, "url"),
+                    "repo" => set_passive!(repo, value, "repo"),
+                    _ => set_passive!(org, value, "org"),
+                }
             }
             "--color" => {
                 index += 1;
@@ -1158,6 +1307,7 @@ fn run_search(args: &[String]) {
                         std::process::exit(2);
                     }
                 };
+                deadline_set = true;
             }
             "--providers" => {
                 index += 1;
@@ -1211,7 +1361,7 @@ fn run_search(args: &[String]) {
             }
             "--help" | "-h" => {
                 out_line!(
-                    "RXSCAN\nReconnaissance / Evidence Engine\n\nUSAGE\n  rxscan search --username NAME [options]\n  rxscan search username NAME [options]\n\nWORKFLOWS\n  search         Public-source search\n\nEXAMPLES\n  rxscan search --username exampleuser\n  rxscan search --username exampleuser --all\n\nOPTIONS\n  --username NAME            Target username (or `search username NAME`)\n  --providers IDS            Comma-separated provider allowlist\n  --exclude-provider IDS     Comma-separated provider denylist\n  --category CATEGORIES      Comma-separated category filter\n  --deadline 30s             Per-search deadline\n  --project-db PATH          Persist the report to a project database\n  --all                      Show complete human detail (all findings + provider notes)\n  --color MODE               auto (TTY only), always, or never\n  --json | --jsonl           Machine output (never styled, always complete)\n  --explain                  Show the search plan without contacting providers\n\nLEAF COMMANDS\n  rxscan search providers [--json] [--health STATE] [--category CAT] [--stale] [--color MODE]\n  rxscan search stats [--json] [--color MODE]\n  rxscan search lint [--json] [--corpus-root DIR] [--color MODE]\n  rxscan --username NAME [same options]"
+                    "RXSCAN\nReconnaissance / Evidence Engine\n\nUSAGE\n  rxscan search --username NAME [options]\n  rxscan search username NAME [options]\n  rxscan search --email EMAIL [--json|--jsonl] [--all] [--explain] [--project-db PATH]\n  rxscan search --domain DOMAIN [--json|--jsonl] [--all] [--explain] [--project-db PATH]\n  rxscan search --hostname HOST [--json|--jsonl] [--all] [--explain] [--project-db PATH]\n  rxscan search --ip IP [--json|--jsonl] [--all] [--explain] [--project-db PATH]\n  rxscan search --asn ASN [--json|--jsonl] [--all] [--explain] [--project-db PATH]\n  rxscan search --url URL [--json|--jsonl] [--all] [--explain] [--project-db PATH]\n  rxscan search --repo OWNER/NAME [--json|--jsonl] [--all] [--explain] [--project-db PATH]\n  rxscan search --org ORG [--json|--jsonl] [--all] [--explain] [--project-db PATH]\n\nWORKFLOWS\n  search         Public-source search\n\nEXAMPLES\n  rxscan search --username exampleuser\n  rxscan search --username exampleuser --all\n  rxscan search --email user@example.test\n  rxscan search --domain example.test\n  rxscan search --ip 192.0.2.10\n  rxscan search --asn AS64500\n  rxscan search --url https://example.test\n  rxscan search --repo example-org/example-project\n  rxscan search --org example-org\n\nOPTIONS\n  --username NAME            Target username (or `search username NAME`)\n  --email EMAIL              Passive local email canonicalization (no network)\n  --domain DOMAIN            Passive local domain canonicalization (no network)\n  --hostname HOST            Passive local hostname canonicalization (no network)\n  --ip IP                    Passive local IP canonicalization (no network)\n  --asn ASN                  Passive local ASN canonicalization (no network)\n  --url URL                  Passive local URL canonicalization (no network)\n  --repo OWNER/NAME          Passive local repository identity (no network, nothing cloned)\n  --org ORG                  Passive local organization identity (no network)\n  --providers IDS            Comma-separated provider allowlist (username search only)\n  --exclude-provider IDS     Comma-separated provider denylist (username search only)\n  --category CATEGORIES      Comma-separated category filter (username search only)\n  --deadline 30s             Per-search deadline (username search only)\n  --project-db PATH          Persist the report to a project database\n  --all                      Show complete human detail (all findings + provider notes)\n  --color MODE               auto (TTY only), always, or never\n  --json | --jsonl           Machine output (never styled, always complete)\n  --explain                  Show the search plan without contacting providers\n\nLEAF COMMANDS\n  rxscan search providers [--json] [--health STATE] [--category CAT] [--stale] [--color MODE]\n  rxscan search stats [--json] [--color MODE]\n  rxscan search lint [--json] [--corpus-root DIR] [--color MODE]\n  rxscan --username NAME [same options]"
                 );
                 return;
             }
@@ -1220,7 +1370,16 @@ fn run_search(args: &[String]) {
                 // `rxscan search exampleuser` strongly resembles the
                 // username workflow. Suggest the correct form instead of
                 // a bare "unknown option". Never silently reinterprets.
-                if !unknown.starts_with('-') && username.is_none() && unknown != "username" {
+                let no_seed = username.is_none()
+                    && email.is_none()
+                    && domain.is_none()
+                    && hostname.is_none()
+                    && ip.is_none()
+                    && asn.is_none()
+                    && url.is_none()
+                    && repo.is_none()
+                    && org.is_none();
+                if !unknown.starts_with('-') && no_seed && unknown != "username" {
                     err!("error: search needs a search type");
                     err!("");
                     err!("Try:");
@@ -1229,9 +1388,12 @@ fn run_search(args: &[String]) {
                     err!("Other types:");
                     err!("  --domain");
                     err!("  --email");
+                    err!("  --hostname");
                     err!("  --url");
                     err!("  --ip");
                     err!("  --asn");
+                    err!("  --repo");
+                    err!("  --org");
                     std::process::exit(2);
                 }
                 err!("rxscan search: unknown option '{unknown}'");
@@ -1244,11 +1406,44 @@ fn run_search(args: &[String]) {
         err!("rxscan search: --json and --jsonl conflict");
         std::process::exit(2);
     }
+    // Passive local entity path (additive; zero network). Provider and
+    // deadline flags apply only to the username provider search.
+    if email.is_some()
+        || domain.is_some()
+        || hostname.is_some()
+        || ip.is_some()
+        || asn.is_some()
+        || url.is_some()
+        || repo.is_some()
+        || org.is_some()
+    {
+        if selected.is_some() || !excluded.is_empty() || !categories.is_empty() || deadline_set {
+            err!(
+                "rxscan search: --providers/--exclude-provider/--category/--deadline apply only to --username search; entity search is local-only"
+            );
+            std::process::exit(2);
+        }
+        run_entity_search(
+            args, email, domain, hostname, ip, asn, url, repo, org, json, jsonl, show_all, explain,
+            project_db,
+        );
+        return;
+    }
     let Some(username) = username else {
         err!("Missing username.");
         err!("");
         err!("Try:");
         err!("  rxscan search --username exampleuser");
+        err!("");
+        err!("Other types:");
+        err!("  --domain example.test");
+        err!("  --email user@example.test");
+        err!("  --hostname api.example.test");
+        err!("  --url https://example.test");
+        err!("  --ip 192.0.2.10");
+        err!("  --asn AS64500");
+        err!("  --repo example-org/example-project");
+        err!("  --org example-org");
         std::process::exit(2);
     };
     let pack = match rxscan::search::embedded_username_pack() {
@@ -1411,17 +1606,113 @@ fn run_search(args: &[String]) {
     }
 }
 
+/// Passive local entity search (`rxscan search --email/--domain/...`).
+///
+/// Zero network contact. Canonicalizes one identifier, derives directly
+/// implied local entities (email->domain, url->domain, repo->org), and
+/// renders human/JSON/JSONL with `network_scans: 0`. DNS/profile
+/// enrichment lives in `rxscan investigate`, never here.
+#[allow(clippy::too_many_arguments)]
+fn run_entity_search(
+    args: &[String],
+    email: Option<String>,
+    domain: Option<String>,
+    hostname: Option<String>,
+    ip: Option<String>,
+    asn: Option<String>,
+    url: Option<String>,
+    repo: Option<String>,
+    org: Option<String>,
+    json: bool,
+    jsonl: bool,
+    show_all: bool,
+    explain: bool,
+    project_db: Option<std::path::PathBuf>,
+) {
+    use rxscan::search::SearchEntityKind;
+    let (kind, value) = if let Some(v) = email {
+        (SearchEntityKind::EmailAddress, v)
+    } else if let Some(v) = domain {
+        (SearchEntityKind::Domain, v)
+    } else if let Some(v) = hostname {
+        (SearchEntityKind::Hostname, v)
+    } else if let Some(v) = ip {
+        (SearchEntityKind::IpAddress, v)
+    } else if let Some(v) = asn {
+        (SearchEntityKind::Asn, v)
+    } else if let Some(v) = url {
+        (SearchEntityKind::Url, v)
+    } else if let Some(v) = repo {
+        (SearchEntityKind::Repository, v)
+    } else if let Some(v) = org {
+        (SearchEntityKind::Organization, v)
+    } else {
+        err!("rxscan search: missing entity value");
+        std::process::exit(2);
+    };
+    if explain {
+        out_line!(
+            "{}",
+            rxscan::entity_search::explain_entity_plan(kind, &value)
+        );
+        out_line!(
+            "project persistence: {}",
+            project_db
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "disabled".to_owned())
+        );
+        return;
+    }
+    let report = match rxscan::entity_search::execute_entity_search(kind, &value) {
+        Ok(report) => report,
+        Err(error) => {
+            err!("rxscan search: {error}");
+            std::process::exit(1);
+        }
+    };
+    if let Some(path) = project_db {
+        let mut db = match rxscan::project_db::ProjectDb::open(&path) {
+            Ok(db) => db,
+            Err(error) => {
+                err!("rxscan search: could not open project database: {error}");
+                std::process::exit(1);
+            }
+        };
+        if let Err(error) = rxscan::entity_search::persist_entity_report(&mut db, &report) {
+            err!("rxscan search: could not persist search report: {error}");
+            std::process::exit(1);
+        }
+    }
+    if json {
+        out_line!("{}", serde_json::to_string_pretty(&report).unwrap());
+    } else if jsonl {
+        out!("{}", rxscan::entity_search::render_entity_jsonl(&report));
+    } else {
+        let caps = resolve_human_caps(args);
+        out_line!(
+            "{}",
+            rxscan::terminal::workflow_header(caps, "ENTITY SEARCH", None)
+        );
+        out_line!("");
+        out!(
+            "{}",
+            rxscan::entity_search::render_entity_human(&report, show_all)
+        );
+    }
+}
+
 fn run_project(args: &[String]) {
     let Some(command) = args.get(2).map(String::as_str) else {
         err!(
-            "rxscan project: usage: rxscan project create|add|summary|show|neighbors|scans|findings|changes|attention ..."
+            "rxscan project: usage: rxscan project create|add|summary|show|neighbors|related|path|scans|findings|changes|timeline|attention|graph|explain|diff ..."
         );
         std::process::exit(2);
     };
     match command {
         "--help" | "-h" => {
             out_line!(
-                "rxscan project create <project.rxproj>\nrxscan project add <project.rxproj> <scan.rxscan>\nrxscan project summary <project.rxproj> [--json]\nrxscan project show <project.rxproj> <entity> [--json]\nrxscan project explain <project.rxproj> <entity> [--limit N] [--json]\nrxscan project neighbors <project.rxproj> <entity> [--depth N] [--limit N] [--json|--jsonl]\nrxscan project scans <project.rxproj> [--json]\nrxscan project findings <project.rxproj> [entity] [--limit N] [--json|--jsonl]\nrxscan project changes <project.rxproj> [entity] [--limit N] [--json|--jsonl]\nrxscan project attention <project.rxproj> [entity] [--limit N] [--json|--jsonl]"
+                "rxscan project create <project.rxproj>\nrxscan project add <project.rxproj> <scan.rxscan>\nrxscan project summary <project.rxproj> [--json]\nrxscan project graph <project.rxproj> [--json]\nrxscan project show <project.rxproj> <entity> [--json]\nrxscan project explain <project.rxproj> <entity> [--limit N] [--json]\nrxscan project neighbors <project.rxproj> <entity> [--depth N] [--limit N] [--json|--jsonl]\nrxscan project related <project.rxproj> <entity> [--depth N] [--limit N] [--json|--jsonl]\nrxscan project path <project.rxproj> <from> <to> [--json]\nrxscan project scans <project.rxproj> [--json]\nrxscan project findings <project.rxproj> [entity] [--limit N] [--json|--jsonl]\nrxscan project changes <project.rxproj> [entity] [--limit N] [--json|--jsonl]\nrxscan project timeline <project.rxproj> [entity] [--limit N] [--json|--jsonl]\nrxscan project attention <project.rxproj> [entity] [--limit N] [--json|--jsonl]\nrxscan project diff <old.rxscan> <new.rxscan> [--json] [--summary-only]"
             );
         }
         "create" => {
@@ -1556,10 +1847,12 @@ fn run_project(args: &[String]) {
                 }
             }
         }
-        "neighbors" => {
+        // `related` is an additive alias for `neighbors` (same bounded
+        // traversal, same output shape, no second implementation).
+        "neighbors" | "related" => {
             let (Some(path), Some(entity)) = (args.get(3), args.get(4)) else {
                 err!(
-                    "rxscan project neighbors: usage: rxscan project neighbors <project> <entity> [--depth N] [--limit N] [--json|--jsonl]"
+                    "rxscan project {command}: usage: rxscan project {command} <project> <entity> [--depth N] [--limit N] [--json|--jsonl]"
                 );
                 std::process::exit(2);
             };
@@ -1572,14 +1865,14 @@ fn run_project(args: &[String]) {
                 match arg.as_str() {
                     "--depth" => {
                         let Some(value) = iter.next() else {
-                            err!("rxscan project neighbors: --depth requires a value");
+                            err!("rxscan project {command}: --depth requires a value");
                             std::process::exit(2);
                         };
                         depth = value.parse().unwrap_or(project::DEFAULT_QUERY_DEPTH);
                     }
                     "--limit" => {
                         let Some(value) = iter.next() else {
-                            err!("rxscan project neighbors: --limit requires a value");
+                            err!("rxscan project {command}: --limit requires a value");
                             std::process::exit(2);
                         };
                         limit = value.parse().unwrap_or(project::DEFAULT_QUERY_LIMIT);
@@ -1587,7 +1880,7 @@ fn run_project(args: &[String]) {
                     "--json" => json = true,
                     "--jsonl" => jsonl = true,
                     _ => {
-                        err!("rxscan project neighbors: unsupported option {arg}");
+                        err!("rxscan project {command}: unsupported option {arg}");
                         std::process::exit(2);
                     }
                 }
@@ -1607,7 +1900,7 @@ fn run_project(args: &[String]) {
                 Ok(state) if json => match state.neighbors(entity, depth, limit) {
                     Ok(result) => out_line!("{}", serde_json::to_string_pretty(&result).unwrap()),
                     Err(error) => {
-                        err!("rxscan project neighbors: {error}");
+                        err!("rxscan project {command}: {error}");
                         std::process::exit(1);
                     }
                 },
@@ -1629,12 +1922,124 @@ fn run_project(args: &[String]) {
                         }
                     }
                     Err(error) => {
-                        err!("rxscan project neighbors: {error}");
+                        err!("rxscan project {command}: {error}");
                         std::process::exit(1);
                     }
                 },
                 Err(error) => {
-                    err!("rxscan project neighbors: {error}");
+                    err!("rxscan project {command}: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        // `path` answers "why are these connected?" with the evidence
+        // chain (bounded BFS, deterministic, cycle-safe).
+        "path" => {
+            let (Some(path), Some(from), Some(to)) = (args.get(3), args.get(4), args.get(5)) else {
+                err!(
+                    "rxscan project path: usage: rxscan project path <project.rxproj> <from> <to> [--json]"
+                );
+                std::process::exit(2);
+            };
+            let json = args[6..].iter().any(|a| a == "--json");
+            match project::load_project(std::path::Path::new(path)) {
+                Ok(state) => match state.path(from, to, project::MAX_QUERY_DEPTH) {
+                    Ok(chain) if json => {
+                        out_line!("{}", serde_json::to_string_pretty(&chain).unwrap())
+                    }
+                    Ok(chain) if chain.is_empty() => {
+                        out_line!("path {from} -> {to}: same entity (0 hops) network_requests=0")
+                    }
+                    Ok(chain) => {
+                        out_line!(
+                            "path {from} -> {to}: {} hops network_requests=0",
+                            chain.len()
+                        );
+                        for rel in chain {
+                            out_line!(
+                                "  {} --{:?}--> {}",
+                                rel.from_entity,
+                                rel.kind,
+                                rel.to_entity
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        err!("rxscan project path: {error}");
+                        std::process::exit(1);
+                    }
+                },
+                Err(error) => {
+                    err!("rxscan project path: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        // `graph` is an additive summary view over the same project state
+        // (no second graph implementation): counts plus bounded listing.
+        "graph" => {
+            let Some(path) = args.get(3) else {
+                err!("rxscan project graph: usage: rxscan project graph <project.rxproj> [--json]");
+                std::process::exit(2);
+            };
+            let json = args[4..].iter().any(|a| a == "--json");
+            match project::load_project_with_timing(std::path::Path::new(path)) {
+                Ok((state, _, bytes)) if json => {
+                    let summary = state.summary(bytes);
+                    out_line!("{}", serde_json::to_string_pretty(&summary).unwrap());
+                }
+                Ok((state, _, bytes)) => {
+                    out_line!("{}", project::render_summary(&state, bytes));
+                    out_line!(
+                        "graph entities={} relationships={} network_requests=0",
+                        state.entities.len(),
+                        state.relationships.len()
+                    );
+                }
+                Err(error) => {
+                    err!("rxscan project graph: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        // `diff` is an additive alias for checkpoint diffing over two
+        // scan files (same `rxscan diff` engine, no second implementation).
+        "diff" => {
+            let mut json = false;
+            let mut summary_only = false;
+            let mut paths: Vec<String> = Vec::new();
+            for arg in &args[3..] {
+                match arg.as_str() {
+                    "--json" | "--jsonl" => json = true,
+                    "--summary-only" => summary_only = true,
+                    value => paths.push(value.to_owned()),
+                }
+            }
+            if paths.len() != 2 {
+                err!(
+                    "rxscan project diff: usage: rxscan project diff <old.rxscan> <new.rxscan> [--json] [--summary-only]"
+                );
+                std::process::exit(2);
+            }
+            let options = rxscan::diff::DiffOptions {
+                summary_only,
+                max_records: rxscan::diff::MAX_DIFF_RECORDS,
+            };
+            match rxscan::diff::diff_checkpoints(
+                std::path::Path::new(&paths[0]),
+                std::path::Path::new(&paths[1]),
+                options,
+            ) {
+                Ok((report, _, _, _)) if json => match rxscan::diff::to_json(&report) {
+                    Ok(text) => out_line!("{text}"),
+                    Err(error) => {
+                        err!("rxscan project diff: {error}");
+                        std::process::exit(1);
+                    }
+                },
+                Ok((report, _, _, _)) => out_line!("{}", rxscan::diff::human_summary(&report)),
+                Err(error) => {
+                    err!("rxscan project diff: {error}");
                     std::process::exit(1);
                 }
             }
@@ -1667,7 +2072,9 @@ fn run_project(args: &[String]) {
                 }
             }
         }
-        "findings" | "changes" | "attention" => {
+        // `timeline` is an additive alias for `changes` (same
+        // coverage-aware query, no second implementation).
+        "findings" | "changes" | "timeline" | "attention" => {
             let Some(path) = args.get(3) else {
                 err!("rxscan project {command}: missing project path");
                 std::process::exit(2);
@@ -1753,7 +2160,7 @@ fn run_project(args: &[String]) {
                         }
                     }
                 }
-                "changes" => {
+                "changes" | "timeline" => {
                     if jsonl {
                         match state.changes_query(entity_ref, limit) {
                             Ok(result) => {
@@ -1766,7 +2173,7 @@ fn run_project(args: &[String]) {
                                 }
                             }
                             Err(error) => {
-                                err!("rxscan project changes: {error}");
+                                err!("rxscan project {command}: {error}");
                                 std::process::exit(1);
                             }
                         }
@@ -1776,7 +2183,7 @@ fn run_project(args: &[String]) {
                                 out_line!("{}", serde_json::to_string_pretty(&result).unwrap())
                             }
                             Err(error) => {
-                                err!("rxscan project changes: {error}");
+                                err!("rxscan project {command}: {error}");
                                 std::process::exit(1);
                             }
                         }
@@ -1784,7 +2191,7 @@ fn run_project(args: &[String]) {
                         match project::render_changes(&state, entity_ref, limit) {
                             Ok(text) => out!("{text}"),
                             Err(error) => {
-                                err!("rxscan project changes: {error}");
+                                err!("rxscan project {command}: {error}");
                                 std::process::exit(1);
                             }
                         }
@@ -2401,6 +2808,11 @@ fn run_investigate(args: &[String]) {
     let mut username: Option<String> = None;
     let mut domain: Option<String> = None;
     let mut url: Option<String> = None;
+    let mut email: Option<String> = None;
+    let mut ip: Option<String> = None;
+    let mut asn: Option<String> = None;
+    let mut repo: Option<String> = None;
+    let mut org: Option<String> = None;
     let mut depth: u8 = inv::DEFAULT_DEPTH;
     let mut explain = false;
     let mut json = false;
@@ -2431,8 +2843,18 @@ fn run_investigate(args: &[String]) {
                     err!("rxscan investigate: --username requires a value");
                     std::process::exit(2);
                 };
-                if username.is_some() || domain.is_some() || url.is_some() {
-                    err!("rxscan investigate: only one of --username, --domain, --url");
+                if username.is_some()
+                    || domain.is_some()
+                    || url.is_some()
+                    || email.is_some()
+                    || ip.is_some()
+                    || asn.is_some()
+                    || repo.is_some()
+                    || org.is_some()
+                {
+                    err!(
+                        "rxscan investigate: only one of --username, --domain, --url, --email, --ip, --asn, --repo, --org"
+                    );
                     std::process::exit(2);
                 }
                 username = Some(value);
@@ -2443,8 +2865,18 @@ fn run_investigate(args: &[String]) {
                     err!("rxscan investigate: --domain requires a value");
                     std::process::exit(2);
                 };
-                if username.is_some() || domain.is_some() || url.is_some() {
-                    err!("rxscan investigate: only one of --username, --domain, --url");
+                if username.is_some()
+                    || domain.is_some()
+                    || url.is_some()
+                    || email.is_some()
+                    || ip.is_some()
+                    || asn.is_some()
+                    || repo.is_some()
+                    || org.is_some()
+                {
+                    err!(
+                        "rxscan investigate: only one of --username, --domain, --url, --email, --ip, --asn, --repo, --org"
+                    );
                     std::process::exit(2);
                 }
                 domain = Some(value);
@@ -2455,11 +2887,131 @@ fn run_investigate(args: &[String]) {
                     err!("rxscan investigate: --url requires a value");
                     std::process::exit(2);
                 };
-                if username.is_some() || domain.is_some() || url.is_some() {
-                    err!("rxscan investigate: only one of --username, --domain, --url");
+                if username.is_some()
+                    || domain.is_some()
+                    || url.is_some()
+                    || email.is_some()
+                    || ip.is_some()
+                    || asn.is_some()
+                    || repo.is_some()
+                    || org.is_some()
+                {
+                    err!(
+                        "rxscan investigate: only one of --username, --domain, --url, --email, --ip, --asn, --repo, --org"
+                    );
                     std::process::exit(2);
                 }
                 url = Some(value);
+            }
+            "--email" => {
+                index += 1;
+                let Some(value) = args.get(index).cloned() else {
+                    err!("rxscan investigate: --email requires a value");
+                    std::process::exit(2);
+                };
+                if username.is_some()
+                    || domain.is_some()
+                    || url.is_some()
+                    || email.is_some()
+                    || ip.is_some()
+                    || asn.is_some()
+                    || repo.is_some()
+                    || org.is_some()
+                {
+                    err!(
+                        "rxscan investigate: only one of --username, --domain, --url, --email, --ip, --asn, --repo, --org"
+                    );
+                    std::process::exit(2);
+                }
+                email = Some(value);
+            }
+            "--ip" => {
+                index += 1;
+                let Some(value) = args.get(index).cloned() else {
+                    err!("rxscan investigate: --ip requires a value");
+                    std::process::exit(2);
+                };
+                if username.is_some()
+                    || domain.is_some()
+                    || url.is_some()
+                    || email.is_some()
+                    || ip.is_some()
+                    || asn.is_some()
+                    || repo.is_some()
+                    || org.is_some()
+                {
+                    err!(
+                        "rxscan investigate: only one of --username, --domain, --url, --email, --ip, --asn, --repo, --org"
+                    );
+                    std::process::exit(2);
+                }
+                ip = Some(value);
+            }
+            "--asn" => {
+                index += 1;
+                let Some(value) = args.get(index).cloned() else {
+                    err!("rxscan investigate: --asn requires a value");
+                    std::process::exit(2);
+                };
+                if username.is_some()
+                    || domain.is_some()
+                    || url.is_some()
+                    || email.is_some()
+                    || ip.is_some()
+                    || asn.is_some()
+                    || repo.is_some()
+                    || org.is_some()
+                {
+                    err!(
+                        "rxscan investigate: only one of --username, --domain, --url, --email, --ip, --asn, --repo, --org"
+                    );
+                    std::process::exit(2);
+                }
+                asn = Some(value);
+            }
+            "--repo" => {
+                index += 1;
+                let Some(value) = args.get(index).cloned() else {
+                    err!("rxscan investigate: --repo requires a value");
+                    std::process::exit(2);
+                };
+                if username.is_some()
+                    || domain.is_some()
+                    || url.is_some()
+                    || email.is_some()
+                    || ip.is_some()
+                    || asn.is_some()
+                    || repo.is_some()
+                    || org.is_some()
+                {
+                    err!(
+                        "rxscan investigate: only one of --username, --domain, --url, --email, --ip, --asn, --repo, --org"
+                    );
+                    std::process::exit(2);
+                }
+                repo = Some(value);
+            }
+            "--org" => {
+                index += 1;
+                let Some(value) = args.get(index).cloned() else {
+                    err!("rxscan investigate: --org requires a value");
+                    std::process::exit(2);
+                };
+                if username.is_some()
+                    || domain.is_some()
+                    || url.is_some()
+                    || email.is_some()
+                    || ip.is_some()
+                    || asn.is_some()
+                    || repo.is_some()
+                    || org.is_some()
+                {
+                    err!(
+                        "rxscan investigate: only one of --username, --domain, --url, --email, --ip, --asn, --repo, --org"
+                    );
+                    std::process::exit(2);
+                }
+                org = Some(value);
             }
             "--depth" => {
                 index += 1;
@@ -2695,7 +3247,7 @@ fn run_investigate(args: &[String]) {
             }
             "--help" | "-h" => {
                 out_line!(
-                    "RXSCAN\nReconnaissance / Evidence Engine\n\nUSAGE\n  rxscan investigate --username NAME [options]\n  rxscan investigate --domain NAME [options]\n  rxscan investigate --url URL [options]\n\nWORKFLOWS\n  investigate    Evidence investigation\n\nEXAMPLES\n  rxscan investigate --username exampleuser\n  rxscan investigate --username exampleuser --depth 3\n\nOPTIONS\n  --depth 0-{}               Graph-transform depth (default 2)\n  --deadline 60s             Global investigation deadline\n  --max-entities N           Entity budget\n  --max-relationships N      Relationship budget\n  --max-http-requests N      HTTP budget\n  --max-dns-queries N        DNS budget\n  --providers IDS            Provider allowlist\n  --project-db PATH          Persist to a project database\n  --exposure                 Opt-in defensive exposure enrichment\n  --network --scope CIDR     Explicit authorized network pivots\n  --all                      Show complete (untruncated) detail\n  --color MODE               auto (TTY only), always, or never\n  --json | --jsonl           Machine output (never styled)\n  --explain                  Show the plan without contacting anything\n\nPassive by default: never port scans discovered infrastructure. Exposure lookups run only with --exposure. Network pivots run only with explicit --network and valid --scope.",
+                    "RXSCAN\nReconnaissance / Evidence Engine\n\nUSAGE\n  rxscan investigate --username NAME [options]\n  rxscan investigate --domain NAME [options]\n  rxscan investigate --url URL [options]\n  rxscan investigate --email EMAIL [options]\n  rxscan investigate --ip IP [options]\n  rxscan investigate --asn ASN [options]\n  rxscan investigate --repo OWNER/NAME [options]\n  rxscan investigate --org ORG [options]\n\nWORKFLOWS\n  investigate    Evidence investigation\n\nEXAMPLES\n  rxscan investigate --username exampleuser\n  rxscan investigate --username exampleuser --depth 3\n  rxscan investigate --domain example.test\n  rxscan investigate --email user@example.test\n\nOPTIONS\n  --depth 0-{}               Graph-transform depth (default 2)\n  --deadline 60s             Global investigation deadline\n  --max-entities N           Entity budget\n  --max-relationships N      Relationship budget\n  --max-http-requests N      HTTP budget\n  --max-dns-queries N        DNS budget\n  --providers IDS            Provider allowlist\n  --project-db PATH          Persist to a project database\n  --exposure                 Opt-in defensive exposure enrichment\n  --network --scope CIDR     Explicit authorized network pivots\n  --all                      Show complete (untruncated) detail\n  --color MODE               auto (TTY only), always, or never\n  --json | --jsonl           Machine output (never styled)\n  --explain                  Show the plan without contacting anything\n\nPassive by default: never port scans discovered infrastructure. Exposure lookups run only with --exposure. Network pivots run only with explicit --network and valid --scope.",
                     inv::MAX_DEPTH
                 );
                 return;
@@ -2707,6 +3259,11 @@ fn run_investigate(args: &[String]) {
                     && username.is_none()
                     && domain.is_none()
                     && url.is_none()
+                    && email.is_none()
+                    && ip.is_none()
+                    && asn.is_none()
+                    && repo.is_none()
+                    && org.is_none()
                 {
                     err!("error: investigate needs a seed type");
                     err!("");
@@ -2716,6 +3273,11 @@ fn run_investigate(args: &[String]) {
                     err!("Other types:");
                     err!("  --domain");
                     err!("  --url");
+                    err!("  --email");
+                    err!("  --ip");
+                    err!("  --asn");
+                    err!("  --repo");
+                    err!("  --org");
                     std::process::exit(2);
                 }
                 err!("rxscan investigate: unknown option '{unknown}'");
@@ -2728,22 +3290,33 @@ fn run_investigate(args: &[String]) {
         err!("rxscan investigate: --json and --jsonl conflict");
         std::process::exit(2);
     }
-    let (seed_kind, seed_value) = match (username, domain, url) {
-        (Some(value), None, None) => (inv::SeedKind::Username, value),
-        (None, Some(value), None) => (inv::SeedKind::Domain, value),
-        (None, None, Some(value)) => (inv::SeedKind::Url, value),
+    let (seed_kind, seed_value) = match (username, domain, url, email, ip, asn, repo, org) {
+        (Some(value), None, None, None, None, None, None, None) => (inv::SeedKind::Username, value),
+        (None, Some(value), None, None, None, None, None, None) => (inv::SeedKind::Domain, value),
+        (None, None, Some(value), None, None, None, None, None) => (inv::SeedKind::Url, value),
+        (None, None, None, Some(value), None, None, None, None) => (inv::SeedKind::Email, value),
+        (None, None, None, None, Some(value), None, None, None) => (inv::SeedKind::Ip, value),
+        (None, None, None, None, None, Some(value), None, None) => (inv::SeedKind::Asn, value),
+        (None, None, None, None, None, None, Some(value), None) => {
+            (inv::SeedKind::Repository, value)
+        }
+        (None, None, None, None, None, None, None, Some(value)) => {
+            (inv::SeedKind::Organization, value)
+        }
         _ => {
+            // Preserve historical wording ("Missing username.") for
+            // existing consumers; additional seed types listed below.
             err!("Missing username.");
             err!("");
             err!("Try:");
             err!("  rxscan investigate --username exampleuser");
+            err!("  rxscan investigate --domain example.test");
             std::process::exit(2);
         }
     };
     let mut config = match seed_kind {
         inv::SeedKind::Username => inv::InvestigationConfig::username(&seed_value),
-        inv::SeedKind::Domain => inv::InvestigationConfig::seeded(seed_kind, &seed_value),
-        inv::SeedKind::Url => inv::InvestigationConfig::seeded(seed_kind, &seed_value),
+        _ => inv::InvestigationConfig::seeded(seed_kind, &seed_value),
     };
     config.depth = depth;
     config.deadline = deadline;
@@ -2825,6 +3398,146 @@ fn run_investigate(args: &[String]) {
     } else {
         let caps = resolve_human_caps(args);
         out!("{}", inv::render_human_caps(&report, show_all, caps));
+    }
+}
+
+/// Local Web/API front-end (`rxscan web ...`).
+///
+/// Starts the loopback-only HTTP server that serves the RXScan GUI and the
+/// versioned typed API from one origin (`/` is the application, not a
+/// marketing page). Uses the same core as the CLI (scanner, investigation
+/// engine, project database); HTTP handlers only validate and translate.
+/// The browser is opened automatically when interactive unless `--no-open`
+/// is given; open failures never prevent the server from starting.
+fn run_web(args: &[String]) {
+    let mut bind = "127.0.0.1".to_owned();
+    let mut port: u16 = 8080;
+    let mut data_dir: Option<std::path::PathBuf> = None;
+    let mut allow_remote = false;
+    let mut no_open = false;
+    let mut index = 2usize;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--help" | "-h" => {
+                out_line!(
+                    "RXSCAN\nLocal Web GUI & API\n\nUSAGE\n  rxscan web [--bind ADDR] [--port PORT] [--data-dir DIR] [--allow-remote] [--no-open]\n\nEXAMPLES\n  rxscan web\n  rxscan web --port 8901\n  rxscan web --no-open\n\nOPTIONS\n  --bind ADDR    Loopback bind address (default 127.0.0.1)\n  --port PORT    Local port 0..=65535 (default 8080; 0 = OS-assigned)\n  --data-dir DIR Project database directory (default .rxscan-web)\n  --allow-remote DANGEROUS: permit a non-loopback bind. The API stays\n                 unauthenticated; never expose this to a network.\n  --no-open      Do not open the default browser automatically\n                 (--no-browser is an alias)\n\nThe RXScan application lives at / and the typed API at /api/v1 (same origin, loopback only)."
+                );
+                return;
+            }
+            "--bind" => {
+                index += 1;
+                let Some(value) = args.get(index).cloned() else {
+                    err!("rxscan web: --bind requires an address");
+                    std::process::exit(2);
+                };
+                bind = value;
+            }
+            "--port" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    err!("rxscan web: --port requires a value");
+                    std::process::exit(2);
+                };
+                match value.parse::<u16>() {
+                    Ok(value) => port = value,
+                    _ => {
+                        err!("rxscan web: --port must be 0..=65535");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "--data-dir" => {
+                index += 1;
+                let Some(value) = args.get(index).cloned() else {
+                    err!("rxscan web: --data-dir requires a directory");
+                    std::process::exit(2);
+                };
+                data_dir = Some(value.into());
+            }
+            "--allow-remote" => allow_remote = true,
+            "--no-open" | "--no-browser" => no_open = true,
+            unknown => {
+                err!("rxscan web: unknown option '{unknown}'");
+                std::process::exit(2);
+            }
+        }
+        index += 1;
+    }
+    let options = rxscan::web_api::WebOptions {
+        bind,
+        port,
+        data_dir: data_dir.unwrap_or_else(|| std::path::PathBuf::from(".rxscan-web")),
+        allow_remote,
+        fixture_investigation: false,
+    };
+    match rxscan::web_api::serve(options) {
+        Ok(handle) => {
+            out_line!("RXScan Web UI");
+            out_line!("Listening on {}", handle.base_url());
+            out_line!("Press Ctrl+C to stop.");
+            // Best-effort browser open: interactive sessions get the GUI
+            // immediately; failures (headless, missing opener) never stop
+            // the loopback server. Opt out with `rxscan web --no-open`.
+            if !no_open {
+                maybe_open_browser(handle.base_url());
+            }
+            // Park the main thread on the server. Termination relies on
+            // process exit; project writes commit atomically (SQLite
+            // transactions), so an interrupted run cannot corrupt stored
+            // evidence. `ServerHandle::shutdown` (used by tests/embedders)
+            // performs the bounded graceful drain.
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(3600));
+            }
+        }
+        Err(error) => {
+            err!("rxscan web: {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Best-effort default-browser open for `rxscan web`.
+///
+/// Only attempts when stdout is an interactive terminal (or the caller
+/// explicitly runs in the foreground); headless/CI sessions skip quietly.
+/// Any failure is silent: the server is already listening and usable.
+#[allow(clippy::zombie_processes)]
+fn maybe_open_browser(base_url: &str) {
+    use std::io::IsTerminal;
+    if !std::io::stdout().is_terminal() {
+        return;
+    }
+    if std::env::var_os("NO_BROWSER").is_some() {
+        return;
+    }
+    let url = format!("{base_url}/");
+    let attempts: &[&[&str]] = if cfg!(target_os = "macos") {
+        &[&["open", &url]]
+    } else if cfg!(target_os = "windows") {
+        &[&["cmd", "/c", "start", "", &url]]
+    } else {
+        &[
+            &["xdg-open", &url],
+            &["sensible-browser", &url],
+            &["gio", "open", &url],
+        ]
+    };
+    for attempt in attempts {
+        let mut command = std::process::Command::new(attempt[0]);
+        for arg in &attempt[1..] {
+            command.arg(arg);
+        }
+        // Detached, silent: never block the server on the opener.
+        match command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(_) => return,
+            Err(_) => continue,
+        }
     }
 }
 

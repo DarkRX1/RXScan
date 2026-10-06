@@ -894,6 +894,59 @@ impl ProjectState {
         })
     }
 
+    /// Bounded directed path query (`from` -> `to`, cycle-safe).
+    /// Answers "why are these connected?" with the evidence chain.
+    /// Depth clamped 1..=3 (same hard cap family as neighbors).
+    pub fn path(
+        &self,
+        from: &str,
+        to: &str,
+        max_depth: u8,
+    ) -> Result<Vec<ProjectRelationship>, ProjectError> {
+        if !self.entities.contains_key(from) {
+            return Err(ProjectError::NotFound(from.to_owned()));
+        }
+        if !self.entities.contains_key(to) {
+            return Err(ProjectError::NotFound(to.to_owned()));
+        }
+        if from == to {
+            return Ok(Vec::new());
+        }
+        let max_depth = max_depth.clamp(1, MAX_QUERY_DEPTH);
+        use std::collections::VecDeque;
+        let mut queue: VecDeque<(String, Vec<ProjectRelationship>)> =
+            VecDeque::from([(from.to_owned(), Vec::new())]);
+        let mut seen = BTreeSet::from([from.to_owned()]);
+        while let Some((current, path)) = queue.pop_front() {
+            if (path.len() as u8) >= max_depth {
+                continue;
+            }
+            if seen.len() >= MAX_GRAPH_QUERY_VISITED {
+                break;
+            }
+            let mut out_edges: Vec<&ProjectRelationship> = self
+                .relationships
+                .values()
+                .filter(|r| r.from_entity == current)
+                .collect();
+            out_edges.sort_by(|a, b| a.to_entity.cmp(&b.to_entity).then(a.id.cmp(&b.id)));
+            for edge in out_edges {
+                let mut next_path = path.clone();
+                next_path.push(edge.clone());
+                if edge.to_entity == to {
+                    return Ok(next_path);
+                }
+                if seen.insert(edge.to_entity.clone()) {
+                    queue.push_back((edge.to_entity.clone(), next_path));
+                }
+                if queue.len() >= MAX_GRAPH_QUERY_QUEUE {
+                    break;
+                }
+            }
+        }
+        Err(ProjectError::NotFound(format!("no path {from} -> {to}")))
+    }
+
     /// Bounded findings query. `entity` filters to one affected entity when set.
     pub fn findings_query(
         &self,

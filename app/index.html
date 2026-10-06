@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>RXScan — Local Reconnaissance &amp; Evidence</title>
+    <meta
+      name="description"
+      content="RXScan local GUI: bounded scans, entity search, passive investigations, evidence graph, and timeline over the local typed API."
+    />
+    <meta name="referrer" content="same-origin" />
+    <meta name="theme-color" content="#020711" />
+    <link rel="icon" type="image/png" href="/app/assets/RXScanlogo.png" />
+    <link rel="shortcut icon" type="image/png" href="/app/assets/RXScanlogo.png" />
+    <link rel="stylesheet" href="/app/rxscan.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to workspace</a>
+    <header class="topbar">
+      <div class="topbar-inner">
+        <p class="brand"><img class="brand-logo" src="/app/assets/RXScanlogo.png" alt="RXScan logo" width="28" height="28" />RXSCAN <span class="brand-sub">reconnaissance &amp; evidence</span></p>
+        <div class="topbar-right">
+          <p class="conn" role="status" aria-live="polite">
+            <span class="conn-dot" id="conn-dot" aria-hidden="true"></span>
+            <span id="conn-text">connecting…</span>
+          </p>
+          <form class="project-pick" id="project-pick-form" aria-label="Active project">
+            <label for="active-project">Project</label>
+            <input id="active-project" name="project" type="text" value="default" list="project-names" autocomplete="off" spellcheck="false" />
+            <datalist id="project-names"></datalist>
+          </form>
+        </div>
+      </div>
+    </header>
+
+    <div class="shell">
+      <nav class="sidebar" aria-label="RXScan workflows">
+        <div class="sidebar-brand"><img class="sidebar-logo" src="/app/assets/RXScanlogo.png" alt="RXScan logo" width="32" height="32" /><span class="sidebar-brand-text">RXScan</span></div>
+        <a href="#/dashboard" data-nav="dashboard">Dashboard</a>
+        <a href="#/scan" data-nav="scan">Scan</a>
+        <a href="#/search" data-nav="search">Search</a>
+        <a href="#/investigate" data-nav="investigate">Investigate</a>
+        <a href="#/projects" data-nav="projects">Projects</a>
+        <a href="#/jobs" data-nav="jobs">Jobs</a>
+        <p class="sidebar-note">Local-only. Loopback API at <span class="mono">/api/v1</span>.</p>
+      </nav>
+
+      <main id="main" class="workspace" tabindex="-1">
+        <!-- DASHBOARD -->
+        <section id="view-dashboard" aria-labelledby="dash-title">
+          <div class="dash-identity">
+            <img class="dash-logo" src="/app/assets/RXScanlogo.png" alt="RXScan logo" width="56" height="56" />
+            <div class="dash-identity-text">
+              <h1 id="dash-title">RXScan</h1>
+              <p class="dash-subtitle">Reconnaissance &amp; Evidence Console</p>
+              <p class="muted dash-active-project">Active project: <span class="mono" id="dash-project-name">default</span></p>
+            </div>
+          </div>
+          <p class="muted">Operational overview. Empty means empty — no decorative metrics.</p>
+          <div class="cards">
+            <article class="card" aria-labelledby="dash-engine-t">
+              <h2 id="dash-engine-t">Engine</h2>
+              <dl class="kv">
+                <div><dt>Status</dt><dd id="dash-health">—</dd></div>
+                <div><dt>API version</dt><dd id="dash-api">—</dd></div>
+                <div><dt>Tool version</dt><dd id="dash-tool">—</dd></div>
+              </dl>
+            </article>
+            <article class="card" aria-labelledby="dash-caps-t">
+              <h2 id="dash-caps-t">Capabilities</h2>
+              <p class="muted" id="dash-caps-summary">Loading…</p>
+              <ul class="caps" id="dash-caps"></ul>
+            </article>
+            <article class="card" aria-labelledby="dash-active-t">
+              <h2 id="dash-active-t">Active work</h2>
+              <p class="muted" id="dash-active-empty">No running jobs.</p>
+              <ul class="jobs" id="dash-active"></ul>
+            </article>
+            <article class="card" aria-labelledby="dash-jobs-t">
+              <h2 id="dash-jobs-t">Recent jobs</h2>
+              <p class="muted" id="dash-jobs-empty">No jobs yet.</p>
+              <ul class="jobs" id="dash-jobs"></ul>
+              <p><a href="#/jobs">Open Jobs →</a></p>
+            </article>
+            <article class="card" aria-labelledby="dash-projects-t">
+              <h2 id="dash-projects-t">Recent projects</h2>
+              <p class="muted" id="dash-projects-empty">No projects yet.</p>
+              <ul class="entities" id="dash-projects"></ul>
+              <p><a href="#/projects">Open Projects →</a></p>
+            </article>
+            <article class="card" aria-labelledby="dash-findings-t">
+              <h2 id="dash-findings-t">Recent findings</h2>
+              <p class="muted" id="dash-findings-empty">No findings in the active project.</p>
+              <ul class="entities" id="dash-findings"></ul>
+            </article>
+          </div>
+          <article class="card wide" aria-labelledby="dash-warn-t">
+            <h2 id="dash-warn-t">Warnings &amp; limitations</h2>
+            <ul class="entities" id="dash-warnings"><li>No warnings.</li></ul>
+          </article>
+        </section>
+
+        <!-- SCAN -->
+        <section id="view-scan" aria-labelledby="scan-title" hidden>
+          <h1 id="scan-title">Scan</h1>
+          <p class="muted">Bounded network scan through the real RXScan core. Scope defaults to the target itself.</p>
+          <form id="scan-form" class="form scan-form">
+            <div class="scan-target-row">
+              <div class="scan-target-main">
+                <label for="scan-target">Target (IP, hostname, URL, or CIDR)</label>
+                <input id="scan-target" name="target" type="text" value="127.0.0.1" required autocomplete="off" spellcheck="false" />
+              </div>
+              <div class="scan-target-ports">
+                <label for="scan-ports">Ports (for example <span class="mono">22,80,443</span> or <span class="mono">1-1024</span>)</label>
+                <input id="scan-ports" name="ports" type="text" value="22,80,443" autocomplete="off" spellcheck="false" />
+              </div>
+            </div>
+            <div class="grid-form">
+              <div>
+                <label for="scan-mode">Scan mode</label>
+                <select id="scan-mode" name="mode">
+                  <option value="connect" selected>connect (unprivileged)</option>
+                  <option value="auto">auto</option>
+                  <option value="syn">syn (privilege-gated)</option>
+                </select>
+              </div>
+              <div>
+                <label for="scan-goal">Workflow (goal)</label>
+                <select id="scan-goal" name="goal">
+                  <option value="recon" selected>recon — general reconnaissance</option>
+                  <option value="discover">discover — host/network discovery</option>
+                  <option value="ports">ports — port discovery only</option>
+                  <option value="services">services — ports + service identification</option>
+                  <option value="web">web — web-focused reconnaissance</option>
+                  <option value="full">full — broadest bounded reconnaissance</option>
+                </select>
+              </div>
+              <div>
+                <label for="scan-level">Level (1–5)</label>
+                <input id="scan-level" name="level" type="number" min="1" max="5" value="3" />
+              </div>
+              <div>
+                <label for="scan-speed">Speed</label>
+                <select id="scan-speed" name="speed">
+                  <option value="slow">slow</option>
+                  <option value="balanced" selected>balanced</option>
+                  <option value="fast">fast</option>
+                  <option value="auto">auto</option>
+                </select>
+              </div>
+            </div>
+            <details class="advanced">
+              <summary>Advanced: UDP, deadline, scope, exclusions, project</summary>
+              <div class="grid-form">
+                <div class="check-row">
+                  <input id="scan-udp" name="udp" type="checkbox" />
+                  <label for="scan-udp">Bounded UDP discovery in addition to TCP (explicit opt-in)</label>
+                </div>
+                <div class="check-row">
+                  <input id="scan-allports" name="all_ports" type="checkbox" />
+                  <label for="scan-allports">All TCP ports (one bounded task, overrides ports field)</label>
+                </div>
+                <div>
+                  <label for="scan-deadline">Deadline (seconds, 1–3600)</label>
+                  <input id="scan-deadline" name="deadline" type="number" min="1" max="3600" value="60" />
+                </div>
+                <div>
+                  <label for="scan-project">Project</label>
+                  <input id="scan-project" name="project" type="text" value="default" autocomplete="off" spellcheck="false" />
+                </div>
+              </div>
+              <label for="scan-scope">Additional scope (one entry per line: host, IP, URL host, or CIDR)</label>
+              <textarea id="scan-scope" name="scope" rows="2" autocomplete="off" spellcheck="false" placeholder="optional — target itself is always in scope"></textarea>
+              <label for="scan-exclude">Exclusions (one entry per line)</label>
+              <textarea id="scan-exclude" name="exclude" rows="2" autocomplete="off" spellcheck="false" placeholder="optional"></textarea>
+            </details>
+            <div class="actions">
+              <button type="submit" id="scan-submit">Start scan</button>
+            </div>
+            <p class="form-msg" id="scan-msg" role="status" aria-live="polite"></p>
+          </form>
+
+          <article class="card wide" id="scan-live-card" hidden aria-labelledby="scan-live-t">
+            <h2 id="scan-live-t">Live progress</h2>
+            <dl class="kv">
+              <div><dt>Job</dt><dd id="scan-live-id">—</dd></div>
+              <div><dt>State</dt><dd id="scan-live-state">—</dd></div>
+              <div><dt>Stage</dt><dd id="scan-live-stage">—</dd></div>
+              <div><dt>Elapsed</dt><dd id="scan-live-elapsed">—</dd></div>
+            </dl>
+            <div class="progress" aria-hidden="true"><span id="scan-live-bar"></span></div>
+            <div class="actions">
+              <button type="button" id="scan-cancel">Cancel scan</button>
+            </div>
+            <ol class="events" id="scan-live-events"></ol>
+          </article>
+
+          <article class="card wide" id="scan-results-card" hidden aria-labelledby="scan-results-t">
+            <h2 id="scan-results-t">Findings</h2>
+            <div class="viz" id="scan-viz-ports"></div>
+            <div class="viz" id="scan-viz-services"></div>
+            <div class="table-wrap">
+              <table class="findings" id="scan-table">
+                <caption>Open ports first. Unknown stays unknown — never fabricated.</caption>
+                <thead><tr><th scope="col">Port</th><th scope="col">State</th><th scope="col">Service</th><th scope="col">Details</th><th scope="col">Confidence</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <p class="muted" id="scan-empty">No open ports observed.</p>
+            <details class="raw">
+              <summary>Raw / JSON</summary>
+              <div class="actions"><button type="button" id="scan-download">Download JSON</button></div>
+              <pre class="result" id="scan-raw">—</pre>
+            </details>
+          </article>
+        </section>
+
+        <!-- SEARCH -->
+        <section id="view-search" aria-labelledby="search-title" hidden>
+          <h1 id="search-title">Search</h1>
+          <div class="search-modes" role="note" aria-label="Search modes">
+            <p class="search-mode search-mode-passive"><strong>Passive entity search</strong> — local, instant, no network. Email, domain, hostname, IP, ASN, URL, repository, organization.</p>
+            <p class="search-mode search-mode-username"><strong>Username provider search</strong> — public sources, async cancellable job. Confirmed outranks Possible; candidates stay candidates.</p>
+          </div>
+          <p class="muted">Passive local canonicalization is instant. Username provider search contacts public sources as a cancellable job.</p>
+          <form id="search-form" class="form">
+            <div class="grid-form">
+              <div>
+                <label for="search-type">Entity type</label>
+                <select id="search-type" name="entity_type">
+                  <option value="username">username (public sources, async)</option>
+                  <option value="email">email (local, instant)</option>
+                  <option value="domain">domain (local, instant)</option>
+                  <option value="hostname">hostname (local, instant)</option>
+                  <option value="ip">IP (local, instant)</option>
+                  <option value="asn">ASN (local, instant)</option>
+                  <option value="url">URL (local, instant)</option>
+                  <option value="repository">repository (local, instant)</option>
+                  <option value="organization">organization (local, instant)</option>
+                </select>
+              </div>
+              <div>
+                <label for="search-value">Value</label>
+                <input id="search-value" name="value" type="text" value="exampleuser" required autocomplete="off" spellcheck="false" />
+              </div>
+              <div>
+                <label for="search-project">Project (persist passive results)</label>
+                <input id="search-project" name="project" type="text" value="default" autocomplete="off" spellcheck="false" />
+              </div>
+              <div>
+                <label for="search-deadline">Deadline for username search (seconds, 1–120)</label>
+                <input id="search-deadline" name="deadline" type="number" min="1" max="120" value="25" />
+              </div>
+            </div>
+            <div class="actions"><button type="submit" id="search-submit">Search</button></div>
+            <p class="form-msg" id="search-msg" role="status" aria-live="polite"></p>
+          </form>
+          <article class="card wide" id="search-live-card" hidden aria-labelledby="search-live-t">
+            <h2 id="search-live-t">Username search progress</h2>
+            <dl class="kv">
+              <div><dt>Job</dt><dd id="search-live-id">—</dd></div>
+              <div><dt>State</dt><dd id="search-live-state">—</dd></div>
+              <div><dt>Stage</dt><dd id="search-live-stage">—</dd></div>
+            </dl>
+            <div class="actions"><button type="button" id="search-cancel">Cancel search</button></div>
+            <ol class="events" id="search-live-events"></ol>
+          </article>
+          <article class="card wide" id="search-results-card" hidden aria-labelledby="search-results-t">
+            <h2 id="search-results-t">Results</h2>
+            <div class="viz" id="search-viz-coverage"></div>
+            <div class="table-wrap">
+              <table class="findings" id="search-table">
+                <caption>Confirmed and Possible first. Profile means observed identity-specific URL; Resource, Candidate, and Provider Endpoint are never verified profiles.</caption>
+                <thead><tr><th scope="col">Provider</th><th scope="col">Status</th><th scope="col">Confidence</th><th scope="col">URL / resource</th><th scope="col">Evidence</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <details class="collapsible" id="search-other-details" hidden>
+              <summary id="search-other-summary">Other provider outcomes (negative / blocked / unknown)</summary>
+              <div class="table-wrap">
+                <table class="findings" id="search-table-other">
+                  <caption>Coverage detail: not verified profiles.</caption>
+                  <thead><tr><th scope="col">Provider</th><th scope="col">Status</th><th scope="col">Confidence</th><th scope="col">URL / resource</th><th scope="col">Evidence</th></tr></thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+            </details>
+            <p class="muted" id="search-empty">No results.</p>
+            <details class="raw"><summary>Raw / JSON</summary><pre class="result" id="search-raw">—</pre></details>
+          </article>
+        </section>
+
+        <!-- INVESTIGATE -->
+        <section id="view-investigate" aria-labelledby="inv-title" hidden>
+          <h1 id="inv-title">Investigate</h1>
+          <p class="muted">Passive by default. An active network bridge never runs unless you explicitly enable it with scope.</p>
+          <form id="inv-form" class="form">
+            <div class="grid-form">
+              <div>
+                <label for="inv-type">Entity type</label>
+                <select id="inv-type" name="entity_type">
+                  <option value="username">username</option>
+                  <option value="domain" selected>domain</option>
+                  <option value="url">url</option>
+                  <option value="email">email</option>
+                  <option value="ip">ip</option>
+                  <option value="asn">asn</option>
+                  <option value="repository">repository</option>
+                  <option value="organization">organization</option>
+                </select>
+              </div>
+              <div>
+                <label for="inv-value">Value</label>
+                <input id="inv-value" name="value" type="text" value="example.test" required autocomplete="off" spellcheck="false" />
+              </div>
+              <div>
+                <label for="inv-depth">Depth (0–5)</label>
+                <input id="inv-depth" name="depth" type="number" min="0" max="5" value="2" />
+              </div>
+              <div>
+                <label for="inv-project">Project</label>
+                <input id="inv-project" name="project" type="text" value="default" autocomplete="off" spellcheck="false" />
+              </div>
+            </div>
+            <div class="grid-form">
+              <div>
+                <label for="inv-deadline">Deadline (seconds, 1–600)</label>
+                <input id="inv-deadline" name="deadline" type="number" min="1" max="600" value="60" />
+              </div>
+              <div class="check-row">
+                <input id="inv-network" name="network" type="checkbox" />
+                <label for="inv-network">Authorized network bridge (explicit; requires scope below)</label>
+              </div>
+            </div>
+            <div id="inv-scope-wrap" hidden>
+              <label for="inv-scope">Bridge scope (one entry per line, required when bridged)</label>
+              <textarea id="inv-scope" name="scope" rows="2" autocomplete="off" spellcheck="false"></textarea>
+              <label for="inv-exclude">Bridge exclusions (one entry per line)</label>
+              <textarea id="inv-exclude" name="exclude" rows="2" autocomplete="off" spellcheck="false"></textarea>
+            </div>
+            <div class="actions"><button type="submit" id="inv-submit">Investigate</button></div>
+            <p class="form-msg" id="inv-msg" role="status" aria-live="polite"></p>
+          </form>
+
+          <article class="card wide" id="inv-live-card" hidden aria-labelledby="inv-live-t">
+            <h2 id="inv-live-t">Live progress</h2>
+            <dl class="kv">
+              <div><dt>Job</dt><dd id="inv-live-id">—</dd></div>
+              <div><dt>State</dt><dd id="inv-live-state">—</dd></div>
+              <div><dt>Stage</dt><dd id="inv-live-stage">—</dd></div>
+              <div><dt>Elapsed</dt><dd id="inv-live-elapsed">—</dd></div>
+            </dl>
+            <div class="progress" aria-hidden="true"><span id="inv-live-bar"></span></div>
+            <div class="actions"><button type="button" id="inv-cancel">Cancel investigation</button></div>
+            <ol class="events" id="inv-live-events"></ol>
+          </article>
+
+          <article class="card wide" id="inv-results-card" hidden aria-labelledby="inv-results-t">
+            <h2 id="inv-results-t">Investigation results</h2>
+            <p class="seed-chip" id="inv-seed-chip" hidden>Seed: <span class="mono" id="inv-seed-value">—</span></p>
+            <div class="tabs" role="tablist" aria-label="Investigation views">
+              <button type="button" role="tab" data-inv-tab="overview" aria-selected="true">Overview</button>
+              <button type="button" role="tab" data-inv-tab="entities" aria-selected="false">Entities</button>
+              <button type="button" role="tab" data-inv-tab="evidence" aria-selected="false">Evidence</button>
+              <button type="button" role="tab" data-inv-tab="graph" aria-selected="false">Graph</button>
+              <button type="button" role="tab" data-inv-tab="timeline" aria-selected="false">Timeline</button>
+              <button type="button" role="tab" data-inv-tab="sources" aria-selected="false">Sources</button>
+              <button type="button" role="tab" data-inv-tab="raw" aria-selected="false">Raw</button>
+            </div>
+            <div data-inv-panel="overview">
+              <dl class="kv" id="inv-overview"></dl>
+              <div class="viz" id="inv-viz-coverage"></div>
+            </div>
+            <div data-inv-panel="entities" hidden>
+              <div class="table-wrap"><table class="findings" id="inv-entities-table">
+                <caption>Entities are Rust-canonical; JavaScript only renders.</caption>
+                <thead><tr><th scope="col">Kind</th><th scope="col">Label</th><th scope="col">Depth</th><th scope="col">Observations</th></tr></thead>
+                <tbody></tbody>
+              </table></div>
+            </div>
+            <div data-inv-panel="evidence" hidden><ul class="entities" id="inv-evidence"></ul></div>
+            <div data-inv-panel="graph" hidden>
+              <div class="graph-toolbar">
+                <button type="button" id="inv-graph-in">Zoom in</button>
+                <button type="button" id="inv-graph-out">Zoom out</button>
+                <button type="button" id="inv-graph-reset">Reset view</button>
+                <label for="inv-graph-kind">Filter kind</label>
+                <select id="inv-graph-kind"><option value="">all kinds</option></select>
+              </div>
+              <div class="graph-split">
+                <svg id="inv-graph" viewBox="0 0 640 360" role="img" aria-label="Investigation evidence graph"></svg>
+                <aside class="inspector" aria-labelledby="inv-inspect-t" aria-live="polite">
+                  <h3 id="inv-inspect-t">Evidence inspector</h3>
+                  <p class="muted" id="inv-inspect-empty">Select a node or relationship.</p>
+                  <dl class="kv" id="inv-inspect" hidden></dl>
+                </aside>
+              </div>
+              <ul class="legend" id="inv-legend"></ul>
+            </div>
+            <div data-inv-panel="timeline" hidden><ol class="timeline" id="inv-timeline"></ol></div>
+            <div data-inv-panel="sources" hidden><ul class="entities" id="inv-sources"></ul></div>
+            <div data-inv-panel="raw" hidden><pre class="result" id="inv-raw">—</pre></div>
+          </article>
+        </section>
+
+        <!-- PROJECTS -->
+        <section id="view-projects" aria-labelledby="projects-title" hidden>
+          <h1 id="projects-title">Projects</h1>
+          <p class="muted">One SQLite store per project — the same database the CLI uses. No separate GUI database.</p>
+          <form id="project-create-form" class="inline-form">
+            <label for="project-create-name">New project name</label>
+            <input id="project-create-name" type="text" value="" placeholder="letters, digits, - and _" autocomplete="off" spellcheck="false" />
+            <div class="actions"><button type="submit">Create project</button></div>
+          </form>
+          <p class="form-msg" id="project-create-msg" role="status" aria-live="polite"></p>
+          <div class="grid-2">
+            <article class="card" aria-labelledby="plist-t">
+              <h2 id="plist-t">Projects</h2>
+              <div class="actions"><button type="button" id="projects-refresh">Refresh</button></div>
+              <p class="muted" id="projects-empty">No projects yet.</p>
+              <ul class="entities" id="projects-list"></ul>
+            </article>
+            <article class="card" aria-labelledby="pdetail-t">
+              <h2 id="pdetail-t">Project detail</h2>
+              <p class="muted" id="pdetail-empty">Select a project.</p>
+              <div id="pdetail-body" hidden>
+                <dl class="kv" id="pdetail-summary"></dl>
+                <div class="tabs" role="tablist" aria-label="Project views">
+                  <button type="button" role="tab" data-proj-tab="entities" aria-selected="true">Entities</button>
+                  <button type="button" role="tab" data-proj-tab="findings" aria-selected="false">Findings</button>
+                  <button type="button" role="tab" data-proj-tab="graph" aria-selected="false">Graph</button>
+                  <button type="button" role="tab" data-proj-tab="timeline" aria-selected="false">Timeline</button>
+                  <button type="button" role="tab" data-proj-tab="jobs" aria-selected="false">Jobs</button>
+                </div>
+                <div data-proj-panel="entities"><ul class="entities" id="p-entities"></ul></div>
+                <div data-proj-panel="findings" hidden><ul class="entities" id="p-findings"></ul></div>
+                <div data-proj-panel="graph" hidden>
+                  <label for="project-seed">Graph seed entity id</label>
+                  <input id="project-seed" type="text" value="" placeholder="select an entity first" autocomplete="off" spellcheck="false" />
+                  <div class="actions"><button type="button" id="project-graph-load">Load graph</button></div>
+                  <div class="graph-split">
+                    <svg id="p-graph" viewBox="0 0 560 320" role="img" aria-label="Project evidence graph"></svg>
+                    <aside class="inspector" aria-labelledby="p-inspect-t" aria-live="polite">
+                      <h3 id="p-inspect-t">Evidence inspector</h3>
+                      <p class="muted" id="p-inspect-empty">Select a node or relationship.</p>
+                      <dl class="kv" id="p-inspect" hidden></dl>
+                    </aside>
+                  </div>
+                  <ul class="legend" id="p-legend"></ul>
+                  <ul class="entities" id="p-edges"></ul>
+                </div>
+                <div data-proj-panel="timeline" hidden>
+                  <div class="actions"><button type="button" id="project-timeline-more">Load more</button></div>
+                  <ol class="timeline" id="p-timeline"></ol>
+                </div>
+                <div data-proj-panel="jobs" hidden><ul class="jobs" id="p-jobs"></ul></div>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <!-- JOBS -->
+        <section id="view-jobs" aria-labelledby="jobs-title" hidden>
+          <h1 id="jobs-title">Jobs</h1>
+          <p class="muted">Scans, investigations, and username searches. Cancellation reaches the real core.</p>
+          <div class="actions">
+            <button type="button" id="jobs-refresh">Refresh jobs</button>
+            <span class="check-row"><input id="jobs-auto" type="checkbox" checked /><label for="jobs-auto">Auto-refresh</label></span>
+          </div>
+          <p class="muted" id="jobs-empty">No jobs yet. Start a scan, search, or investigation.</p>
+          <div class="table-wrap">
+            <table class="findings" id="jobs-table">
+              <caption>Running jobs can be cancelled; terminal jobs can be inspected.</caption>
+              <thead><tr><th scope="col">Type</th><th scope="col">Target / entity</th><th scope="col">State</th><th scope="col">Started</th><th scope="col">Duration</th><th scope="col">Project</th><th scope="col">Actions</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <article class="card wide" id="job-detail-card" hidden aria-labelledby="detail-title">
+            <h2 id="detail-title">Job detail</h2>
+            <dl class="kv">
+              <div><dt>Job</dt><dd id="d-id">—</dd></div>
+              <div><dt>Kind</dt><dd id="d-kind">—</dd></div>
+              <div><dt>Status</dt><dd id="d-status">—</dd></div>
+              <div><dt>Progress</dt><dd id="d-progress">—</dd></div>
+              <div><dt>Project</dt><dd id="d-project">—</dd></div>
+            </dl>
+            <div class="actions">
+              <button type="button" id="detail-cancel">Cancel job</button>
+              <button type="button" id="detail-refresh">Refresh</button>
+              <button type="button" id="detail-open">Open in workflow</button>
+            </div>
+            <h3>Events</h3>
+            <ol class="events" id="d-events"></ol>
+            <h3>Result</h3>
+            <pre class="result" id="d-result">—</pre>
+          </article>
+        </section>
+      </main>
+    </div>
+
+    <footer class="statusbar" aria-label="Status">
+      <span id="status-left">RXScan local GUI</span>
+      <span id="status-job">no active job</span>
+      <span id="status-warn">no warnings</span>
+    </footer>
+
+    <script src="/app/rxscan.js"></script>
+  </body>
+</html>

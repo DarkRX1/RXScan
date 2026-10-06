@@ -33,7 +33,7 @@ use thiserror::Error;
 use crate::graph::{EdgeRelation, EntityKind, ScanGraph};
 
 /// Current on-disk schema version. Bump with a matching `MIGRATIONS` entry.
-pub const PROJECT_DB_SCHEMA_VERSION: u32 = 3;
+pub const PROJECT_DB_SCHEMA_VERSION: u32 = 4;
 /// Scanner version stamped on every imported run (classifier provenance).
 pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -523,7 +523,49 @@ CREATE TABLE IF NOT EXISTS classifier_provenance(
 ";
 
 /// Ordered schema migrations; index+1 is the resulting version.
-const MIGRATIONS: &[&str] = &[SCHEMA_V1, SCHEMA_V2, SCHEMA_V3];
+const MIGRATIONS: &[&str] = &[SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4];
+
+/// V4: Ultimate OSINT expansion (additive only). New tables for timestamped
+/// routing observations, identity hypotheses (supporting/contradicting
+/// evidence), and historical archive snapshots. Existing tables untouched;
+/// v1-v3 databases migrate forward and remain readable.
+const SCHEMA_V4: &str = "
+CREATE TABLE IF NOT EXISTS route_observations(
+  scan_run TEXT NOT NULL,
+  prefix TEXT NOT NULL,
+  asn TEXT NOT NULL,
+  rpki TEXT NOT NULL DEFAULT 'not_checked',
+  observed_at TEXT NOT NULL DEFAULT '',
+  retrieved_at_ms INTEGER NOT NULL DEFAULT 0,
+  source TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY(scan_run, prefix, asn)
+);
+CREATE INDEX IF NOT EXISTS route_prefix ON route_observations(prefix);
+CREATE INDEX IF NOT EXISTS route_asn ON route_observations(asn);
+CREATE TABLE IF NOT EXISTS hypotheses(
+  scan_run TEXT NOT NULL,
+  hypothesis_id TEXT NOT NULL,
+  subjects_json TEXT NOT NULL DEFAULT '[]',
+  claim TEXT NOT NULL DEFAULT '',
+  assessment TEXT NOT NULL DEFAULT 'UNKNOWN',
+  supports_json TEXT NOT NULL DEFAULT '[]',
+  contradicts_json TEXT NOT NULL DEFAULT '[]',
+  explanation TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY(scan_run, hypothesis_id)
+);
+CREATE INDEX IF NOT EXISTS hypo_scan ON hypotheses(scan_run);
+CREATE TABLE IF NOT EXISTS archive_snapshots(
+  scan_run TEXT NOT NULL,
+  snapshot_id TEXT NOT NULL,
+  url TEXT NOT NULL,
+  timestamp TEXT NOT NULL DEFAULT '',
+  first_seen TEXT NOT NULL DEFAULT '',
+  last_seen TEXT NOT NULL DEFAULT '',
+  historical INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY(scan_run, snapshot_id)
+);
+CREATE INDEX IF NOT EXISTS archive_url ON archive_snapshots(url);
+";
 
 const SCHEMA_V3: &str = "
 ALTER TABLE vulnerability_candidates ADD COLUMN dataset_version TEXT NOT NULL DEFAULT '';
@@ -1038,6 +1080,92 @@ impl ProjectDb {
                 |row| row.get(0),
             )
             .map_err(ProjectDbError::from)
+    }
+
+    /// Web/API support: one entity row by id (`None` when absent).
+    pub fn entity(&self, entity_id: &str) -> Result<Option<EntityRow>, ProjectDbError> {
+        validate_id(entity_id, "entity")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT entity_id, kind, label, attributes_json, first_seen_scan,
+                    last_seen_scan, first_seen_ms, last_seen_ms, observation_count
+             FROM entities WHERE entity_id=?1",
+        )?;
+        let mut rows = stmt.query_map(params![entity_id], row_to_entity)?;
+        match rows.next() {
+            None => Ok(None),
+            Some(row) => row.map(Some).map_err(ProjectDbError::from),
+        }
+    }
+
+    /// Web/API support: bounded entity page, newest observations first.
+    /// `kind` filters by exact stored kind; `None` returns all kinds.
+    pub fn entities_page(
+        &self,
+        kind: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<EntityRow>, ProjectDbError> {
+        let limit = limit.min(500) as i64;
+        let offset = offset.min(1_000_000) as i64;
+        if let Some(kind) = kind {
+            if kind.len() > 64 || kind.is_empty() {
+                return Err(ProjectDbError::InvalidInput(
+                    "invalid entity kind".to_owned(),
+                ));
+            }
+            let mut stmt = self.conn.prepare(
+                "SELECT entity_id, kind, label, attributes_json, first_seen_scan,
+                        last_seen_scan, first_seen_ms, last_seen_ms, observation_count
+                 FROM entities WHERE kind=?1 ORDER BY last_seen_ms DESC, entity_id
+                 LIMIT ?2 OFFSET ?3",
+            )?;
+            let rows = stmt.query_map(params![kind, limit, offset], row_to_entity)?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(ProjectDbError::from)
+        } else {
+            let mut stmt = self.conn.prepare(
+                "SELECT entity_id, kind, label, attributes_json, first_seen_scan,
+                        last_seen_scan, first_seen_ms, last_seen_ms, observation_count
+                 FROM entities ORDER BY last_seen_ms DESC, entity_id
+                 LIMIT ?1 OFFSET ?2",
+            )?;
+            let rows = stmt.query_map(params![limit, offset], row_to_entity)?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(ProjectDbError::from)
+        }
+    }
+
+    /// Web/API support: bounded observation page (findings/timeline source),
+    /// newest first.
+    pub fn observations_page(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<ObservationRow>, ProjectDbError> {
+        let limit = limit.min(500) as i64;
+        let offset = offset.min(1_000_000) as i64;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, scan_run, entity_id, kind, label, attrs_json, confidence,
+                    evidence_excerpt, module, task_id, timestamp_ms
+             FROM observations ORDER BY timestamp_ms DESC, id DESC LIMIT ?1 OFFSET ?2",
+        )?;
+        let rows = stmt.query_map(params![limit, offset], row_to_observation)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(ProjectDbError::from)
+    }
+
+    /// Web/API support: `(entities, observations, relationships, runs)`.
+    pub fn counts(&self) -> Result<(u64, u64, u64, u64), ProjectDbError> {
+        let count = |sql: &str| -> Result<u64, ProjectDbError> {
+            let value: i64 = self.conn.query_row(sql, [], |row| row.get(0))?;
+            Ok(u64::try_from(value).unwrap_or(0))
+        };
+        Ok((
+            count("SELECT COUNT(*) FROM entities")?,
+            count("SELECT COUNT(*) FROM observations")?,
+            count("SELECT COUNT(*) FROM relationships")?,
+            count("SELECT COUNT(*) FROM scan_runs")?,
+        ))
     }
 
     pub fn coverage_of(&self, scan_id: &str) -> Result<CoverageSnapshot, ProjectDbError> {

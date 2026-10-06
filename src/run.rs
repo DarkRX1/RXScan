@@ -173,6 +173,27 @@ pub struct PortServiceDetail {
 /// JSONL output (scheduler events + discovery/scan/service/web assets,
 /// events, evidence, findings) + human service summary.
 pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
+    execute_impl(cli, None)
+}
+
+/// Execute a scan with an externally owned cancellation flag.
+///
+/// Additive web-API path: the CLI always calls [`execute`] (no external
+/// flag). When `external_cancel` is set, the scheduler observes it at the
+/// top of every iteration through the same machinery as Ctrl+C shutdown:
+/// workers stop promptly, already-collected evidence is preserved, and the
+/// run reports `UserCancelled` semantics instead of a generic error.
+pub fn execute_with_cancellation(
+    cli: Cli,
+    external_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<RunReport, RunError> {
+    execute_impl(cli, external_cancel)
+}
+
+fn execute_impl(
+    cli: Cli,
+    external_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<RunReport, RunError> {
     let output_path = cli.output.clone();
     let format = cli.format.clone();
     let checkpoint_path = cli.checkpoint.clone().or_else(|| cli.resume.clone());
@@ -259,6 +280,9 @@ pub fn execute(cli: Cli) -> Result<RunReport, RunError> {
         guard.clone(),
         sink.clone(),
     )?;
+    if let Some(flag) = external_cancel {
+        scheduler.link_external_cancel(flag);
+    }
     // Centralized policies (level breadth + speed pressure).
     let discovery_policy = HostDiscoveryPolicy::for_level(
         plan.level,

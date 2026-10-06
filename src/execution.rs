@@ -1260,6 +1260,12 @@ pub struct Scheduler {
     /// `ModuleContext::is_cancelled`. Fired exactly once when the
     /// deadline expires or `request_shutdown()` (Ctrl+C) is called.
     global_cancel: CancellationToken,
+    /// Optional externally owned cancellation flag (e.g. the web API job
+    /// manager). When set, the next `is_global_expired()` poll broadcasts
+    /// through `global_cancel` exactly like a Ctrl+C shutdown, so external
+    /// cancellation reaches the same worker machinery with `UserCancelled`
+    /// semantics. Never set by the CLI path.
+    external_cancel: Option<Arc<AtomicBool>>,
     /// Structured termination + truncation accounting (P6/P10).
     termination: TerminationReason,
     tasks_not_admitted: u64,
@@ -1313,6 +1319,7 @@ impl Scheduler {
             started_at,
             global_deadline,
             global_cancel: CancellationToken::default(),
+            external_cancel: None,
             termination: TerminationReason::Completed,
             tasks_not_admitted: 0,
             errors_by_category: BTreeMap::new(),
@@ -1341,10 +1348,17 @@ impl Scheduler {
         }
         // Hard deadline is also an admission gate: once expired, no new
         // tasks are admitted (counted as not-admitted for the report).
+        // `is_global_expired` already broadcasts external cancellation
+        // through `global_cancel`, so a linked API cancel reads back as
+        // `UserCancelled` here instead of a misleading deadline verdict.
         if self.is_global_expired() {
             self.tasks_not_admitted += 1;
             if self.termination == TerminationReason::Completed {
-                self.termination = TerminationReason::GlobalDeadline;
+                self.termination = if self.global_cancel.is_cancelled() {
+                    TerminationReason::UserCancelled
+                } else {
+                    TerminationReason::GlobalDeadline
+                };
             }
             return Err(SchedulerError::BudgetExhausted("global deadline"));
         }
@@ -1481,7 +1495,26 @@ impl Scheduler {
         self.global_deadline
     }
     pub fn is_global_expired(&self) -> bool {
+        if let Some(external) = &self.external_cancel {
+            if external.load(AtomicOrdering::Acquire) {
+                // Broadcast through the authoritative token so workers
+                // observe external cancellation via the same machinery as
+                // Ctrl+C, and `shutdown_for_deadline` reports
+                // `UserCancelled` (cancel arrived before the deadline).
+                self.global_cancel.cancel();
+                return true;
+            }
+        }
         Instant::now() >= self.global_deadline || self.global_cancel.is_cancelled()
+    }
+    /// Link an externally owned cancellation flag (web API job manager).
+    ///
+    /// Additive only: the CLI never calls this. The flag is polled at the
+    /// top of every scheduler iteration through [`Self::is_global_expired`],
+    /// so cancellation reaches running modules within milliseconds and
+    /// already-collected evidence is preserved by the normal drain path.
+    pub fn link_external_cancel(&mut self, flag: Arc<AtomicBool>) {
+        self.external_cancel = Some(flag);
     }
     /// External shutdown (Ctrl+C / SIGINT path): stop admitting new tasks,
     /// broadcast cancellation to every active module, and let `run()` drain

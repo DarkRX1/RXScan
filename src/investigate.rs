@@ -106,14 +106,20 @@ pub const MAX_EMAILS_PER_PROFILE: usize = 5;
 // ---------------------------------------------------------------------------
 
 /// Supported investigation seed types. Username is the primary acceptance
-/// path; domain and URL seeds exist only where the transform graph cleanly
-/// supports them (no half-working input types).
+/// path; domain, URL, email, IP, ASN, repository, and organization seeds
+/// exist where the transform graph cleanly supports them (no half-working
+/// input types).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SeedKind {
     Username,
     Domain,
     Url,
+    Email,
+    Ip,
+    Asn,
+    Repository,
+    Organization,
 }
 
 impl SeedKind {
@@ -122,6 +128,27 @@ impl SeedKind {
             Self::Username => "username",
             Self::Domain => "domain",
             Self::Url => "url",
+            Self::Email => "email",
+            Self::Ip => "ip",
+            Self::Asn => "asn",
+            Self::Repository => "repository",
+            Self::Organization => "organization",
+        }
+    }
+
+    /// Parse a seed-kind token (`username`, `domain`, ...). `None` for
+    /// unknown input (callers report usage, never default).
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "username" => Some(Self::Username),
+            "domain" => Some(Self::Domain),
+            "url" => Some(Self::Url),
+            "email" => Some(Self::Email),
+            "ip" | "ip_address" => Some(Self::Ip),
+            "asn" => Some(Self::Asn),
+            "repo" | "repository" => Some(Self::Repository),
+            "org" | "organization" => Some(Self::Organization),
+            _ => None,
         }
     }
 }
@@ -165,6 +192,13 @@ pub struct InvestigationConfig {
     /// Pivot contact backend. `None` selects the production bounded TCP
     /// connect prober; tests inject deterministic fixtures.
     pub pivot: Option<std::sync::Arc<dyn NetworkPivot>>,
+    /// Optional passive provider backends. `None` means unavailable:
+    /// transforms record `provider_unavailable` honestly. Tests inject
+    /// deterministic fixtures; production wires configured providers.
+    pub rdap: Option<std::sync::Arc<dyn RdapFetcher>>,
+    pub ct: Option<std::sync::Arc<dyn CtFetcher>>,
+    pub archive: Option<std::sync::Arc<dyn ArchiveFetcher>>,
+    pub repo: Option<std::sync::Arc<dyn RepoFetcher>>,
 }
 
 impl InvestigationConfig {
@@ -195,6 +229,10 @@ impl InvestigationConfig {
             scope_exclusions: Vec::new(),
             max_network_pivots: DEFAULT_MAX_NETWORK_PIVOTS,
             pivot: None,
+            rdap: None,
+            ct: None,
+            archive: None,
+            repo: None,
         }
     }
 
@@ -252,6 +290,25 @@ impl InvestigationConfig {
             SeedKind::Url => {
                 canonical_url_entity(&self.seed_value)
                     .ok_or_else(|| "invalid URL seed (need http/https with host)".to_owned())?;
+            }
+            SeedKind::Email => {
+                crate::search::SearchEntity::email(&self.seed_value, 0)
+                    .map_err(|e| e.to_string())?;
+            }
+            SeedKind::Ip => {
+                crate::search::SearchEntity::ip_address(&self.seed_value, 0)
+                    .map_err(|e| e.to_string())?;
+            }
+            SeedKind::Asn => {
+                crate::search::SearchEntity::asn(&self.seed_value, 0).map_err(|e| e.to_string())?;
+            }
+            SeedKind::Repository => {
+                crate::search::SearchEntity::repository(&self.seed_value, 0)
+                    .map_err(|e| e.to_string())?;
+            }
+            SeedKind::Organization => {
+                crate::search::SearchEntity::organization(&self.seed_value, 0)
+                    .map_err(|e| e.to_string())?;
             }
         }
         Ok(())
@@ -343,6 +400,47 @@ pub fn canonical_domain(raw: &str) -> Option<String> {
 /// callers preserve the observation as text but skip entity joins.
 pub fn canonical_url_entity(raw: &str) -> Option<String> {
     crate::graph::canonical_url(raw)
+}
+
+/// Parse an MX value (`10 mail.example.test.` or bare hostname) into
+/// `(exchange, preference)`. Preference is `None` when absent or
+/// non-numeric; the exchange is always the raw value trimmed.
+pub fn parse_mx_exchange(value: &str) -> (String, Option<u16>) {
+    let trimmed = value.trim();
+    let mut parts = trimmed.split_whitespace();
+    let first = parts.next().unwrap_or("");
+    let second = parts.next();
+    // `10 mail.example.test.` form with no extra tokens.
+    if let (Some(exchange), None) = (second, parts.next()) {
+        if let Ok(pref) = first.parse::<u16>() {
+            if !exchange.is_empty() {
+                return (exchange.to_owned(), Some(pref));
+            }
+        }
+    }
+    (trimmed.to_owned(), None)
+}
+
+/// TXT starts an SPF record (`v=spf1 ...`, case-insensitive, leading space
+/// tolerated). Conservative: prefix match only, never substring search.
+pub fn is_spf_record(value: &str) -> bool {
+    value
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("v=spf1")
+}
+
+/// DMARC when the owner is `_dmarc.*` or the value starts `v=DMARC1`.
+pub fn is_dmarc_record(owner: &str, value: &str) -> bool {
+    owner
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
+        .starts_with("_dmarc.")
+        || value
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("v=dmarc1")
 }
 
 // ---------------------------------------------------------------------------
@@ -567,6 +665,99 @@ pub trait DnsFetcher: Send + Sync {
     ) -> Result<Vec<String>, String>;
 }
 
+/// Bounded RDAP lookup (domain / IP / ASN / prefix). Production uses
+/// configured public RDAP endpoints; fixtures inject deterministic JSON.
+/// Redaction is respected: missing/redacted fields are `None`, never
+/// fabricated. External queries never activate silently beyond the
+/// transform that owns them.
+pub trait RdapFetcher: Send + Sync + std::fmt::Debug {
+    fn fetch(
+        &self,
+        target: &str,
+        kind: &str,
+        deadline: Instant,
+        cancelled: &AtomicBool,
+    ) -> Result<serde_json::Value, String>;
+}
+
+/// Bounded Certificate Transparency lookup (domain -> certificates).
+/// Production uses a configured public CT index; fixtures inject
+/// deterministic JSON. Wildcards are observations, never expanded.
+pub trait CtFetcher: Send + Sync + std::fmt::Debug {
+    fn fetch(
+        &self,
+        domain: &str,
+        deadline: Instant,
+        cancelled: &AtomicBool,
+    ) -> Result<serde_json::Value, String>;
+}
+
+/// Bounded public archive lookup (URL -> snapshots). Historical only:
+/// snapshots are never rendered as live endpoints. Fixtures inject
+/// deterministic JSON; live integration requires a configured legitimate
+/// archive/index source.
+pub trait ArchiveFetcher: Send + Sync + std::fmt::Debug {
+    fn fetch(
+        &self,
+        url: &str,
+        deadline: Instant,
+        cancelled: &AtomicBool,
+    ) -> Result<serde_json::Value, String>;
+}
+
+/// Bounded public repository metadata (owner/name -> metadata). Nothing
+/// is cloned; no history scraped. Fixtures inject deterministic JSON.
+pub trait RepoFetcher: Send + Sync + std::fmt::Debug {
+    fn fetch(
+        &self,
+        owner: &str,
+        name: &str,
+        deadline: Instant,
+        cancelled: &AtomicBool,
+    ) -> Result<serde_json::Value, String>;
+}
+
+/// RDAP/CT/archive/repo unavailable: default when no provider is
+/// configured. Transforms record `provider_unavailable`, never error.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UnavailableFetcher;
+
+impl RdapFetcher for UnavailableFetcher {
+    fn fetch(
+        &self,
+        _: &str,
+        _: &str,
+        _: Instant,
+        _: &AtomicBool,
+    ) -> Result<serde_json::Value, String> {
+        Err("provider unavailable: no RDAP provider configured".to_owned())
+    }
+}
+
+impl CtFetcher for UnavailableFetcher {
+    fn fetch(&self, _: &str, _: Instant, _: &AtomicBool) -> Result<serde_json::Value, String> {
+        Err("provider unavailable: no CT provider configured".to_owned())
+    }
+}
+
+impl ArchiveFetcher for UnavailableFetcher {
+    fn fetch(&self, _: &str, _: Instant, _: &AtomicBool) -> Result<serde_json::Value, String> {
+        Err("provider unavailable: no archive provider configured".to_owned())
+    }
+}
+
+impl RepoFetcher for UnavailableFetcher {
+    fn fetch(
+        &self,
+        _: &str,
+        _: &str,
+        _: Instant,
+        _: &AtomicBool,
+    ) -> Result<serde_json::Value, String> {
+        Err("provider unavailable: no repository provider configured".to_owned())
+    }
+}
+
 /// Bounded direct-network pivot backend (Stage 6). Called at most once
 /// per in-scope IP, only when the operator passed `--network` with an
 /// explicit valid scope. Returns per-port reachability for the fixed
@@ -669,6 +860,10 @@ pub struct TransformContext<'a> {
     pub search: &'a dyn UsernameSearchRunner,
     pub profile: &'a dyn ProfileFetcher,
     pub dns: &'a dyn DnsFetcher,
+    pub rdap: &'a dyn RdapFetcher,
+    pub ct: &'a dyn CtFetcher,
+    pub archive: &'a dyn ArchiveFetcher,
+    pub repo: &'a dyn RepoFetcher,
 }
 
 /// Internal transform abstraction. Kept internal on purpose: no public
@@ -1417,7 +1612,15 @@ impl Transform for DomainToDns {
                     // MX/NS/CNAME/SRV values that are hostnames become
                     // Hostname entities (recorded, never re-expanded: no
                     // recursive namespace enumeration in this phase).
-                    let clean = value.trim_end_matches('.').to_ascii_lowercase();
+                    // MX carries a preference (`10 mail.example.test.`);
+                    // only the exchange is an entity, preference is an
+                    // attribute. TXT SPF/DMARC stays a DnsRecord with
+                    // parsed flags (never a hostname).
+                    let (host_text, mx_pref) = match *rtype {
+                        "MX" => parse_mx_exchange(&value),
+                        _ => (value.clone(), None),
+                    };
+                    let clean = host_text.trim_end_matches('.').to_ascii_lowercase();
                     let host_id = crate::graph::hostname_entity_id(&clean);
                     let provenance = TransformProvenance {
                         source_entity: Some(entity.id.clone()),
@@ -1429,17 +1632,41 @@ impl Transform for DomainToDns {
                         confidence: 80,
                         depth: entity.depth.saturating_add(self.depth_cost()),
                     };
-                    // Hostname observation for mail/name-server targets.
-                    if clean.contains('.') && clean.parse::<std::net::IpAddr>().is_err() {
+                    // Specific relation per record type; DnsRecord edge
+                    // below stays generic References (HAS_RECORD).
+                    let specific = match *rtype {
+                        "MX" => Some(EdgeRelation::MailExchanger),
+                        "NS" => Some(EdgeRelation::NameServerFor),
+                        "CNAME" => Some(EdgeRelation::AliasOf),
+                        _ => None,
+                    };
+                    // Hostname observation for mail/name-server/alias
+                    // targets. TXT/SRV raw values are not hostnames here:
+                    // TXT is parsed below, SRV targets are recorded only
+                    // when they look like hostnames.
+                    let want_host = match *rtype {
+                        "MX" | "NS" | "CNAME" => true,
+                        "SRV" => clean.contains('.') && clean.parse::<std::net::IpAddr>().is_err(),
+                        _ => false,
+                    };
+                    if want_host
+                        && clean.contains('.')
+                        && clean.parse::<std::net::IpAddr>().is_err()
+                        && crate::search::canonical_hostname_value(&clean).is_some()
+                    {
+                        let mut host_attrs = BTreeMap::from([
+                            ("name".to_owned(), clean.clone()),
+                            ("record_type".to_owned(), (*rtype).to_owned()),
+                        ]);
+                        if let Some(pref) = mx_pref {
+                            host_attrs.insert("mx_preference".to_owned(), pref.to_string());
+                        }
                         out.entities.push(InvestigationEntity {
                             id: host_id.clone(),
                             kind: EntityKind::Hostname,
                             label: clean.clone(),
                             canonical_value: clean.clone(),
-                            attributes: BTreeMap::from([
-                                ("name".to_owned(), clean.clone()),
-                                ("record_type".to_owned(), (*rtype).to_owned()),
-                            ]),
+                            attributes: host_attrs,
                             depth: entity.depth.saturating_add(self.depth_cost()),
                             provenance: provenance.clone(),
                             observations: 1,
@@ -1447,7 +1674,7 @@ impl Transform for DomainToDns {
                         out.relationships.push(InvestigationRelationship {
                             from: entity.id.clone(),
                             to: host_id.clone(),
-                            relation: EdgeRelation::References,
+                            relation: specific.unwrap_or(EdgeRelation::References),
                             confidence: 80,
                             provenance: provenance.clone(),
                             evidence: vec![format!("DNS {rtype} {domain}: {value}")],
@@ -1459,6 +1686,22 @@ impl Transform for DomainToDns {
                     }
                     // The raw record itself is always a DnsRecord entity.
                     let record_id = crate::graph::dns_record_entity_id(rtype, &domain, &value);
+                    let mut record_attrs = BTreeMap::from([
+                        ("record_type".to_owned(), (*rtype).to_owned()),
+                        ("name".to_owned(), domain.clone()),
+                        ("value".to_owned(), value.clone()),
+                    ]);
+                    if *rtype == "TXT" {
+                        if is_spf_record(&value) {
+                            record_attrs.insert("spf".to_owned(), "true".to_owned());
+                        }
+                        if is_dmarc_record(&domain, &value) {
+                            record_attrs.insert("dmarc".to_owned(), "true".to_owned());
+                        }
+                    }
+                    if let Some(pref) = mx_pref {
+                        record_attrs.insert("mx_preference".to_owned(), pref.to_string());
+                    }
                     out.entities.push(InvestigationEntity {
                         id: record_id.clone(),
                         kind: EntityKind::DnsRecord,
@@ -1469,11 +1712,7 @@ impl Transform for DomainToDns {
                             domain.to_ascii_lowercase(),
                             value.to_ascii_lowercase()
                         ),
-                        attributes: BTreeMap::from([
-                            ("record_type".to_owned(), (*rtype).to_owned()),
-                            ("name".to_owned(), domain.clone()),
-                            ("value".to_owned(), value.clone()),
-                        ]),
+                        attributes: record_attrs,
                         depth: entity.depth.saturating_add(self.depth_cost()),
                         provenance: provenance.clone(),
                         observations: 1,
@@ -1506,6 +1745,1561 @@ impl Transform for DomainToDns {
     }
 }
 
+// --- Transform: Email -> Mail infrastructure (DNS MX/TXT, conservative) ---
+
+pub struct EmailToMailInfra;
+
+impl Transform for EmailToMailInfra {
+    fn id(&self) -> &'static str {
+        "email_to_mail_infra"
+    }
+    fn accepts(&self, kind: EntityKind) -> bool {
+        kind == EntityKind::EmailAddress
+    }
+    fn contact_class(&self) -> ContactClass {
+        ContactClass::DnsQuery
+    }
+    fn depth_cost(&self) -> u8 {
+        1
+    }
+    fn budget_class(&self) -> BudgetClass {
+        BudgetClass::Dns
+    }
+    fn describe(&self) -> &'static str {
+        "Email -> mail infrastructure via DNS MX/TXT (SPF/DMARC as DnsRecord flags; local-part stays a weak hint)"
+    }
+    fn execute(
+        &self,
+        ctx: &TransformContext<'_>,
+        entity: &InvestigationEntity,
+    ) -> Result<TransformOutput, String> {
+        if entity.kind != EntityKind::EmailAddress {
+            return Err("email_to_mail_infra requires an email entity".to_owned());
+        }
+        // Email canonical is `local@domain`; domain is authoritative.
+        let email = entity.canonical_value.clone();
+        let domain = email
+            .split_once('@')
+            .map(|(_, d)| d.trim().trim_end_matches('.').to_ascii_lowercase())
+            .unwrap_or_default();
+        let Some(domain_canon) = canonical_domain(&domain) else {
+            return Ok(TransformOutput {
+                observations: vec![observation(
+                    self.id(),
+                    entity,
+                    ContactClass::DnsQuery,
+                    "unscanned",
+                    0,
+                    ctx.now,
+                    vec!["email domain is not a public domain".to_owned()],
+                )],
+                ..TransformOutput::default()
+            });
+        };
+        let mut out = TransformOutput::default();
+        // Email -> Domain (derived, strong: parsing, not probing).
+        let domain_id = domain_entity_id(&domain_canon);
+        let domain_prov = TransformProvenance {
+            source_entity: Some(entity.id.clone()),
+            transform_id: self.id().to_owned(),
+            provider: None,
+            contact_class: ContactClass::PassivePublic,
+            timestamp: ctx.now,
+            evidence: vec![format!("email domain is {domain_canon}")],
+            confidence: 95,
+            depth: entity.depth.saturating_add(self.depth_cost()),
+        };
+        out.entities.push(InvestigationEntity {
+            id: domain_id.clone(),
+            kind: EntityKind::Domain,
+            label: domain_canon.clone(),
+            canonical_value: domain_canon.clone(),
+            attributes: BTreeMap::from([("domain".to_owned(), domain_canon.clone())]),
+            depth: entity.depth.saturating_add(self.depth_cost()),
+            provenance: domain_prov.clone(),
+            observations: 1,
+        });
+        out.relationships.push(InvestigationRelationship {
+            from: entity.id.clone(),
+            to: domain_id.clone(),
+            relation: EdgeRelation::References,
+            confidence: 95,
+            provenance: domain_prov,
+            evidence: vec![format!("email domain is {domain_canon}")],
+            attributes: BTreeMap::from([("observation_class".to_owned(), "derived".to_owned())]),
+        });
+        // MX + TXT via bounded DNS. Each query counts; failures are
+        // honest observations, never negative evidence.
+        for rtype in ["MX", "TXT"] {
+            if ctx.cancelled.load(Ordering::Acquire) || Instant::now() >= ctx.deadline {
+                break;
+            }
+            let values = match ctx
+                .dns
+                .query(&domain_canon, rtype, ctx.deadline, ctx.cancelled)
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    out.observations.push(observation(
+                        self.id(),
+                        entity,
+                        ContactClass::DnsQuery,
+                        "error",
+                        0,
+                        ctx.now,
+                        vec![format!("DNS {rtype} {domain_canon}: {}", truncate(&e, 120))],
+                    ));
+                    continue;
+                }
+            };
+            out.dns_used += 1;
+            if values.is_empty() {
+                out.observations.push(observation(
+                    self.id(),
+                    entity,
+                    ContactClass::DnsQuery,
+                    "no_data",
+                    0,
+                    ctx.now,
+                    vec![format!("DNS {rtype} {domain_canon}: no data")],
+                ));
+                continue;
+            }
+            for value in values.into_iter().take(8) {
+                let value = value.trim().to_owned();
+                if value.is_empty() || value.len() > 512 {
+                    continue;
+                }
+                if rtype == "MX" {
+                    let (exchange, pref) = parse_mx_exchange(&value);
+                    let clean = exchange.trim_end_matches('.').to_ascii_lowercase();
+                    if clean.contains('.')
+                        && clean.parse::<std::net::IpAddr>().is_err()
+                        && crate::search::canonical_hostname_value(&clean).is_some()
+                    {
+                        let host_id = crate::graph::hostname_entity_id(&clean);
+                        let prov = TransformProvenance {
+                            source_entity: Some(domain_id.clone()),
+                            transform_id: self.id().to_owned(),
+                            provider: Some("dns:MX".to_owned()),
+                            contact_class: ContactClass::DnsQuery,
+                            timestamp: ctx.now,
+                            evidence: vec![format!("DNS MX {domain_canon}: {value}")],
+                            confidence: 80,
+                            depth: entity.depth.saturating_add(self.depth_cost()),
+                        };
+                        let mut attrs = BTreeMap::from([
+                            ("name".to_owned(), clean.clone()),
+                            ("record_type".to_owned(), "MX".to_owned()),
+                        ]);
+                        if let Some(p) = pref {
+                            attrs.insert("mx_preference".to_owned(), p.to_string());
+                        }
+                        out.entities.push(InvestigationEntity {
+                            id: host_id.clone(),
+                            kind: EntityKind::Hostname,
+                            label: clean.clone(),
+                            canonical_value: clean,
+                            attributes: attrs,
+                            depth: entity.depth.saturating_add(self.depth_cost()),
+                            provenance: prov.clone(),
+                            observations: 1,
+                        });
+                        out.relationships.push(InvestigationRelationship {
+                            from: domain_id.clone(),
+                            to: host_id,
+                            relation: EdgeRelation::MailExchanger,
+                            confidence: 80,
+                            provenance: prov,
+                            evidence: vec![format!("DNS MX {domain_canon}: {value}")],
+                            attributes: BTreeMap::from([(
+                                "record_type".to_owned(),
+                                "MX".to_owned(),
+                            )]),
+                        });
+                    }
+                }
+                // Raw TXT (SPF/DMARC flags) always a DnsRecord.
+                if rtype == "TXT" {
+                    let record_id =
+                        crate::graph::dns_record_entity_id(rtype, &domain_canon, &value);
+                    let mut attrs = BTreeMap::from([
+                        ("record_type".to_owned(), "TXT".to_owned()),
+                        ("name".to_owned(), domain_canon.clone()),
+                        ("value".to_owned(), value.clone()),
+                    ]);
+                    if is_spf_record(&value) {
+                        attrs.insert("spf".to_owned(), "true".to_owned());
+                    }
+                    if is_dmarc_record(&domain_canon, &value) {
+                        attrs.insert("dmarc".to_owned(), "true".to_owned());
+                    }
+                    let prov = TransformProvenance {
+                        source_entity: Some(domain_id.clone()),
+                        transform_id: self.id().to_owned(),
+                        provider: Some("dns:TXT".to_owned()),
+                        contact_class: ContactClass::DnsQuery,
+                        timestamp: ctx.now,
+                        evidence: vec![format!(
+                            "DNS TXT {domain_canon}: {}",
+                            truncate(&value, 120)
+                        )],
+                        confidence: 75,
+                        depth: entity.depth.saturating_add(self.depth_cost()),
+                    };
+                    out.entities.push(InvestigationEntity {
+                        id: record_id.clone(),
+                        kind: EntityKind::DnsRecord,
+                        label: format!("TXT {domain_canon}"),
+                        canonical_value: format!(
+                            "TXT:{}:{}",
+                            domain_canon.to_ascii_lowercase(),
+                            value.to_ascii_lowercase()
+                        ),
+                        attributes: attrs,
+                        depth: entity.depth.saturating_add(self.depth_cost()),
+                        provenance: prov.clone(),
+                        observations: 1,
+                    });
+                    out.relationships.push(InvestigationRelationship {
+                        from: domain_id.clone(),
+                        to: record_id,
+                        relation: EdgeRelation::References,
+                        confidence: 75,
+                        provenance: prov,
+                        evidence: vec!["DNS TXT record observed".to_owned()],
+                        attributes: BTreeMap::from([("record_type".to_owned(), "TXT".to_owned())]),
+                    });
+                }
+            }
+            out.observations.push(observation(
+                self.id(),
+                entity,
+                ContactClass::DnsQuery,
+                "resolved",
+                75,
+                ctx.now,
+                vec![format!("DNS {rtype} {domain_canon} queried")],
+            ));
+        }
+        Ok(out)
+    }
+}
+
+// --- Transform: IP -> PTR (reverse DNS, contextually appropriate) ---
+
+pub struct IpToPtr;
+
+impl Transform for IpToPtr {
+    fn id(&self) -> &'static str {
+        "ip_to_ptr"
+    }
+    fn accepts(&self, kind: EntityKind) -> bool {
+        kind == EntityKind::IpAddress
+    }
+    fn contact_class(&self) -> ContactClass {
+        ContactClass::DnsQuery
+    }
+    fn depth_cost(&self) -> u8 {
+        1
+    }
+    fn budget_class(&self) -> BudgetClass {
+        BudgetClass::Dns
+    }
+    fn describe(&self) -> &'static str {
+        "IP -> Hostname via reverse DNS (PTR where contextually appropriate; never a scan)"
+    }
+    fn execute(
+        &self,
+        ctx: &TransformContext<'_>,
+        entity: &InvestigationEntity,
+    ) -> Result<TransformOutput, String> {
+        if entity.kind != EntityKind::IpAddress {
+            return Err("ip_to_ptr requires an IP entity".to_owned());
+        }
+        let ip: std::net::IpAddr = entity
+            .canonical_value
+            .parse()
+            .map_err(|_| "ip_to_ptr requires a valid IP literal".to_owned())?;
+        let reverse = crate::dns::ptr_query_name(ip);
+        let mut out = TransformOutput::default();
+        let values = match ctx.dns.query(&reverse, "PTR", ctx.deadline, ctx.cancelled) {
+            Ok(v) => v,
+            Err(e) => {
+                out.observations.push(observation(
+                    self.id(),
+                    entity,
+                    ContactClass::DnsQuery,
+                    "error",
+                    0,
+                    ctx.now,
+                    vec![format!("DNS PTR {ip}: {}", truncate(&e, 120))],
+                ));
+                return Ok(out);
+            }
+        };
+        out.dns_used += 1;
+        if values.is_empty() {
+            out.observations.push(observation(
+                self.id(),
+                entity,
+                ContactClass::DnsQuery,
+                "no_data",
+                0,
+                ctx.now,
+                vec![format!("DNS PTR {ip}: no data")],
+            ));
+            return Ok(out);
+        }
+        for value in values.into_iter().take(8) {
+            let clean = value.trim().trim_end_matches('.').to_ascii_lowercase();
+            if clean.is_empty()
+                || clean.len() > 253
+                || crate::search::canonical_hostname_value(&clean).is_none()
+            {
+                continue;
+            }
+            let host_id = crate::graph::hostname_entity_id(&clean);
+            let prov = TransformProvenance {
+                source_entity: Some(entity.id.clone()),
+                transform_id: self.id().to_owned(),
+                provider: Some("dns:PTR".to_owned()),
+                contact_class: ContactClass::DnsQuery,
+                timestamp: ctx.now,
+                evidence: vec![format!("DNS PTR {ip} -> {clean}")],
+                confidence: 75,
+                depth: entity.depth.saturating_add(self.depth_cost()),
+            };
+            out.entities.push(InvestigationEntity {
+                id: host_id.clone(),
+                kind: EntityKind::Hostname,
+                label: clean.clone(),
+                canonical_value: clean.clone(),
+                attributes: BTreeMap::from([("name".to_owned(), clean.clone())]),
+                depth: entity.depth.saturating_add(self.depth_cost()),
+                provenance: prov.clone(),
+                observations: 1,
+            });
+            out.relationships.push(InvestigationRelationship {
+                from: entity.id.clone(),
+                to: host_id,
+                relation: EdgeRelation::ReverseResolvesTo,
+                confidence: 75,
+                provenance: prov,
+                evidence: vec![format!("DNS PTR {ip} -> {clean}")],
+                attributes: BTreeMap::from([("record_type".to_owned(), "PTR".to_owned())]),
+            });
+        }
+        out.observations.push(observation(
+            self.id(),
+            entity,
+            ContactClass::DnsQuery,
+            "resolved",
+            75,
+            ctx.now,
+            vec![format!("DNS PTR {ip} queried")],
+        ));
+        Ok(out)
+    }
+}
+
+// --- RDAP transforms (domain / IP / ASN, redaction-aware) ---
+
+fn rdap_status_for_error(message: &str) -> &'static str {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("cancelled") {
+        "cancelled"
+    } else if lower.contains("deadline") || lower.contains("timeout") {
+        "deadline_exceeded"
+    } else if lower.contains("rate_limited") || lower.contains("429") {
+        "rate_limited"
+    } else if lower.contains("blocked") || lower.contains("403") {
+        "blocked"
+    } else if lower.contains("auth") || lower.contains("401") {
+        "auth_required"
+    } else if lower.contains("not found") || lower.contains("404") {
+        "not_found"
+    } else if lower.contains("unavailable") || lower.contains("no fixture") {
+        "provider_unavailable"
+    } else if lower.contains("malformed") {
+        "malformed_response"
+    } else {
+        "error"
+    }
+}
+
+fn rdap_org_relation(roles: &[String]) -> (EdgeRelation, u8) {
+    // Registrar / technical / administrative are observed associations;
+    // registrant with a public name is likely (still not ownership).
+    // Ownership is never emitted from RDAP alone.
+    if roles.iter().any(|r| r == "registrant") {
+        (EdgeRelation::LikelyAssociation, 65)
+    } else if roles.iter().any(|r| r == "registrar") {
+        (EdgeRelation::ObservedAssociation, 60)
+    } else {
+        (EdgeRelation::ObservedAssociation, 55)
+    }
+}
+
+fn emit_rdap_common(
+    out: &mut TransformOutput,
+    entity: &InvestigationEntity,
+    transform_id: &str,
+    summary: &crate::rdap::RdapSummary,
+    now: u64,
+    depth: u8,
+) {
+    // Nameservers -> Hostname + NameServerFor.
+    for ns in summary.nameservers.iter().take(8) {
+        let host_id = crate::graph::hostname_entity_id(ns);
+        let prov = TransformProvenance {
+            source_entity: Some(entity.id.clone()),
+            transform_id: transform_id.to_owned(),
+            provider: Some("rdap".to_owned()),
+            contact_class: ContactClass::PublicHttp,
+            timestamp: now,
+            evidence: vec![format!("RDAP nameserver {ns}")],
+            confidence: 75,
+            depth,
+        };
+        out.entities.push(InvestigationEntity {
+            id: host_id.clone(),
+            kind: EntityKind::Hostname,
+            label: ns.clone(),
+            canonical_value: ns.clone(),
+            attributes: BTreeMap::from([("name".to_owned(), ns.clone())]),
+            depth,
+            provenance: prov.clone(),
+            observations: 1,
+        });
+        out.relationships.push(InvestigationRelationship {
+            from: entity.id.clone(),
+            to: host_id,
+            relation: EdgeRelation::NameServerFor,
+            confidence: 75,
+            provenance: prov,
+            evidence: vec![format!("RDAP nameserver {ns}")],
+            attributes: BTreeMap::from([("source".to_owned(), "rdap".to_owned())]),
+        });
+    }
+    // Entity refs -> Organization (role-preserving, redaction-aware).
+    for eref in summary.entities.iter().take(8) {
+        let Some(name) = eref.public_name.clone() else {
+            continue;
+        };
+        let clean = name.trim().to_owned();
+        if clean.is_empty() || clean.len() > 128 {
+            continue;
+        }
+        let org_id = organization_entity_id(&clean);
+        let (relation, confidence) = rdap_org_relation(&eref.roles);
+        let mut attrs = BTreeMap::from([("name".to_owned(), clean.clone())]);
+        if !eref.roles.is_empty() {
+            attrs.insert("rdap_roles".to_owned(), eref.roles.join(","));
+        }
+        if let Some(handle) = eref.handle.clone() {
+            attrs.insert("rdap_handle".to_owned(), truncate(&handle, 64));
+        }
+        let prov = TransformProvenance {
+            source_entity: Some(entity.id.clone()),
+            transform_id: transform_id.to_owned(),
+            provider: Some("rdap".to_owned()),
+            contact_class: ContactClass::PublicHttp,
+            timestamp: now,
+            evidence: vec![format!(
+                "RDAP entity {} ({})",
+                clean,
+                if eref.roles.is_empty() {
+                    "association".to_owned()
+                } else {
+                    eref.roles.join(",")
+                }
+            )],
+            confidence,
+            depth,
+        };
+        out.entities.push(InvestigationEntity {
+            id: org_id.clone(),
+            kind: EntityKind::Organization,
+            label: clean.clone(),
+            canonical_value: clean.to_ascii_lowercase(),
+            attributes: attrs,
+            depth,
+            provenance: prov.clone(),
+            observations: 1,
+        });
+        out.relationships.push(InvestigationRelationship {
+            from: entity.id.clone(),
+            to: org_id,
+            relation,
+            confidence,
+            provenance: prov,
+            evidence: vec![format!("RDAP entity {clean}")],
+            attributes: BTreeMap::from([("source".to_owned(), "rdap".to_owned())]),
+        });
+    }
+}
+
+pub struct DomainToRdap;
+
+impl Transform for DomainToRdap {
+    fn id(&self) -> &'static str {
+        "domain_to_rdap"
+    }
+    fn accepts(&self, kind: EntityKind) -> bool {
+        kind == EntityKind::Domain
+    }
+    fn contact_class(&self) -> ContactClass {
+        ContactClass::PublicHttp
+    }
+    fn depth_cost(&self) -> u8 {
+        1
+    }
+    fn budget_class(&self) -> BudgetClass {
+        BudgetClass::PublicHttp
+    }
+    fn describe(&self) -> &'static str {
+        "Domain -> RDAP registration/nameserver/organization (redaction-aware; never ownership)"
+    }
+    fn execute(
+        &self,
+        ctx: &TransformContext<'_>,
+        entity: &InvestigationEntity,
+    ) -> Result<TransformOutput, String> {
+        if entity.kind != EntityKind::Domain {
+            return Err("domain_to_rdap requires a domain entity".to_owned());
+        }
+        let domain = entity.canonical_value.clone();
+        let mut out = TransformOutput::default();
+        let value = match ctx
+            .rdap
+            .fetch(&domain, "domain", ctx.deadline, ctx.cancelled)
+        {
+            Ok(v) => v,
+            Err(e) => {
+                out.observations.push(observation(
+                    self.id(),
+                    entity,
+                    ContactClass::PublicHttp,
+                    rdap_status_for_error(&e),
+                    0,
+                    ctx.now,
+                    vec![format!("RDAP domain {domain}: {}", truncate(&e, 160))],
+                ));
+                return Ok(out);
+            }
+        };
+        out.http_used += 1;
+        let summary = match crate::rdap::parse_rdap(&value) {
+            Ok(s) => s,
+            Err(e) => {
+                out.observations.push(observation(
+                    self.id(),
+                    entity,
+                    ContactClass::PublicHttp,
+                    "malformed_response",
+                    0,
+                    ctx.now,
+                    vec![truncate(&e, 160)],
+                ));
+                return Ok(out);
+            }
+        };
+        let depth = entity.depth.saturating_add(self.depth_cost());
+        emit_rdap_common(&mut out, entity, self.id(), &summary, ctx.now, depth);
+        // Registration timestamps preserved as observation evidence
+        // (never replaced by retrieval time).
+        let mut evidence = vec![format!("RDAP domain {domain} enriched")];
+        if let Some(reg) = summary.events.get("registration") {
+            evidence.push(format!("registered {reg}"));
+        }
+        if summary.redacted {
+            evidence.push("registration data redacted".to_owned());
+        }
+        out.observations.push(observation(
+            self.id(),
+            entity,
+            ContactClass::PublicHttp,
+            "enriched",
+            70,
+            ctx.now,
+            evidence,
+        ));
+        Ok(out)
+    }
+}
+
+pub struct IpToRdap;
+
+impl Transform for IpToRdap {
+    fn id(&self) -> &'static str {
+        "ip_to_rdap"
+    }
+    fn accepts(&self, kind: EntityKind) -> bool {
+        kind == EntityKind::IpAddress
+    }
+    fn contact_class(&self) -> ContactClass {
+        ContactClass::PublicHttp
+    }
+    fn depth_cost(&self) -> u8 {
+        1
+    }
+    fn budget_class(&self) -> BudgetClass {
+        BudgetClass::PublicHttp
+    }
+    fn describe(&self) -> &'static str {
+        "IP -> RDAP allocation/prefix/organization (allocation vs operation kept distinct)"
+    }
+    fn execute(
+        &self,
+        ctx: &TransformContext<'_>,
+        entity: &InvestigationEntity,
+    ) -> Result<TransformOutput, String> {
+        if entity.kind != EntityKind::IpAddress {
+            return Err("ip_to_rdap requires an IP entity".to_owned());
+        }
+        let ip = entity.canonical_value.clone();
+        if ip.parse::<std::net::IpAddr>().is_err() {
+            return Ok(TransformOutput {
+                observations: vec![observation(
+                    self.id(),
+                    entity,
+                    ContactClass::PublicHttp,
+                    "unscanned",
+                    0,
+                    ctx.now,
+                    vec!["invalid IP literal".to_owned()],
+                )],
+                ..TransformOutput::default()
+            });
+        }
+        let mut out = TransformOutput::default();
+        let value = match ctx.rdap.fetch(&ip, "ip", ctx.deadline, ctx.cancelled) {
+            Ok(v) => v,
+            Err(e) => {
+                out.observations.push(observation(
+                    self.id(),
+                    entity,
+                    ContactClass::PublicHttp,
+                    rdap_status_for_error(&e),
+                    0,
+                    ctx.now,
+                    vec![format!("RDAP ip {ip}: {}", truncate(&e, 160))],
+                ));
+                return Ok(out);
+            }
+        };
+        out.http_used += 1;
+        let summary = match crate::rdap::parse_rdap(&value) {
+            Ok(s) => s,
+            Err(e) => {
+                out.observations.push(observation(
+                    self.id(),
+                    entity,
+                    ContactClass::PublicHttp,
+                    "malformed_response",
+                    0,
+                    ctx.now,
+                    vec![truncate(&e, 160)],
+                ));
+                return Ok(out);
+            }
+        };
+        let depth = entity.depth.saturating_add(self.depth_cost());
+        // Allocation range as a NetworkPrefix entity (honest `start-end`
+        // range identity, never a fabricated CIDR).
+        if let Some(network) = summary.network.clone() {
+            if let (Some(start), Some(end)) = (network.start_address, network.end_address) {
+                let range = format!("{start}-{end}").to_ascii_lowercase();
+                if range.len() <= 128 {
+                    let prefix_id = crate::graph::prefix_entity_id(&range);
+                    let prov = TransformProvenance {
+                        source_entity: Some(entity.id.clone()),
+                        transform_id: self.id().to_owned(),
+                        provider: Some("rdap".to_owned()),
+                        contact_class: ContactClass::PublicHttp,
+                        timestamp: ctx.now,
+                        evidence: vec![format!("RDAP allocation {start}-{end}")],
+                        confidence: 75,
+                        depth,
+                    };
+                    let mut attrs = BTreeMap::from([
+                        ("start".to_owned(), start.clone()),
+                        ("end".to_owned(), end.clone()),
+                    ]);
+                    if let Some(name) = network.name {
+                        attrs.insert("name".to_owned(), truncate(&name, 128));
+                    }
+                    out.entities.push(InvestigationEntity {
+                        id: prefix_id.clone(),
+                        kind: EntityKind::NetworkPrefix,
+                        label: range.clone(),
+                        canonical_value: range,
+                        attributes: attrs,
+                        depth,
+                        provenance: prov.clone(),
+                        observations: 1,
+                    });
+                    out.relationships.push(InvestigationRelationship {
+                        from: entity.id.clone(),
+                        to: prefix_id,
+                        relation: EdgeRelation::References,
+                        confidence: 75,
+                        provenance: prov,
+                        evidence: vec![format!("RDAP allocation {start}-{end}")],
+                        attributes: BTreeMap::from([("source".to_owned(), "rdap".to_owned())]),
+                    });
+                }
+            }
+        }
+        emit_rdap_common(&mut out, entity, self.id(), &summary, ctx.now, depth);
+        out.observations.push(observation(
+            self.id(),
+            entity,
+            ContactClass::PublicHttp,
+            "enriched",
+            70,
+            ctx.now,
+            vec![format!("RDAP ip {ip} enriched")],
+        ));
+        Ok(out)
+    }
+}
+
+pub struct DomainToCt;
+
+impl Transform for DomainToCt {
+    fn id(&self) -> &'static str {
+        "domain_to_ct"
+    }
+    fn accepts(&self, kind: EntityKind) -> bool {
+        kind == EntityKind::Domain
+    }
+    fn contact_class(&self) -> ContactClass {
+        ContactClass::PublicHttp
+    }
+    fn depth_cost(&self) -> u8 {
+        1
+    }
+    fn budget_class(&self) -> BudgetClass {
+        BudgetClass::PublicHttp
+    }
+    fn describe(&self) -> &'static str {
+        "Domain -> CT certificates/hostnames (wildcards recorded, never expanded; historical preserved)"
+    }
+    fn execute(
+        &self,
+        ctx: &TransformContext<'_>,
+        entity: &InvestigationEntity,
+    ) -> Result<TransformOutput, String> {
+        if entity.kind != EntityKind::Domain {
+            return Err("domain_to_ct requires a domain entity".to_owned());
+        }
+        let domain = entity.canonical_value.clone();
+        let mut out = TransformOutput::default();
+        let value = match ctx.ct.fetch(&domain, ctx.deadline, ctx.cancelled) {
+            Ok(v) => v,
+            Err(e) => {
+                out.observations.push(observation(
+                    self.id(),
+                    entity,
+                    ContactClass::PublicHttp,
+                    rdap_status_for_error(&e),
+                    0,
+                    ctx.now,
+                    vec![format!("CT {domain}: {}", truncate(&e, 160))],
+                ));
+                return Ok(out);
+            }
+        };
+        out.http_used += 1;
+        let certs = crate::ct::parse_ct_response(&value);
+        if certs.is_empty() {
+            out.observations.push(observation(
+                self.id(),
+                entity,
+                ContactClass::PublicHttp,
+                "no_data",
+                0,
+                ctx.now,
+                vec![format!("CT {domain}: no certificates")],
+            ));
+            return Ok(out);
+        }
+        let depth = entity.depth.saturating_add(self.depth_cost());
+        for cert in certs.into_iter().take(16) {
+            let cert_id = cert.stable_id.clone();
+            let mut attrs = BTreeMap::from([("serial".to_owned(), truncate(&cert.serial, 64))]);
+            if let Some(nb) = cert.not_before.clone() {
+                attrs.insert("not_before".to_owned(), truncate(&nb, 64));
+                attrs.insert("valid_from".to_owned(), truncate(&nb, 64));
+            }
+            if let Some(na) = cert.not_after.clone() {
+                attrs.insert("not_after".to_owned(), truncate(&na, 64));
+                attrs.insert("valid_until".to_owned(), truncate(&na, 64));
+            }
+            if let Some(ts) = cert.entry_timestamp.clone() {
+                attrs.insert("observed_at".to_owned(), truncate(&ts, 64));
+            }
+            attrs.insert("direct_observation".to_owned(), "false".to_owned());
+            if !cert.wildcards.is_empty() {
+                attrs.insert(
+                    "wildcard".to_owned(),
+                    cert.wildcards.join(",").chars().take(256).collect(),
+                );
+            }
+            let prov = TransformProvenance {
+                source_entity: Some(entity.id.clone()),
+                transform_id: self.id().to_owned(),
+                provider: Some("ct".to_owned()),
+                contact_class: ContactClass::PublicHttp,
+                timestamp: ctx.now,
+                evidence: vec![format!("CT certificate for {domain}")],
+                confidence: 80,
+                depth,
+            };
+            out.entities.push(InvestigationEntity {
+                id: cert_id.clone(),
+                kind: EntityKind::Certificate,
+                label: format!("ct:{}", truncate(&cert.serial, 16)),
+                canonical_value: cert_id.clone().to_ascii_lowercase(),
+                attributes: attrs,
+                depth,
+                provenance: prov.clone(),
+                observations: 1,
+            });
+            out.relationships.push(InvestigationRelationship {
+                from: entity.id.clone(),
+                to: cert_id.clone(),
+                relation: EdgeRelation::References,
+                confidence: 75,
+                provenance: prov.clone(),
+                evidence: vec![format!("CT certificate for {domain}")],
+                attributes: BTreeMap::from([
+                    ("source".to_owned(), "ct".to_owned()),
+                    ("direct_observation".to_owned(), "false".to_owned()),
+                ]),
+            });
+            for host in cert.hostnames.into_iter().take(16) {
+                let host_id = crate::graph::hostname_entity_id(&host);
+                let hprov = TransformProvenance {
+                    source_entity: Some(cert_id.clone()),
+                    transform_id: self.id().to_owned(),
+                    provider: Some("ct".to_owned()),
+                    contact_class: ContactClass::PublicHttp,
+                    timestamp: ctx.now,
+                    evidence: vec![format!("CT SAN lists {host}")],
+                    confidence: 75,
+                    depth,
+                };
+                out.entities.push(InvestigationEntity {
+                    id: host_id.clone(),
+                    kind: EntityKind::Hostname,
+                    label: host.clone(),
+                    canonical_value: host.clone(),
+                    attributes: BTreeMap::from([
+                        ("name".to_owned(), host.clone()),
+                        ("direct_observation".to_owned(), "false".to_owned()),
+                    ]),
+                    depth,
+                    provenance: hprov.clone(),
+                    observations: 1,
+                });
+                out.relationships.push(InvestigationRelationship {
+                    from: cert_id.clone(),
+                    to: host_id,
+                    relation: EdgeRelation::HasSan,
+                    confidence: 80,
+                    provenance: hprov,
+                    evidence: vec![format!("CT SAN lists {host}")],
+                    attributes: BTreeMap::from([
+                        ("contacted".to_owned(), "false".to_owned()),
+                        ("direct_observation".to_owned(), "false".to_owned()),
+                    ]),
+                });
+            }
+            for ip in cert.ips.into_iter().take(8) {
+                let ip_id = crate::graph::ip_entity_id(&ip);
+                let iprov = TransformProvenance {
+                    source_entity: Some(cert_id.clone()),
+                    transform_id: self.id().to_owned(),
+                    provider: Some("ct".to_owned()),
+                    contact_class: ContactClass::PublicHttp,
+                    timestamp: ctx.now,
+                    evidence: vec![format!("CT IP SAN {ip}")],
+                    confidence: 75,
+                    depth,
+                };
+                out.entities.push(InvestigationEntity {
+                    id: ip_id.clone(),
+                    kind: EntityKind::IpAddress,
+                    label: ip.clone(),
+                    canonical_value: ip.to_ascii_lowercase(),
+                    attributes: BTreeMap::from([("address".to_owned(), ip.clone())]),
+                    depth,
+                    provenance: iprov.clone(),
+                    observations: 1,
+                });
+                out.relationships.push(InvestigationRelationship {
+                    from: cert_id.clone(),
+                    to: ip_id,
+                    relation: EdgeRelation::HasSan,
+                    confidence: 75,
+                    provenance: iprov,
+                    evidence: vec![format!("CT IP SAN {ip}")],
+                    attributes: BTreeMap::from([(
+                        "direct_observation".to_owned(),
+                        "false".to_owned(),
+                    )]),
+                });
+            }
+        }
+        out.observations.push(observation(
+            self.id(),
+            entity,
+            ContactClass::PublicHttp,
+            "enriched",
+            75,
+            ctx.now,
+            vec![format!("CT {domain} enriched")],
+        ));
+        Ok(out)
+    }
+}
+
+pub struct UrlToArchive;
+
+impl Transform for UrlToArchive {
+    fn id(&self) -> &'static str {
+        "url_to_archive"
+    }
+    fn accepts(&self, kind: EntityKind) -> bool {
+        kind == EntityKind::WebEndpoint
+    }
+    fn contact_class(&self) -> ContactClass {
+        ContactClass::PublicHttp
+    }
+    fn depth_cost(&self) -> u8 {
+        1
+    }
+    fn budget_class(&self) -> BudgetClass {
+        BudgetClass::PublicHttp
+    }
+    fn describe(&self) -> &'static str {
+        "URL -> archive snapshots (historical only; never live endpoints; never triggers scans)"
+    }
+    fn execute(
+        &self,
+        ctx: &TransformContext<'_>,
+        entity: &InvestigationEntity,
+    ) -> Result<TransformOutput, String> {
+        if entity.kind != EntityKind::WebEndpoint {
+            return Err("url_to_archive requires a URL entity".to_owned());
+        }
+        let url_text = entity
+            .attributes
+            .get("url")
+            .cloned()
+            .unwrap_or_else(|| entity.canonical_value.clone());
+        // SSRF guard: only http/https (same policy as profile fetcher).
+        if !contact_url_permitted(&url_text, ctx.allow_test_loopback) {
+            return Ok(TransformOutput {
+                observations: vec![observation(
+                    self.id(),
+                    entity,
+                    ContactClass::PublicHttp,
+                    "unscanned",
+                    0,
+                    ctx.now,
+                    vec!["archive lookup refused by URL policy".to_owned()],
+                )],
+                ..TransformOutput::default()
+            });
+        }
+        let mut out = TransformOutput::default();
+        let value = match ctx.archive.fetch(&url_text, ctx.deadline, ctx.cancelled) {
+            Ok(v) => v,
+            Err(e) => {
+                out.observations.push(observation(
+                    self.id(),
+                    entity,
+                    ContactClass::PublicHttp,
+                    rdap_status_for_error(&e),
+                    0,
+                    ctx.now,
+                    vec![format!("archive {url_text}: {}", truncate(&e, 160))],
+                ));
+                return Ok(out);
+            }
+        };
+        out.http_used += 1;
+        let snapshots = crate::archive::parse_archive_response(&value);
+        if snapshots.is_empty() {
+            out.observations.push(observation(
+                self.id(),
+                entity,
+                ContactClass::PublicHttp,
+                "no_data",
+                0,
+                ctx.now,
+                vec![format!("archive {url_text}: no snapshots")],
+            ));
+            return Ok(out);
+        }
+        let depth = entity.depth.saturating_add(self.depth_cost());
+        // Group by URL for first/last observed; each snapshot is an
+        // ArchiveSnapshot entity (historical, never live).
+        let mut by_url: BTreeMap<String, Vec<&crate::archive::ArchiveSnapshot>> = BTreeMap::new();
+        for snap in &snapshots {
+            by_url.entry(snap.url.clone()).or_default().push(snap);
+        }
+        for (hist_url, snaps) in by_url.into_iter().take(8) {
+            let (first, last) = crate::archive::snapshot_range(&snapshots, &hist_url)
+                .unwrap_or((snaps[0].timestamp.clone(), snaps[0].timestamp.clone()));
+            for snap in snaps.into_iter().take(4) {
+                let snap_id = crate::graph::snapshot_entity_id(&hist_url, &snap.timestamp);
+                let mut attrs = BTreeMap::from([
+                    ("url".to_owned(), truncate(&hist_url, 512)),
+                    ("timestamp".to_owned(), snap.timestamp.clone()),
+                    ("first_seen".to_owned(), first.clone()),
+                    ("last_seen".to_owned(), last.clone()),
+                    ("historical".to_owned(), "true".to_owned()),
+                ]);
+                if let Some(status) = snap.status.clone() {
+                    attrs.insert("status".to_owned(), truncate(&status, 64));
+                }
+                let prov = TransformProvenance {
+                    source_entity: Some(entity.id.clone()),
+                    transform_id: self.id().to_owned(),
+                    provider: Some("archive".to_owned()),
+                    contact_class: ContactClass::PublicHttp,
+                    timestamp: ctx.now,
+                    evidence: vec![format!(
+                        "archive snapshot {} @ {}",
+                        hist_url, snap.timestamp
+                    )],
+                    confidence: 70,
+                    depth,
+                };
+                out.entities.push(InvestigationEntity {
+                    id: snap_id.clone(),
+                    kind: EntityKind::ArchiveSnapshot,
+                    label: format!("{} @ {}", truncate(&hist_url, 64), snap.timestamp),
+                    canonical_value: snap_id.clone().to_ascii_lowercase(),
+                    attributes: attrs,
+                    depth,
+                    provenance: prov.clone(),
+                    observations: 1,
+                });
+                out.relationships.push(InvestigationRelationship {
+                    from: entity.id.clone(),
+                    to: snap_id.clone(),
+                    relation: EdgeRelation::References,
+                    confidence: 70,
+                    provenance: prov,
+                    evidence: vec![format!("historical snapshot {}", snap.timestamp)],
+                    attributes: BTreeMap::from([
+                        ("observation_class".to_owned(), "observed".to_owned()),
+                        ("historical".to_owned(), "true".to_owned()),
+                    ]),
+                });
+                // Historical hostname (never a scan target here).
+                if let Ok(parsed) = url::Url::parse(&hist_url) {
+                    if let Some(host) = parsed.host_str() {
+                        let clean = host.trim_end_matches('.').to_ascii_lowercase();
+                        if crate::search::canonical_hostname_value(&clean).is_some() {
+                            let host_id = crate::graph::hostname_entity_id(&clean);
+                            let hprov = TransformProvenance {
+                                source_entity: Some(snap_id.clone()),
+                                transform_id: self.id().to_owned(),
+                                provider: Some("archive".to_owned()),
+                                contact_class: ContactClass::PassivePublic,
+                                timestamp: ctx.now,
+                                evidence: vec![format!("historical hostname {clean}")],
+                                confidence: 60,
+                                depth,
+                            };
+                            out.entities.push(InvestigationEntity {
+                                id: host_id.clone(),
+                                kind: EntityKind::Hostname,
+                                label: clean.clone(),
+                                canonical_value: clean.clone(),
+                                attributes: BTreeMap::from([
+                                    ("name".to_owned(), clean.clone()),
+                                    ("historical".to_owned(), "true".to_owned()),
+                                ]),
+                                depth,
+                                provenance: hprov.clone(),
+                                observations: 1,
+                            });
+                            out.relationships.push(InvestigationRelationship {
+                                from: snap_id.clone(),
+                                to: host_id,
+                                relation: EdgeRelation::References,
+                                confidence: 60,
+                                provenance: hprov,
+                                evidence: vec![format!("historical hostname {clean}")],
+                                attributes: BTreeMap::from([(
+                                    "historical".to_owned(),
+                                    "true".to_owned(),
+                                )]),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        out.observations.push(observation(
+            self.id(),
+            entity,
+            ContactClass::PublicHttp,
+            "enriched",
+            70,
+            ctx.now,
+            vec![format!("archive {url_text} enriched (historical only)")],
+        ));
+        Ok(out)
+    }
+}
+
+pub struct RepoToMetadata;
+
+impl Transform for RepoToMetadata {
+    fn id(&self) -> &'static str {
+        "repo_to_metadata"
+    }
+    fn accepts(&self, kind: EntityKind) -> bool {
+        kind == EntityKind::Repository
+    }
+    fn contact_class(&self) -> ContactClass {
+        ContactClass::PublicHttp
+    }
+    fn depth_cost(&self) -> u8 {
+        1
+    }
+    fn budget_class(&self) -> BudgetClass {
+        BudgetClass::PublicHttp
+    }
+    fn describe(&self) -> &'static str {
+        "Repository -> org/contributors/releases/packages/keys/domains (metadata only, nothing cloned)"
+    }
+    fn execute(
+        &self,
+        ctx: &TransformContext<'_>,
+        entity: &InvestigationEntity,
+    ) -> Result<TransformOutput, String> {
+        if entity.kind != EntityKind::Repository {
+            return Err("repo_to_metadata requires a repository entity".to_owned());
+        }
+        let (owner, name) = entity
+            .canonical_value
+            .split_once('/')
+            .map(|(o, n)| (o.trim().to_owned(), n.trim().to_owned()))
+            .unwrap_or_default();
+        if owner.is_empty() || name.is_empty() {
+            return Ok(TransformOutput {
+                observations: vec![observation(
+                    self.id(),
+                    entity,
+                    ContactClass::PublicHttp,
+                    "unscanned",
+                    0,
+                    ctx.now,
+                    vec!["repository identity needs owner/name".to_owned()],
+                )],
+                ..TransformOutput::default()
+            });
+        }
+        let mut out = TransformOutput::default();
+        let value = match ctx.repo.fetch(&owner, &name, ctx.deadline, ctx.cancelled) {
+            Ok(v) => v,
+            Err(e) => {
+                out.observations.push(observation(
+                    self.id(),
+                    entity,
+                    ContactClass::PublicHttp,
+                    rdap_status_for_error(&e),
+                    0,
+                    ctx.now,
+                    vec![format!("repo {owner}/{name}: {}", truncate(&e, 160))],
+                ));
+                return Ok(out);
+            }
+        };
+        out.http_used += 1;
+        let meta = crate::repo_intel::parse_repo_metadata(&owner, &name, &value);
+        let depth = entity.depth.saturating_add(self.depth_cost());
+        // Owner -> Organization (observed association; ownership only with
+        // strong evidence, which metadata alone is not).
+        let org_id = organization_entity_id(&meta.owner);
+        let oprov = TransformProvenance {
+            source_entity: Some(entity.id.clone()),
+            transform_id: self.id().to_owned(),
+            provider: Some("repo".to_owned()),
+            contact_class: ContactClass::PublicHttp,
+            timestamp: ctx.now,
+            evidence: vec![format!("repository owner is {}", meta.owner)],
+            confidence: 70,
+            depth,
+        };
+        out.entities.push(InvestigationEntity {
+            id: org_id.clone(),
+            kind: EntityKind::Organization,
+            label: meta.owner.clone(),
+            canonical_value: meta.owner.clone(),
+            attributes: BTreeMap::from([("name".to_owned(), meta.owner.clone())]),
+            depth,
+            provenance: oprov.clone(),
+            observations: 1,
+        });
+        out.relationships.push(InvestigationRelationship {
+            from: entity.id.clone(),
+            to: org_id,
+            relation: EdgeRelation::References,
+            confidence: 70,
+            provenance: oprov,
+            evidence: vec![format!("repository owner is {}", meta.owner)],
+            attributes: BTreeMap::new(),
+        });
+        // Contributors / commit identities -> IdentityHypothesis (weak,
+        // never auto-merged, never verified identity).
+        for contributor in meta.contributors.into_iter().take(8) {
+            let hyp_id = crate::graph::hypothesis_entity_id(&[&contributor]);
+            let prov = TransformProvenance {
+                source_entity: Some(entity.id.clone()),
+                transform_id: self.id().to_owned(),
+                provider: Some("repo".to_owned()),
+                contact_class: ContactClass::PublicHttp,
+                timestamp: ctx.now,
+                evidence: vec![format!("public contributor {contributor}")],
+                confidence: 50,
+                depth,
+            };
+            out.entities.push(InvestigationEntity {
+                id: hyp_id.clone(),
+                kind: EntityKind::IdentityHypothesis,
+                label: contributor.clone(),
+                canonical_value: contributor.to_ascii_lowercase(),
+                attributes: BTreeMap::from([
+                    ("identity".to_owned(), contributor.clone()),
+                    ("kind".to_owned(), "contributor".to_owned()),
+                ]),
+                depth,
+                provenance: prov.clone(),
+                observations: 1,
+            });
+            out.relationships.push(InvestigationRelationship {
+                from: entity.id.clone(),
+                to: hyp_id,
+                relation: EdgeRelation::ContributedTo,
+                confidence: 50,
+                provenance: prov,
+                evidence: vec![format!("public contributor {contributor}")],
+                attributes: BTreeMap::new(),
+            });
+        }
+        for identity in meta.commit_identities.into_iter().take(8) {
+            let hyp_id = crate::graph::hypothesis_entity_id(&[&identity]);
+            let prov = TransformProvenance {
+                source_entity: Some(entity.id.clone()),
+                transform_id: self.id().to_owned(),
+                provider: Some("repo".to_owned()),
+                contact_class: ContactClass::PublicHttp,
+                timestamp: ctx.now,
+                evidence: vec![format!("public commit identity {identity} (unverified)")],
+                confidence: 40,
+                depth,
+            };
+            out.entities.push(InvestigationEntity {
+                id: hyp_id.clone(),
+                kind: EntityKind::IdentityHypothesis,
+                label: identity.clone(),
+                canonical_value: identity.to_ascii_lowercase(),
+                attributes: BTreeMap::from([
+                    ("identity".to_owned(), identity.clone()),
+                    ("kind".to_owned(), "commit".to_owned()),
+                    ("verified".to_owned(), "false".to_owned()),
+                ]),
+                depth,
+                provenance: prov.clone(),
+                observations: 1,
+            });
+            out.relationships.push(InvestigationRelationship {
+                from: entity.id.clone(),
+                to: hyp_id,
+                relation: EdgeRelation::ContributedTo,
+                confidence: 40,
+                provenance: prov,
+                evidence: vec![format!("public commit identity {identity} (unverified)")],
+                attributes: BTreeMap::new(),
+            });
+        }
+        for release in meta.releases.into_iter().take(8) {
+            let pkg_id = crate::graph::package_entity_id(&format!("{owner}/{name}@{release}"));
+            let prov = TransformProvenance {
+                source_entity: Some(entity.id.clone()),
+                transform_id: self.id().to_owned(),
+                provider: Some("repo".to_owned()),
+                contact_class: ContactClass::PublicHttp,
+                timestamp: ctx.now,
+                evidence: vec![format!("release {release}")],
+                confidence: 70,
+                depth,
+            };
+            out.entities.push(InvestigationEntity {
+                id: pkg_id.clone(),
+                kind: EntityKind::Package,
+                label: release.clone(),
+                canonical_value: release.to_ascii_lowercase(),
+                attributes: BTreeMap::from([("release".to_owned(), release.clone())]),
+                depth,
+                provenance: prov.clone(),
+                observations: 1,
+            });
+            out.relationships.push(InvestigationRelationship {
+                from: entity.id.clone(),
+                to: pkg_id,
+                relation: EdgeRelation::PublishedRelease,
+                confidence: 70,
+                provenance: prov,
+                evidence: vec![format!("release {release}")],
+                attributes: BTreeMap::new(),
+            });
+        }
+        for package in meta.packages.into_iter().take(8) {
+            let pkg_id = crate::graph::package_entity_id(&package);
+            let prov = TransformProvenance {
+                source_entity: Some(entity.id.clone()),
+                transform_id: self.id().to_owned(),
+                provider: Some("repo".to_owned()),
+                contact_class: ContactClass::PublicHttp,
+                timestamp: ctx.now,
+                evidence: vec![format!("uses package {package}")],
+                confidence: 60,
+                depth,
+            };
+            out.entities.push(InvestigationEntity {
+                id: pkg_id.clone(),
+                kind: EntityKind::Package,
+                label: package.clone(),
+                canonical_value: package.to_ascii_lowercase(),
+                attributes: BTreeMap::from([("package".to_owned(), package.clone())]),
+                depth,
+                provenance: prov.clone(),
+                observations: 1,
+            });
+            out.relationships.push(InvestigationRelationship {
+                from: entity.id.clone(),
+                to: pkg_id,
+                relation: EdgeRelation::UsesPackage,
+                confidence: 60,
+                provenance: prov,
+                evidence: vec![format!("uses package {package}")],
+                attributes: BTreeMap::new(),
+            });
+        }
+        for key in meta.signing_keys.into_iter().take(4) {
+            use sha2::Digest as _;
+            let digest = format!("{:x}", sha2::Sha256::digest(key.as_bytes()));
+            let key_id = crate::graph::public_key_entity_id(&digest);
+            let prov = TransformProvenance {
+                source_entity: Some(entity.id.clone()),
+                transform_id: self.id().to_owned(),
+                provider: Some("repo".to_owned()),
+                contact_class: ContactClass::PublicHttp,
+                timestamp: ctx.now,
+                evidence: vec!["public signing key".to_owned()],
+                confidence: 60,
+                depth,
+            };
+            out.entities.push(InvestigationEntity {
+                id: key_id.clone(),
+                kind: EntityKind::PublicKey,
+                label: format!("pubkey:{}", &digest[..12.min(digest.len())]),
+                canonical_value: digest.clone(),
+                attributes: BTreeMap::new(),
+                depth,
+                provenance: prov.clone(),
+                observations: 1,
+            });
+            out.relationships.push(InvestigationRelationship {
+                from: entity.id.clone(),
+                to: key_id,
+                relation: EdgeRelation::SignedBy,
+                confidence: 60,
+                provenance: prov,
+                evidence: vec!["public signing key".to_owned()],
+                attributes: BTreeMap::new(),
+            });
+        }
+        for d in meta.domain_refs.into_iter().take(8) {
+            let did = domain_entity_id(&d);
+            let prov = TransformProvenance {
+                source_entity: Some(entity.id.clone()),
+                transform_id: self.id().to_owned(),
+                provider: Some("repo".to_owned()),
+                contact_class: ContactClass::PublicHttp,
+                timestamp: ctx.now,
+                evidence: vec![format!("repository references domain {d}")],
+                confidence: 60,
+                depth,
+            };
+            out.entities.push(InvestigationEntity {
+                id: did.clone(),
+                kind: EntityKind::Domain,
+                label: d.clone(),
+                canonical_value: d.clone(),
+                attributes: BTreeMap::from([("domain".to_owned(), d.clone())]),
+                depth,
+                provenance: prov.clone(),
+                observations: 1,
+            });
+            out.relationships.push(InvestigationRelationship {
+                from: entity.id.clone(),
+                to: did,
+                relation: EdgeRelation::ReferencesDomain,
+                confidence: 60,
+                provenance: prov,
+                evidence: vec![format!("repository references domain {d}")],
+                attributes: BTreeMap::new(),
+            });
+        }
+        for u in meta.url_refs.into_iter().take(8) {
+            let canonical = canonical_url_entity(&u).unwrap_or_else(|| u.clone());
+            let uid = crate::graph::endpoint_entity_id(&canonical);
+            let prov = TransformProvenance {
+                source_entity: Some(entity.id.clone()),
+                transform_id: self.id().to_owned(),
+                provider: Some("repo".to_owned()),
+                contact_class: ContactClass::PublicHttp,
+                timestamp: ctx.now,
+                evidence: vec![format!("repository references URL {}", truncate(&u, 120))],
+                confidence: 60,
+                depth,
+            };
+            out.entities.push(InvestigationEntity {
+                id: uid.clone(),
+                kind: EntityKind::WebEndpoint,
+                label: canonical.clone(),
+                canonical_value: canonical.clone(),
+                attributes: BTreeMap::from([("url".to_owned(), canonical)]),
+                depth,
+                provenance: prov.clone(),
+                observations: 1,
+            });
+            out.relationships.push(InvestigationRelationship {
+                from: entity.id.clone(),
+                to: uid,
+                relation: EdgeRelation::ReferencesUrl,
+                confidence: 60,
+                provenance: prov,
+                evidence: vec!["repository references URL".to_owned()],
+                attributes: BTreeMap::new(),
+            });
+        }
+        if meta.credential_material_exposed {
+            out.observations.push(observation(
+                self.id(),
+                entity,
+                ContactClass::PublicHttp,
+                "exposure_noted",
+                50,
+                ctx.now,
+                vec![
+                    "public material appears to expose credential-like text; stored as defensive metadata only (no secrets retained)".to_owned(),
+                ],
+            ));
+        }
+        out.observations.push(observation(
+            self.id(),
+            entity,
+            ContactClass::PublicHttp,
+            "enriched",
+            65,
+            ctx.now,
+            vec![format!("repo {owner}/{name} enriched")],
+        ));
+        Ok(out)
+    }
+}
+
+pub struct AsnToRdap;
+
+impl Transform for AsnToRdap {
+    fn id(&self) -> &'static str {
+        "asn_to_rdap"
+    }
+    fn accepts(&self, kind: EntityKind) -> bool {
+        kind == EntityKind::Asn
+    }
+    fn contact_class(&self) -> ContactClass {
+        ContactClass::PublicHttp
+    }
+    fn depth_cost(&self) -> u8 {
+        1
+    }
+    fn budget_class(&self) -> BudgetClass {
+        BudgetClass::PublicHttp
+    }
+    fn describe(&self) -> &'static str {
+        "ASN -> RDAP allocation/organization (timestamped, never current-only)"
+    }
+    fn execute(
+        &self,
+        ctx: &TransformContext<'_>,
+        entity: &InvestigationEntity,
+    ) -> Result<TransformOutput, String> {
+        if entity.kind != EntityKind::Asn {
+            return Err("asn_to_rdap requires an ASN entity".to_owned());
+        }
+        let asn = entity.canonical_value.clone();
+        let mut out = TransformOutput::default();
+        let value = match ctx.rdap.fetch(&asn, "asn", ctx.deadline, ctx.cancelled) {
+            Ok(v) => v,
+            Err(e) => {
+                out.observations.push(observation(
+                    self.id(),
+                    entity,
+                    ContactClass::PublicHttp,
+                    rdap_status_for_error(&e),
+                    0,
+                    ctx.now,
+                    vec![format!("RDAP asn {asn}: {}", truncate(&e, 160))],
+                ));
+                return Ok(out);
+            }
+        };
+        out.http_used += 1;
+        let summary = match crate::rdap::parse_rdap(&value) {
+            Ok(s) => s,
+            Err(e) => {
+                out.observations.push(observation(
+                    self.id(),
+                    entity,
+                    ContactClass::PublicHttp,
+                    "malformed_response",
+                    0,
+                    ctx.now,
+                    vec![truncate(&e, 160)],
+                ));
+                return Ok(out);
+            }
+        };
+        let depth = entity.depth.saturating_add(self.depth_cost());
+        emit_rdap_common(&mut out, entity, self.id(), &summary, ctx.now, depth);
+        out.observations.push(observation(
+            self.id(),
+            entity,
+            ContactClass::PublicHttp,
+            "enriched",
+            70,
+            ctx.now,
+            vec![format!("RDAP asn {asn} enriched")],
+        ));
+        Ok(out)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Transform registry: deterministic ordering, no scattered matches.
 // ---------------------------------------------------------------------------
@@ -1533,6 +3327,14 @@ impl TransformRegistry {
                 Box::new(UrlToDomain),
                 Box::new(UrlToRepository),
                 Box::new(DomainToDns),
+                Box::new(EmailToMailInfra),
+                Box::new(IpToPtr),
+                Box::new(DomainToRdap),
+                Box::new(IpToRdap),
+                Box::new(AsnToRdap),
+                Box::new(DomainToCt),
+                Box::new(UrlToArchive),
+                Box::new(RepoToMetadata),
             ],
         }
     }
@@ -1591,6 +3393,17 @@ fn accepts_of(transform: &dyn Transform) -> Vec<String> {
         EntityKind::DnsRecord,
         EntityKind::EmailAddress,
         EntityKind::Organization,
+        EntityKind::Asn,
+        EntityKind::Certificate,
+        EntityKind::NetworkPrefix,
+        EntityKind::Package,
+        EntityKind::Document,
+        EntityKind::ArchiveSnapshot,
+        EntityKind::PublicKey,
+        EntityKind::Route,
+        EntityKind::Provider,
+        EntityKind::IdentityHypothesis,
+        EntityKind::Software,
     ] {
         if transform.accepts(kind) {
             kinds.push(kind.to_string());
@@ -1609,6 +3422,33 @@ fn produces_of(id: &str) -> Vec<String> {
             "ip_address".to_owned(),
             "hostname".to_owned(),
             "dns_record".to_owned(),
+        ],
+        "email_to_mail_infra" => vec![
+            "domain".to_owned(),
+            "hostname".to_owned(),
+            "dns_record".to_owned(),
+        ],
+        "ip_to_ptr" => vec!["hostname".to_owned()],
+        "domain_to_rdap" => vec!["hostname".to_owned(), "organization".to_owned()],
+        "ip_to_rdap" => vec![
+            "network_prefix".to_owned(),
+            "hostname".to_owned(),
+            "organization".to_owned(),
+        ],
+        "asn_to_rdap" => vec!["hostname".to_owned(), "organization".to_owned()],
+        "domain_to_ct" => vec![
+            "certificate".to_owned(),
+            "hostname".to_owned(),
+            "ip_address".to_owned(),
+        ],
+        "url_to_archive" => vec!["archive_snapshot".to_owned(), "hostname".to_owned()],
+        "repo_to_metadata" => vec![
+            "organization".to_owned(),
+            "identity_hypothesis".to_owned(),
+            "package".to_owned(),
+            "public_key".to_owned(),
+            "domain".to_owned(),
+            "web_endpoint".to_owned(),
         ],
         _ => Vec::new(),
     }
@@ -1676,6 +3516,10 @@ pub struct InvestigationEngine<'a> {
     search: &'a dyn UsernameSearchRunner,
     profile: &'a dyn ProfileFetcher,
     dns: &'a dyn DnsFetcher,
+    rdap: std::sync::Arc<dyn RdapFetcher>,
+    ct: std::sync::Arc<dyn CtFetcher>,
+    archive: std::sync::Arc<dyn ArchiveFetcher>,
+    repo: std::sync::Arc<dyn RepoFetcher>,
     pivot: std::sync::Arc<dyn NetworkPivot>,
     pub entities: BTreeMap<String, InvestigationEntity>,
     pub relationships: Vec<InvestigationRelationship>,
@@ -1717,6 +3561,22 @@ impl<'a> InvestigationEngine<'a> {
                     allow_test_loopback: config.allow_test_loopback,
                 })
             }),
+            rdap: config
+                .rdap
+                .clone()
+                .unwrap_or_else(|| std::sync::Arc::new(UnavailableFetcher)),
+            ct: config
+                .ct
+                .clone()
+                .unwrap_or_else(|| std::sync::Arc::new(UnavailableFetcher)),
+            archive: config
+                .archive
+                .clone()
+                .unwrap_or_else(|| std::sync::Arc::new(UnavailableFetcher)),
+            repo: config
+                .repo
+                .clone()
+                .unwrap_or_else(|| std::sync::Arc::new(UnavailableFetcher)),
             config,
             registry: TransformRegistry::new(),
             search,
@@ -1789,6 +3649,80 @@ impl<'a> InvestigationEngine<'a> {
                     label: canonical.clone(),
                     canonical_value: canonical.clone(),
                     attributes: BTreeMap::from([("url".to_owned(), canonical)]),
+                    depth: 0,
+                    provenance,
+                    observations: 1,
+                }
+            }
+            SeedKind::Email => {
+                let raw = self.config.seed_value.trim();
+                let canonical = raw.to_ascii_lowercase();
+                InvestigationEntity {
+                    id: email_entity_id(&canonical),
+                    kind: EntityKind::EmailAddress,
+                    label: raw.to_owned(),
+                    canonical_value: canonical.clone(),
+                    attributes: BTreeMap::from([("email".to_owned(), canonical)]),
+                    depth: 0,
+                    provenance,
+                    observations: 1,
+                }
+            }
+            SeedKind::Ip => {
+                let raw = self.config.seed_value.trim();
+                let canonical = raw
+                    .parse::<std::net::IpAddr>()
+                    .map(|ip| ip.to_string().to_ascii_lowercase())
+                    .unwrap_or_else(|_| raw.to_ascii_lowercase());
+                InvestigationEntity {
+                    id: crate::graph::ip_entity_id(&canonical),
+                    kind: EntityKind::IpAddress,
+                    label: canonical.clone(),
+                    canonical_value: canonical.clone(),
+                    attributes: BTreeMap::from([("address".to_owned(), canonical)]),
+                    depth: 0,
+                    provenance,
+                    observations: 1,
+                }
+            }
+            SeedKind::Asn => {
+                let raw = self.config.seed_value.trim();
+                let canonical = crate::search::canonical_asn_value(raw)
+                    .unwrap_or_else(|| raw.to_ascii_uppercase());
+                InvestigationEntity {
+                    id: crate::graph::asn_entity_id(&canonical),
+                    kind: EntityKind::Asn,
+                    label: canonical.clone(),
+                    canonical_value: canonical.clone(),
+                    attributes: BTreeMap::from([("asn".to_owned(), canonical)]),
+                    depth: 0,
+                    provenance,
+                    observations: 1,
+                }
+            }
+            SeedKind::Repository => {
+                let raw = self.config.seed_value.trim();
+                let canonical = raw.to_ascii_lowercase();
+                InvestigationEntity {
+                    id: repository_entity_id(&canonical),
+                    kind: EntityKind::Repository,
+                    label: raw.to_owned(),
+                    canonical_value: canonical.clone(),
+                    attributes: BTreeMap::from([("repository".to_owned(), canonical)]),
+                    depth: 0,
+                    provenance,
+                    observations: 1,
+                }
+            }
+            SeedKind::Organization => {
+                let raw = self.config.seed_value.trim();
+                let canonical = raw.to_ascii_lowercase();
+                InvestigationEntity {
+                    id: organization_entity_id(&canonical),
+                    kind: EntityKind::Organization,
+                    label: raw.to_owned(),
+                    canonical_value: canonical.clone(),
+                    attributes: BTreeMap::from([("name".to_owned(), canonical)]),
                     depth: 0,
                     provenance,
                     observations: 1,
@@ -1904,6 +3838,10 @@ impl<'a> InvestigationEngine<'a> {
                 search: self.search,
                 profile: self.profile,
                 dns: self.dns,
+                rdap: self.rdap.as_ref(),
+                ct: self.ct.as_ref(),
+                archive: self.archive.as_ref(),
+                repo: self.repo.as_ref(),
             };
             let output = match transform.execute(&ctx, &entity) {
                 Ok(output) => output,
@@ -2343,7 +4281,19 @@ impl<'a> InvestigationEngine<'a> {
                 IdentifierKind::Domain,
                 self.entities.get(&seed_id).map(|e| e.depth).unwrap_or(0),
             ),
-            SeedKind::Url => {
+            SeedKind::Email => (
+                self.entities
+                    .get(&seed_id)
+                    .map(|e| e.canonical_value.clone())
+                    .unwrap_or_default(),
+                IdentifierKind::Email,
+                self.entities.get(&seed_id).map(|e| e.depth).unwrap_or(0),
+            ),
+            SeedKind::Url
+            | SeedKind::Ip
+            | SeedKind::Asn
+            | SeedKind::Repository
+            | SeedKind::Organization => {
                 self.observations.push(observation(
                     "exposure_lookup",
                     &self.seed_entity(now),
@@ -2905,6 +4855,11 @@ fn render_human_inner(
         SeedKind::Username => "Username",
         SeedKind::Domain => "Domain",
         SeedKind::Url => "Url",
+        SeedKind::Email => "Email",
+        SeedKind::Ip => "Ip",
+        SeedKind::Asn => "Asn",
+        SeedKind::Repository => "Repository",
+        SeedKind::Organization => "Organization",
     };
     out.push_str(&key_value(caps, "Type", seed_type, 8));
     out.push('\n');
@@ -4008,9 +5963,10 @@ impl ProfileFetcher for ProductionProfileFetcher {
     }
 }
 
-/// Production DNS: system resolver for address records (A/AAAA); other
-/// types report no-data in this phase. Still `DnsQuery` contact, still
-/// counted, still bounded — never direct service probing.
+/// Production DNS: system resolver for address records (A/AAAA) plus
+/// bounded native UDP for CNAME/MX/NS/TXT/SRV/PTR via the existing
+/// resolver infrastructure. Still `DnsQuery` contact, still counted,
+/// still bounded — never direct service probing.
 pub struct ProductionDnsFetcher;
 
 impl DnsFetcher for ProductionDnsFetcher {
@@ -4054,11 +6010,22 @@ impl DnsFetcher for ProductionDnsFetcher {
                 }
                 Ok(out.into_iter().collect())
             }
-            // Bounded passive posture for non-address types in Phase D:
-            // report no-data rather than inventing a second DNS client.
-            // Fixture-backed tests prove the transform graph for MX/NS/TXT/
-            // SRV/CNAME; production returns explicit no-data observations.
-            "CNAME" | "MX" | "NS" | "TXT" | "SRV" => Ok(Vec::new()),
+            // Bounded native UDP for the remaining intelligence types.
+            // Uses the shared dns.rs client + system resolver; failures
+            // are honest observations (timeout, truncated, no resolver),
+            // never negative evidence.
+            "CNAME" | "MX" | "NS" | "TXT" | "SRV" | "PTR" => {
+                let Some(rtype) = crate::dns::parse_record_type(record_type) else {
+                    return Err(format!("unsupported record type {record_type}"));
+                };
+                crate::dns::query_records_blocking(
+                    domain,
+                    rtype,
+                    Duration::from_secs(3),
+                    deadline,
+                    cancelled,
+                )
+            }
             _ => Err(format!("unsupported record type {record_type}")),
         }
     }
@@ -4272,7 +6239,7 @@ pub fn run_investigation_with(
 
 /// Run with production backends (passive by default; never DirectNetwork).
 pub fn run_investigation(
-    config: InvestigationConfig,
+    mut config: InvestigationConfig,
     cancelled: &AtomicBool,
 ) -> Result<InvestigationReport, String> {
     let search = ProductionSearchRunner {
@@ -4285,6 +6252,26 @@ pub fn run_investigation(
         allow_test_loopback: config.allow_test_loopback,
     };
     let dns = ProductionDnsFetcher;
+    // Wire configured passive providers by default (additive; tests inject
+    // fixtures via `config.rdap/ct/archive/repo`). Live RDAP/CT/archive/
+    // repo use legitimate public endpoints with bounded budgets; failures
+    // are honest observations, never fatal.
+    if config.rdap.is_none() {
+        config.rdap = Some(std::sync::Arc::new(crate::rdap::HttpRdapFetcher::default()));
+    }
+    if config.ct.is_none() {
+        config.ct = Some(std::sync::Arc::new(crate::ct::HttpCtFetcher::default()));
+    }
+    if config.archive.is_none() {
+        config.archive = Some(std::sync::Arc::new(
+            crate::archive::HttpArchiveFetcher::default(),
+        ));
+    }
+    if config.repo.is_none() {
+        config.repo = Some(std::sync::Arc::new(
+            crate::repo_intel::HttpRepoFetcher::default(),
+        ));
+    }
     run_investigation_with(config, &search, &profile, &dns, cancelled)
 }
 
