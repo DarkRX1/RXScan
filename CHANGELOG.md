@@ -20,6 +20,12 @@ endpoint/service asset registry. `rxscan project explain` for per-entity
 conclusions, evidence, findings, changes, and discovery chain.
 Coverage-aware vulnerability resolution
 (resolved_by_software_change/dataset_changed/coverage_insufficient/unknown).
+Local web console (`rxscan web`): loopback-only same-origin GUI plus a
+versioned typed API (`/api/v1`) over the same core — health, capabilities,
+projects, bounded scan/investigation jobs with real core cancellation,
+server-sent progress, and project evidence views (entities, findings,
+graph, timeline) from the existing SQLite store. No command-execution
+endpoint; no new dependencies (standard-library HTTP).
 
 ## v0.1.0 (prerelease, unreleased)
 
