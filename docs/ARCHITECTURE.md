@@ -1,6 +1,81 @@
 # RXScan architecture
 
-RXScan is a native Rust, policy-driven reactive reconnaissance engine: **simple outside, serious inside**. It is not a wrapper around external scanners.
+RXScan (Reconnaissance & Evidence Engine) is a native Rust, policy-driven reactive reconnaissance engine: **simple outside, serious inside**. It is not a wrapper around external scanners.
+
+## System map
+
+```text
+                    RXScan Core
+                        |
+        +---------------+---------------+
+        |                               |
+        v                               v
+       CLI                         Local Web API
+    (src/cli.rs,                    (src/web_api.rs)
+     src/main.rs)                         |
+                                          v
+                                     Local Web GUI
+                                   (app/rxscan.js)
+```
+
+CLI and Web are first-class peers over the same core: the terminal
+(`src/main.rs`, `src/terminal.rs`) and the API/GUI consume the same
+planner, scheduler, classifier, and evidence model. The GUI holds no
+duplicate category registry and no separate classification engine;
+`rxscan search` never depends on the local HTTP server.
+
+## Search flow
+
+```text
+registry -> plan -> scheduler -> observation -> evidence
+    -> correlation -> persistence
+```
+
+- Registry: `search/providers/v1/username/*.json` merged by
+  `build.rs`; vocabulary in `known_username_categories()`
+  (`src/search.rs`). Counts derive dynamically; see
+  `docs/SEARCH_CORPUS.md`.
+- Plan: `plan_username_providers()` applies category/provider
+  selection and exclusion before contact.
+- Observe/classify: `execute_username_search_full()`; statuses stay
+  distinct (`SearchStatus`); URL kinds via `core_url_kind()`; see
+  `docs/EVIDENCE_MODEL.md` and `docs/PROVIDER_CONTRACT.md`.
+
+## Network flow
+
+```text
+target -> scope -> discovery -> scan -> service probes
+    -> evidence -> correlation -> persistence
+```
+
+- Scope Guard is deny-by-default (`src/scope.rs`); derived addresses
+  are re-checked and never expand scope.
+- Decision Engine proposes, scheduler admits (`src/decision.rs`,
+  `src/execution.rs`); cancellation and deadlines terminate honestly
+  with partial evidence retained.
+
+## Why (non-obvious decisions)
+
+- Concurrency is bounded independently of corpus size because the
+  scheduled set is dynamic (tens or thousands of vectors share one
+  worker pool); a fixed denominator would couple capacity to content.
+- Passive findings never become scan targets automatically because
+  observation is not authorization; auto-scanning OSINT results would
+  turn every investigation into an unauthorized active scan.
+- `SearchUrlKind` (`core_url_kind()`) separates candidate / profile /
+  resource / provider-endpoint so a generated URL can never be
+  presented as an observed identity.
+- Confidence requires source independence (strongest source wins,
+  capped) so three copies of one observation cannot manufacture
+  certainty.
+- UDP silence stays `open|filtered` because an unanswered datagram is
+  consistent with filtering, loss, and rate-limiting — absence of a
+  reply is not evidence of absence (`src/udp_discovery.rs`).
+- `all_ports` / `all` means TCP 1–65535 in one bounded task; UDP has
+  no full-range mode because unbounded UDP probing is a packet flood,
+  not a scan (`src/ports.rs`).
+
+## Module detail
 
 ```text
 Target / Scope -> ScanPlan Compiler -> Task Lowering -> Reactive Scheduler <-> Speed + Budgets

@@ -1,5 +1,11 @@
 # RXScan roadmap
 
+> Historical note: phase paragraphs below describe what was true when each
+> phase landed. The status table is the authoritative phase record; later
+> capabilities (UDP discovery, DNS SRV, SYN modes, fingerprint packs, web
+> technology normalization, `rxscan web`) are documented in `README.md` and
+> `CHANGELOG.md`, not by rewriting these historical paragraphs.
+
 Each phase requires tests, benchmark/regression evidence where applicable, documentation, and an explicit exit review.
 
 | Phase | Deliverable | Status |

@@ -111,8 +111,8 @@
                 <input id="scan-target" name="target" type="text" value="127.0.0.1" required autocomplete="off" spellcheck="false" />
               </div>
               <div class="scan-target-ports">
-                <label for="scan-ports">Ports (for example <span class="mono">22,80,443</span> or <span class="mono">1-1024</span>)</label>
-                <input id="scan-ports" name="ports" type="text" value="22,80,443" autocomplete="off" spellcheck="false" />
+                <label for="scan-ports">Ports (<span class="mono">22,80,443</span>, <span class="mono">1-1024</span>, or <span class="mono">all</span> for all TCP 1-65535)</label>
+                <input id="scan-ports" name="ports" type="text" value="22,80,443" autocomplete="off" spellcheck="false" placeholder="22,80,443 or all" />
               </div>
             </div>
             <div class="grid-form">
@@ -252,6 +252,43 @@
                 <input id="search-deadline" name="deadline" type="number" min="1" max="120" value="25" />
               </div>
             </div>
+            <fieldset class="sources" id="search-sources-wrap">
+              <legend>Sources — categories from the provider registry (same as CLI)</legend>
+              <p class="muted" id="search-sources-empty">Loading categories from the API…</p>
+              <div class="sources-grid" id="search-sources"></div>
+              <p class="muted" id="search-sources-selected">— usable vectors selected</p>
+              <p class="muted">Unselected categories are excluded from the execution plan (same plan as CLI <span class="mono">--category</span>).</p>
+            </fieldset>
+            <details class="advanced" id="search-providers-wrap">
+              <summary>Advanced provider selection (bounded browser — thousands stay fast)</summary>
+              <div class="prov-filter">
+                <div>
+                  <label for="search-prov-q">Filter providers</label>
+                  <input id="search-prov-q" type="text" value="" placeholder="name or id…" autocomplete="off" spellcheck="false" />
+                </div>
+                <div>
+                  <label for="search-prov-cat">Category</label>
+                  <select id="search-prov-cat"><option value="">All</option></select>
+                </div>
+                <div>
+                  <label for="search-prov-state">State</label>
+                  <select id="search-prov-state">
+                    <option value="">All</option>
+                    <option value="usable">Usable</option>
+                    <option value="unavailable">Unavailable</option>
+                    <option value="disabled">Disabled</option>
+                  </select>
+                </div>
+              </div>
+              <div class="actions">
+                <button type="button" id="search-prov-prev">← Prev 50</button>
+                <button type="button" id="search-prov-next">Next 50 →</button>
+                <button type="button" id="search-prov-clear">Clear provider selection</button>
+                <span class="muted" id="search-prov-page">—</span>
+              </div>
+              <ul class="entities" id="search-prov-list"></ul>
+              <p class="muted">One page (50) renders at a time. Ticking providers narrows the plan like CLI <span class="mono">--provider</span>; unticked means categories decide.</p>
+            </details>
             <div class="actions"><button type="submit" id="search-submit">Search</button></div>
             <p class="form-msg" id="search-msg" role="status" aria-live="polite"></p>
           </form>
@@ -271,16 +308,17 @@
             <div class="table-wrap">
               <table class="findings" id="search-table">
                 <caption>Confirmed and Possible first. Profile means observed identity-specific URL; Resource, Candidate, and Provider Endpoint are never verified profiles.</caption>
-                <thead><tr><th scope="col">Provider</th><th scope="col">Status</th><th scope="col">Confidence</th><th scope="col">URL / resource</th><th scope="col">Evidence</th></tr></thead>
+                <thead><tr><th scope="col">Provider</th><th scope="col">Category</th><th scope="col">Status</th><th scope="col">Confidence</th><th scope="col">URL / resource</th><th scope="col">Evidence</th></tr></thead>
                 <tbody></tbody>
               </table>
             </div>
+            <p class="muted" id="search-sample-note" hidden></p>
             <details class="collapsible" id="search-other-details" hidden>
               <summary id="search-other-summary">Other provider outcomes (negative / blocked / unknown)</summary>
               <div class="table-wrap">
                 <table class="findings" id="search-table-other">
                   <caption>Coverage detail: not verified profiles.</caption>
-                  <thead><tr><th scope="col">Provider</th><th scope="col">Status</th><th scope="col">Confidence</th><th scope="col">URL / resource</th><th scope="col">Evidence</th></tr></thead>
+                  <thead><tr><th scope="col">Provider</th><th scope="col">Category</th><th scope="col">Status</th><th scope="col">Confidence</th><th scope="col">URL / resource</th><th scope="col">Evidence</th></tr></thead>
                   <tbody></tbody>
                 </table>
               </div>

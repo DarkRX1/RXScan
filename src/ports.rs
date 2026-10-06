@@ -330,7 +330,9 @@ pub fn udp_concurrency_for_speed(speed: SpeedSetting) -> usize {
 
 /// Resolved UDP port list for one scan task, derived from the shared
 /// operator port selection: `Common` → `udp-common-v1` (NOT the TCP set),
-/// `Explicit` → the same operator list, `All` → `1..=65535`.
+/// `Explicit` → the same operator list, `All` → bounded `udp-common-v1`
+/// (All TCP ports never implies a 65,535-port UDP scan; UDP stays opt-in
+/// bounded unless an explicit UDP list is given).
 /// Always sorted, deduped, port 0 excluded.
 pub fn resolve_udp_ports(selection: &TcpPortSelection, level: u8) -> ResolvedPorts {
     let _ = level;
@@ -349,9 +351,11 @@ pub fn resolve_udp_ports(selection: &TcpPortSelection, level: u8) -> ResolvedPor
                 source: PortSource::Explicit,
             }
         }
+        // All TCP ports (1-65535) does NOT enable full-range UDP: UDP
+        // remains the existing bounded discovery set.
         TcpPortSelection::All => ResolvedPorts {
-            ports: (1..=65_535).collect(),
-            source: PortSource::All,
+            ports: UDP_COMMON_V1.to_vec(),
+            source: PortSource::LevelAutomatic,
         },
     }
 }

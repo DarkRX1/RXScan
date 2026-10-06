@@ -189,32 +189,43 @@ pub fn visible_width(text: &str) -> usize {
 
 /// Glyph for a username-search status. ASCII fallback for limited terminals.
 /// Every row also prints its status label, so glyphs are decorative.
+///
+/// Shared semantic vocabulary (CLI and web agree on meaning):
+/// `✓` confirmed, `?` possible, `–/·` negative, `!` blocked/rate-limited,
+/// `×` error, `○` unavailable/unscanned. Color is never the only signal.
 pub fn search_status_glyph(status: &str, ascii: bool) -> char {
     if ascii {
         return match status {
             "confirmed" => '+',
-            "probable" => '~',
+            "probable" => '?',
             "possible" => '?',
-            "not_found" => '.',
+            "not_found" => '-',
+            "unknown" => '-',
             "blocked" => '!',
-            "rate_limited" => '%',
+            "rate_limited" => '!',
             "error" => 'x',
-            "skipped" => '-',
-            "authentication_required" => 'A',
+            "skipped" => 'o',
+            "unscanned" => 'o',
+            "unavailable" => 'o',
+            "authentication_required" => '!',
             "cancelled" => '#',
             _ => '.',
         };
     }
     match status {
         "confirmed" => '✓',
-        "probable" => '◆',
+        // Probable is uncertain: same `?` family as possible (amber).
+        "probable" => '?',
         "possible" => '?',
-        "not_found" => '·',
+        "not_found" => '–',
+        "unknown" => '–',
         "blocked" => '!',
-        "rate_limited" => '↻',
+        "rate_limited" => '!',
         "error" => '×',
         "skipped" => '○',
-        "authentication_required" => '⚠',
+        "unscanned" => '○',
+        "unavailable" => '○',
+        "authentication_required" => '!',
         "cancelled" => '■',
         _ => '·',
     }
@@ -1091,6 +1102,43 @@ impl SearchRow {
     }
 }
 
+/// Category + metadata + explain enrichment for search rendering.
+///
+/// Shared by CLI and web presentation: the core owns the data (registry
+/// categories, observation attributes, evidence, provenance); the terminal
+/// only renders it. All maps key on provider ID. Absent entries render as
+/// empty (never invented).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SearchEnrichment {
+    /// Provider ID -> machine category ID (`developer`, `social`, ...).
+    pub categories: std::collections::BTreeMap<String, String>,
+    /// Provider ID -> human category label (`Developer`, `Social`, ...).
+    pub category_labels: std::collections::BTreeMap<String, String>,
+    /// Provider ID -> bounded public metadata pairs.
+    pub metadata: std::collections::BTreeMap<String, Vec<(String, String)>>,
+    /// Provider ID -> hidden metadata count beyond the bounded subset.
+    pub metadata_hidden: std::collections::BTreeMap<String, usize>,
+    /// Provider ID -> classification evidence lines.
+    pub evidence: std::collections::BTreeMap<String, Vec<String>>,
+    /// Provider ID -> provenance string (`provider-id@version`).
+    pub provenance: std::collections::BTreeMap<String, String>,
+    /// Provider ID -> observed timestamp (seconds).
+    pub observed_at: std::collections::BTreeMap<String, u64>,
+}
+
+/// Per-category coverage for the terminal COVERAGE section.
+///
+/// Scheduled counts come from the real execution plan; complete counts from
+/// real observations. Explicit wording beats ambiguous fractions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchCategoryCoverage {
+    pub category: String,
+    pub label: String,
+    pub scheduled: usize,
+    pub complete: usize,
+    pub remaining: usize,
+}
+
 /// Human URL semantics for search findings. Presentation metadata only:
 /// the engine never constructs this, machine schemas never carry it, and
 /// it never changes confidence or status.
@@ -1293,6 +1341,44 @@ pub struct SearchSummary {
     pub truncated: bool,
 }
 
+/// Findings-first display budget shared by both search renderers: at most
+/// this many confirmed+possible rows are shown unless `--all` is given.
+const DEFAULT_FINDINGS_BUDGET: usize = 10;
+/// Rows held back for possible findings when they exist; unused confirmed
+/// capacity flows back to possible findings.
+const POSSIBLE_RESERVE: usize = 2;
+
+/// Sort search rows by confidence (descending), then provider name, so both
+/// renderers present findings in the same deterministic order.
+fn sort_search_rows(rows: &mut Vec<&SearchRow>) {
+    rows.sort_by(|a, b| {
+        b.confidence
+            .cmp(&a.confidence)
+            .then(a.provider.cmp(&b.provider))
+    });
+}
+
+/// Split confirmed/possible rows under the display budget: confirmed first,
+/// up to [`POSSIBLE_RESERVE`] rows reserved for possible findings when any
+/// exist. Pure slicing — presentation only, never affects the evidence.
+fn slice_findings_budget<'row>(
+    confirmed: &'row [&'row SearchRow],
+    possible: &'row [&'row SearchRow],
+) -> (&'row [&'row SearchRow], &'row [&'row SearchRow]) {
+    if possible.is_empty() {
+        let take = confirmed.len().min(DEFAULT_FINDINGS_BUDGET);
+        (&confirmed[..take], &[][..])
+    } else {
+        let reserve = possible.len().min(POSSIBLE_RESERVE);
+        let take_confirmed = confirmed
+            .len()
+            .min(DEFAULT_FINDINGS_BUDGET.saturating_sub(reserve));
+        let remaining = DEFAULT_FINDINGS_BUDGET.saturating_sub(take_confirmed);
+        let take_possible = possible.len().min(remaining);
+        (&confirmed[..take_confirmed], &possible[..take_possible])
+    }
+}
+
 /// Render an interactive username-search report.
 ///
 /// Designed interface: workflow header, `TARGET` metadata, `FINDINGS`
@@ -1391,6 +1477,461 @@ pub fn render_search_report_explain_caps(
     render_search_report_inner(target, requested, rows, summary, show_all, caps, true)
 }
 
+/// Full enriched search report (categories, metadata, coverage by category).
+///
+/// Same findings-first hierarchy as [`render_search_report_caps`] but with:
+/// category labels on every card, bounded public metadata, per-category
+/// COVERAGE, grouped `--all` sections, `--explain` evidence/provenance, and
+/// honest cancellation accounting. Presentation only: the core decides.
+///
+/// `scale` carries registry-wide denominators (vectors registered,
+/// providers usable) so the header stays honest at thousands of vectors:
+/// Target / Providers usable / Vectors registered / Scheduled. `requested`
+/// is always the scheduled set for this run — never the registry size.
+/// Pass `None` for the legacy 3-line header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchScaleHeader {
+    /// Registered lookup paths across the whole registry.
+    pub vectors_registered: usize,
+    /// Usable providers across the whole registry.
+    pub providers_usable: usize,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_search_report_full(
+    target: &str,
+    requested: usize,
+    rows: &[SearchRow],
+    summary: &SearchSummary,
+    show_all: bool,
+    explain: bool,
+    cancelled: bool,
+    caps: TerminalCapabilities,
+    enrichment: Option<&SearchEnrichment>,
+    category_coverage: Option<&[SearchCategoryCoverage]>,
+    scale: Option<&SearchScaleHeader>,
+) -> String {
+    // Reuse the stable inner renderer for the base hierarchy, then enrich.
+    // To show categories inline we re-render cards with enrichment instead
+    // of the plain inner cards: both paths share the findings budget in
+    // [`slice_findings_budget`] so `--all` and display budgets stay identical.
+    let color = caps.color;
+    let mut out = String::new();
+    if cancelled {
+        out.push_str(&workflow_header(
+            caps,
+            "PUBLIC SEARCH",
+            Some(WorkflowMode::Custom("CANCELLED".to_owned())),
+        ));
+    } else {
+        out.push_str(&workflow_header(
+            caps,
+            "PUBLIC SEARCH",
+            Some(WorkflowMode::Passive),
+        ));
+    }
+    out.push('\n');
+    out.push('\n');
+    out.push_str(&section_heading(
+        caps,
+        if cancelled {
+            "Search cancelled"
+        } else {
+            "Target"
+        },
+    ));
+    out.push('\n');
+    out.push('\n');
+    let target_value = paint(color, Style::Identifier, target);
+    out.push_str(&key_value(caps, "Username", &target_value, 10));
+    out.push('\n');
+    if let Some(scale) = scale {
+        // Scale-honest header: registry denominators stay distinct from the
+        // per-run scheduled set. All values arrive precomputed from the
+        // core registry + plan — never hardcoded, never estimated.
+        out.push_str(&key_value(
+            caps,
+            "Providers",
+            &paint(
+                color,
+                Style::Value,
+                &format!("{} usable", format_count(scale.providers_usable)),
+            ),
+            10,
+        ));
+        out.push('\n');
+        out.push_str(&key_value(
+            caps,
+            "Vectors",
+            &paint(
+                color,
+                Style::Value,
+                &format!("{} registered", format_count(scale.vectors_registered)),
+            ),
+            10,
+        ));
+        out.push('\n');
+        out.push_str(&key_value(
+            caps,
+            "Scheduled",
+            &paint(color, Style::Value, &format_count(requested)),
+            10,
+        ));
+        out.push('\n');
+    } else {
+        out.push_str(&key_value(
+            caps,
+            "Providers",
+            &paint(color, Style::Value, &format_count(requested)),
+            10,
+        ));
+        out.push('\n');
+    }
+    out.push_str(&key_value(
+        caps,
+        "Network",
+        &paint(color, Style::Muted, "Disabled"),
+        10,
+    ));
+    out.push('\n');
+    if cancelled {
+        out.push('\n');
+        out.push_str(&warning_block(
+            caps,
+            "Search cancelled — partial evidence preserved.",
+            None,
+        ));
+        out.push('\n');
+    }
+    let mut confirmed: Vec<&SearchRow> = rows
+        .iter()
+        .filter(|row| row.status == "confirmed")
+        .collect();
+    sort_search_rows(&mut confirmed);
+    let mut possible: Vec<&SearchRow> = rows
+        .iter()
+        .filter(|row| row.status == "possible" || row.status == "probable")
+        .collect();
+    sort_search_rows(&mut possible);
+    let attention: Vec<&SearchRow> = rows
+        .iter()
+        .filter(|row| row.tier == RowTier::Attention)
+        .collect();
+    let quiet: Vec<&SearchRow> = rows
+        .iter()
+        .filter(|row| row.tier == RowTier::Quiet)
+        .collect();
+    let has_primary = !confirmed.is_empty() || !possible.is_empty();
+    let show_attention = show_all || explain;
+    let show_quiet = show_all;
+    // SUMMARY line (glanceable): confirmed / possible / completed.
+    out.push('\n');
+    out.push_str(&section_heading(caps, "Summary"));
+    out.push('\n');
+    out.push('\n');
+    let confirmed_count = rows.iter().filter(|r| r.status == "confirmed").count();
+    let possible_count = rows
+        .iter()
+        .filter(|r| r.status == "possible" || r.status == "probable")
+        .count();
+    out.push_str(&key_value(
+        caps,
+        "Confirmed",
+        &paint(color, Style::Success, &format!("{confirmed_count}")),
+        13,
+    ));
+    out.push('\n');
+    out.push_str(&key_value(
+        caps,
+        "Possible",
+        &paint(color, Style::Warning, &format!("{possible_count}")),
+        13,
+    ));
+    out.push('\n');
+    out.push_str(&key_value(
+        caps,
+        "Completed",
+        &paint(
+            color,
+            Style::Value,
+            &format!(
+                "{} / {}",
+                format_count(summary.completed),
+                format_count(summary.requested)
+            ),
+        ),
+        13,
+    ));
+    out.push('\n');
+    // FINDINGS ---------------------------------------------------------
+    out.push('\n');
+    out.push_str(&section_heading(
+        caps,
+        if show_all { "All findings" } else { "Findings" },
+    ));
+    out.push('\n');
+    let no_primary_visible = !has_primary
+        && (!show_attention || attention.is_empty())
+        && (!show_quiet || quiet.is_empty());
+    if no_primary_visible {
+        out.push('\n');
+        out.push_str(&format!(
+            "  {}\n",
+            paint(
+                color,
+                Style::Muted,
+                "No confirmed or possible accounts found."
+            )
+        ));
+    } else {
+        out.push('\n');
+        if show_all {
+            // Grouped complete view: CONFIRMED / POSSIBLE / NEGATIVE /
+            // BLOCKED / ERRORS / UNAVAILABLE — never merged.
+            let groups: Vec<(&str, Vec<&SearchRow>)> = vec![
+                ("CONFIRMED", confirmed.to_vec()),
+                ("POSSIBLE", possible.to_vec()),
+                (
+                    "NEGATIVE",
+                    rows.iter()
+                        .filter(|r| {
+                            r.status == "not_found"
+                                || r.status == "unknown"
+                                || r.status == "skipped"
+                        })
+                        .collect(),
+                ),
+                (
+                    "BLOCKED / RATE LIMITED",
+                    rows.iter()
+                        .filter(|r| {
+                            r.status == "blocked"
+                                || r.status == "rate_limited"
+                                || r.status == "authentication_required"
+                        })
+                        .collect(),
+                ),
+                (
+                    "ERRORS",
+                    rows.iter().filter(|r| r.status == "error").collect(),
+                ),
+                (
+                    "UNAVAILABLE / UNSCANNED",
+                    rows.iter()
+                        .filter(|r| {
+                            r.status == "unscanned"
+                                || r.status == "cancelled"
+                                || r.status == "unavailable"
+                        })
+                        .collect(),
+                ),
+            ];
+            for (heading, items) in groups {
+                if items.is_empty() {
+                    continue;
+                }
+                out.push_str(&section_heading(caps, heading));
+                out.push('\n');
+                out.push('\n');
+                if heading == "CONFIRMED" || heading == "POSSIBLE" {
+                    out.push_str(&render_search_cards_full(
+                        caps, target, &items, enrichment, explain,
+                    ));
+                } else if heading == "NEGATIVE" {
+                    out.push_str(&render_search_rows_muted_full(caps, &items, enrichment));
+                } else {
+                    out.push_str(&render_search_table_full(
+                        caps,
+                        caps.width_mode(),
+                        &items,
+                        enrichment,
+                    ));
+                }
+            }
+            // Quiet rows already covered in groups above; attention table
+            // is part of groups. Nothing else to add.
+        } else {
+            let (shown_confirmed, shown_possible) = slice_findings_budget(&confirmed, &possible);
+            let mut combined: Vec<&SearchRow> =
+                Vec::with_capacity(shown_confirmed.len() + shown_possible.len());
+            combined.extend_from_slice(shown_confirmed);
+            combined.extend_from_slice(shown_possible);
+            out.push_str(&render_search_cards_full(
+                caps, target, &combined, enrichment, explain,
+            ));
+            let total_primary = confirmed.len() + possible.len();
+            let hidden_findings = total_primary.saturating_sub(combined.len());
+            if hidden_findings > 0 {
+                out.push_str(&format!(
+                    "  {}\n",
+                    paint(
+                        color,
+                        Style::Muted,
+                        &format!("+ {hidden_findings} additional findings"),
+                    )
+                ));
+            }
+            if show_attention {
+                out.push_str(&render_search_table(caps, caps.width_mode(), &attention));
+            }
+            if show_quiet {
+                out.push_str(&render_search_rows_muted(caps, &quiet));
+            }
+        }
+    }
+    // COVERAGE ---------------------------------------------------------
+    out.push('\n');
+    out.push_str(&section_heading(caps, "Coverage"));
+    out.push('\n');
+    out.push('\n');
+    if let Some(coverage) = category_coverage {
+        if !coverage.is_empty() {
+            if caps.width_mode() == WidthMode::Compact {
+                for entry in coverage {
+                    let line = format!(
+                        "  {}  {}/{} complete",
+                        entry.category,
+                        format_count(entry.complete),
+                        format_count(entry.scheduled)
+                    );
+                    out.push_str(&format!("{}\n", paint(color, Style::Identifier, &line)));
+                }
+            } else {
+                let mut table = Table::new(&["CATEGORY", "SCHEDULED", "COMPLETE", "REMAINING"]);
+                table.max_widths = vec![20, 12, 12, 12];
+                table.aligns = vec![Align::Left, Align::Right, Align::Right, Align::Right];
+                for entry in coverage {
+                    table.cells(vec![
+                        paint(color, Style::Identifier, &entry.label),
+                        format_count(entry.scheduled),
+                        format_count(entry.complete),
+                        format_count(entry.remaining),
+                    ]);
+                }
+                out.push_str(&table.render(caps));
+                out.push('\n');
+            }
+            out.push('\n');
+        }
+    }
+    let counts = SearchCoverage::from_rows(rows, summary);
+    for (label, value) in counts.rows() {
+        let styled = if label == "Confirmed" {
+            paint(color, Style::Success, &value)
+        } else if label == "Possible" || label == "Rate limited" {
+            paint(color, Style::Warning, &value)
+        } else if label == "Errors" {
+            paint(color, Style::Error, &value)
+        } else if label == "Blocked" || label == "Unknown" {
+            paint(color, Style::Muted, &value)
+        } else {
+            paint(color, Style::Value, &value)
+        };
+        out.push_str(&key_value(caps, label, &styled, 13));
+        out.push('\n');
+    }
+    // OTHER PROVIDER OUTCOMES (summarized telemetry, never flooding).
+    {
+        let negative = rows
+            .iter()
+            .filter(|r| r.status == "not_found" || r.status == "unknown" || r.status == "skipped")
+            .count();
+        let blocked = rows
+            .iter()
+            .filter(|r| r.status == "blocked" || r.status == "authentication_required")
+            .count();
+        let limited = rows.iter().filter(|r| r.status == "rate_limited").count();
+        let errors = rows.iter().filter(|r| r.status == "error").count();
+        let unscanned = summary.unscanned + summary.cancelled;
+        if !show_all {
+            out.push('\n');
+            out.push_str(&section_heading(caps, "Other"));
+            out.push('\n');
+            out.push('\n');
+            out.push_str(&format!(
+                "  {} negative\n",
+                paint(color, Style::Muted, &format!("– {negative}"))
+            ));
+            out.push_str(&format!(
+                "  {} blocked\n",
+                paint(color, Style::Warning, &format!("! {blocked}"))
+            ));
+            out.push_str(&format!(
+                "  {} rate-limited\n",
+                paint(color, Style::Warning, &format!("! {limited}"))
+            ));
+            out.push_str(&format!(
+                "  {} errors\n",
+                paint(color, Style::Error, &format!("× {errors}"))
+            ));
+            out.push_str(&format!(
+                "  {} remaining\n",
+                paint(color, Style::Muted, &format!("○ {unscanned}"))
+            ));
+            out.push('\n');
+            out.push_str(&format!(
+                "  {}\n",
+                paint(color, Style::Muted, "--all       complete provider results")
+            ));
+            out.push_str(&format!(
+                "  {}\n",
+                paint(color, Style::Muted, "--explain   classification evidence")
+            ));
+        }
+    }
+    let secondary_failures =
+        counts.blocked + counts.unknown + counts.rate_limited + counts.errors + summary.unscanned;
+    let incomplete =
+        summary.unscanned > 0 || summary.truncated || summary.completed < summary.requested;
+    if secondary_failures > 0 || incomplete || cancelled {
+        out.push('\n');
+        out.push_str(&warning_block(
+            caps,
+            if cancelled {
+                "Search cancelled — partial evidence preserved."
+            } else {
+                "Some providers could not be verified."
+            },
+            None,
+        ));
+        out.push('\n');
+    }
+    out.push('\n');
+    let recap = format!(
+        "{}  ·  {}  ·  {}",
+        paint(
+            color,
+            Style::Success,
+            &format!("{confirmed_count} confirmed")
+        ),
+        paint(color, Style::Warning, &format!("{possible_count} possible")),
+        paint(
+            color,
+            Style::Secondary,
+            &format!(
+                "{}/{} completed",
+                format_count(summary.completed),
+                format_count(summary.requested)
+            )
+        ),
+    );
+    out.push_str(&footer_block(caps, &recap));
+    out.push('\n');
+    if explain {
+        out.push_str(&format!(
+            "  {} requested · {} completed · {} skipped · {} cancelled · {} unscanned · 0 network scans{}",
+            summary.requested,
+            summary.completed,
+            summary.skipped,
+            summary.cancelled,
+            summary.unscanned,
+            if summary.truncated { " (truncated)" } else { "" },
+        ));
+        out.push('\n');
+    }
+    out
+}
+
 fn render_search_report_inner(
     target: &str,
     requested: usize,
@@ -1441,26 +1982,16 @@ fn render_search_report_inner(
     // and show individually only with `--all` (or `--explain` for
     // reasoning). Presentation limits never affect execution or the
     // evidence model.
-    const DEFAULT_FINDINGS_BUDGET: usize = 10;
-    const POSSIBLE_RESERVE: usize = 2;
     let mut confirmed: Vec<&SearchRow> = rows
         .iter()
         .filter(|row| row.status == "confirmed")
         .collect();
-    confirmed.sort_by(|a, b| {
-        b.confidence
-            .cmp(&a.confidence)
-            .then(a.provider.cmp(&b.provider))
-    });
+    sort_search_rows(&mut confirmed);
     let mut possible: Vec<&SearchRow> = rows
         .iter()
         .filter(|row| row.status == "possible" || row.status == "probable")
         .collect();
-    possible.sort_by(|a, b| {
-        b.confidence
-            .cmp(&a.confidence)
-            .then(a.provider.cmp(&b.provider))
-    });
+    sort_search_rows(&mut possible);
     let attention: Vec<&SearchRow> = rows
         .iter()
         .filter(|row| row.tier == RowTier::Attention)
@@ -1518,17 +2049,8 @@ fn render_search_report_inner(
         // total budget unless `--all`.
         let (shown_confirmed, shown_possible): (&[&SearchRow], &[&SearchRow]) = if show_all {
             (confirmed.as_slice(), possible.as_slice())
-        } else if possible.is_empty() {
-            let take = confirmed.len().min(DEFAULT_FINDINGS_BUDGET);
-            (&confirmed[..take], &[][..])
         } else {
-            let reserve = possible.len().min(POSSIBLE_RESERVE);
-            let take_confirmed = confirmed
-                .len()
-                .min(DEFAULT_FINDINGS_BUDGET.saturating_sub(reserve));
-            let remaining = DEFAULT_FINDINGS_BUDGET.saturating_sub(take_confirmed);
-            let take_possible = possible.len().min(remaining);
-            (&confirmed[..take_confirmed], &possible[..take_possible])
+            slice_findings_budget(&confirmed, &possible)
         };
         let mut combined: Vec<&SearchRow> =
             Vec::with_capacity(shown_confirmed.len() + shown_possible.len());
@@ -1673,6 +2195,9 @@ impl SearchCoverage {
                 "not_found" | "unknown" | "skipped" => unknown += 1,
                 "rate_limited" => rate_limited += 1,
                 "error" => errors += 1,
+                // Unscanned/cancelled have no observation; they are accounted
+                // via summary.unscanned/cancelled, never double-counted here.
+                "unscanned" | "cancelled" | "unavailable" => {}
                 _ => unknown += 1,
             }
         }
@@ -1717,7 +2242,22 @@ impl SearchCoverage {
 /// cautious candidate wording and never claims `public profile`.
 /// Generic provider endpoints are omitted from the default URL line;
 /// when no identity-specific URL exists the card states so explicitly.
+///
+/// Categories render as neutral `[category]` labels (cyan/muted) that never
+/// compete with status colors. Public metadata renders as a bounded subset.
+/// `--explain` adds Classification / Evidence / Provenance detail from the
+/// same core evidence (never invented prose).
 fn render_search_cards(caps: TerminalCapabilities, target: &str, rows: &[&SearchRow]) -> String {
+    render_search_cards_full(caps, target, rows, None, false)
+}
+
+fn render_search_cards_full(
+    caps: TerminalCapabilities,
+    target: &str,
+    rows: &[&SearchRow],
+    enrichment: Option<&SearchEnrichment>,
+    explain: bool,
+) -> String {
     if rows.is_empty() {
         return String::new();
     }
@@ -1734,10 +2274,21 @@ fn render_search_cards(caps: TerminalCapabilities, target: &str, rows: &[&Search
             format!("{provider_clean} / {target_clean}")
         };
         let glyph_text = glyph(row.status, caps.ascii);
+        // Category label: neutral/cyan/muted, never competing with status.
+        let category_suffix = enrichment
+            .and_then(|enrichment| enrichment.categories.get(&row.provider))
+            .map(|category| sanitize_human_text(category))
+            .filter(|category| !category.is_empty())
+            .map(|category| {
+                let shown = truncate_display(&category, 24);
+                format!(" [{}]", paint(color, Style::Identifier, &shown))
+            })
+            .unwrap_or_default();
         let header = format!(
-            "  {} {}",
+            "  {} {}{}",
             paint(color, style_for(row.status), &glyph_text),
             paint(color, Style::Primary, &header_value),
+            category_suffix,
         );
         out.push_str(&header);
         out.push('\n');
@@ -1826,6 +2377,79 @@ fn render_search_cards(caps: TerminalCapabilities, target: &str, rows: &[&Search
             "    {}\n",
             paint(color, Style::Muted, &conf_shown)
         ));
+        // Bounded public metadata subset (default) + hidden count.
+        if let Some(enrichment) = enrichment {
+            if let Some(pairs) = enrichment.metadata.get(&row.provider) {
+                let shown: Vec<(String, String)> = pairs.iter().take(4).cloned().collect();
+                for (key, value) in shown {
+                    let key_clean = truncate_display(&sanitize_human_text(&key), 20);
+                    let value_clean = truncate_display(&sanitize_human_text(&value), 60);
+                    // URLs / metadata values use cyan/identifier; never red.
+                    out.push_str(&format!(
+                        "    {}  {}\n",
+                        paint(color, Style::Muted, &format!("{key_clean:<12}")),
+                        paint(color, Style::Identifier, &value_clean)
+                    ));
+                }
+                if let Some(hidden) = enrichment.metadata_hidden.get(&row.provider) {
+                    if *hidden > 0 {
+                        out.push_str(&format!(
+                            "    {}\n",
+                            paint(
+                                color,
+                                Style::Muted,
+                                &format!("+{hidden} more fields (--all)")
+                            )
+                        ));
+                    }
+                }
+            }
+            // --explain: WHY the classification occurred (real evidence only).
+            if explain {
+                if let Some(lines) = enrichment.evidence.get(&row.provider) {
+                    if !lines.is_empty() {
+                        out.push_str(&format!("    {}\n", paint(color, Style::Muted, "Evidence")));
+                        for line in lines.iter().take(4) {
+                            let clean = truncate_display(&sanitize_human_text(line), 72);
+                            out.push_str(&format!(
+                                "    {} {}\n",
+                                paint(color, Style::Muted, "|-"),
+                                paint(color, Style::Primary, &clean)
+                            ));
+                        }
+                    }
+                }
+                if let Some(provenance) = enrichment.provenance.get(&row.provider) {
+                    let clean = truncate_display(&sanitize_human_text(provenance), 64);
+                    out.push_str(&format!(
+                        "    {} {}\n",
+                        paint(color, Style::Muted, "Provenance"),
+                        paint(color, Style::Identifier, &clean)
+                    ));
+                }
+                if let Some(observed) = enrichment.observed_at.get(&row.provider) {
+                    out.push_str(&format!(
+                        "    {} {}\n",
+                        paint(color, Style::Muted, "Observed"),
+                        paint(color, Style::Muted, &observed.to_string())
+                    ));
+                }
+                // URL-kind semantics (ObservedProfile vs Candidate vs etc.).
+                let kind = classify_search_url(&row.url, target, row.url_observed);
+                let kind_label = match kind {
+                    SearchUrlKind::ObservedProfile => "ObservedProfile",
+                    SearchUrlKind::ObservedResource => "ObservedResource",
+                    SearchUrlKind::CandidateProfile => "Candidate",
+                    SearchUrlKind::ProviderEndpoint => "ProviderEndpoint",
+                    SearchUrlKind::None => "None",
+                };
+                out.push_str(&format!(
+                    "    {} {}\n",
+                    paint(color, Style::Muted, "URL kind"),
+                    paint(color, Style::Identifier, kind_label)
+                ));
+            }
+        }
         out.push('\n');
     }
     out
@@ -1928,33 +2552,178 @@ fn search_status_label(status: &str) -> String {
 
 /// Quiet (negative) rows, muted, only with `show_all`.
 fn render_search_rows_muted(caps: TerminalCapabilities, rows: &[&SearchRow]) -> String {
+    render_search_rows_muted_full(caps, rows, None)
+}
+
+fn render_search_rows_muted_full(
+    caps: TerminalCapabilities,
+    rows: &[&SearchRow],
+    enrichment: Option<&SearchEnrichment>,
+) -> String {
     let mut out = String::new();
     for row in rows {
         let provider_clean = truncate_display(&sanitize_human_text(&row.provider), 48);
+        let category_suffix = enrichment
+            .and_then(|enrichment| enrichment.categories.get(&row.provider))
+            .map(|category| sanitize_human_text(category))
+            .filter(|category| !category.is_empty())
+            .map(|category| {
+                let shown = truncate_display(&category, 20);
+                format!(" [{}]", paint(caps.color, Style::Identifier, &shown))
+            })
+            .unwrap_or_default();
         out.push_str(&format!(
-            "  {} {}  {}\n",
+            "  {} {}  {}{}  {}\n",
             paint(caps.color, Style::Muted, &glyph(row.status, caps.ascii)),
             paint(caps.color, Style::Muted, &search_status_label(row.status)),
             provider_clean,
+            category_suffix,
+            if row.detail.is_empty() {
+                String::new()
+            } else {
+                truncate_display(&sanitize_human_text(&row.detail), 40)
+            },
         ));
     }
     out
+}
+
+/// Attention table with category column for the full `--all` view.
+fn render_search_table_full(
+    caps: TerminalCapabilities,
+    mode: WidthMode,
+    rows: &[&SearchRow],
+    enrichment: Option<&SearchEnrichment>,
+) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+    if enrichment.is_none() {
+        return render_search_table(caps, mode, rows);
+    }
+    if mode == WidthMode::Compact {
+        let mut out = String::new();
+        for row in rows {
+            let status = search_status_label(row.status);
+            out.push_str(&format!(
+                "  {} {}\n",
+                paint(
+                    caps.color,
+                    style_for(row.status),
+                    &glyph(row.status, caps.ascii)
+                ),
+                paint(caps.color, style_for(row.status), &status),
+            ));
+            let provider_clean = truncate_display(&sanitize_human_text(&row.provider), 48);
+            let category = enrichment
+                .and_then(|e| e.categories.get(&row.provider))
+                .map(|c| sanitize_human_text(c))
+                .unwrap_or_default();
+            let category_line = if category.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", truncate_display(&category, 20))
+            };
+            out.push_str(&format!(
+                "    Provider    {}{}\n",
+                paint(caps.color, Style::Identifier, &provider_clean),
+                paint(caps.color, Style::Identifier, &category_line)
+            ));
+            let conf = format!("{} {}%", confidence_label(row.confidence), row.confidence);
+            out.push_str(&format!(
+                "    Confidence  {}\n",
+                paint(caps.color, style_for_confidence(row.confidence), &conf)
+            ));
+            if !row.detail.is_empty() {
+                let clean = sanitize_human_text(&row.detail);
+                let short = truncate_display(&clean, 48);
+                out.push_str(&format!("    Evidence    {short}\n"));
+            }
+        }
+        return out;
+    }
+    // Wide/normal: STATUS / PROVIDER / CATEGORY / CONFIDENCE (+EVIDENCE when wide).
+    let show_detail = mode == WidthMode::Wide;
+    let mut table = if show_detail {
+        Table::new(&["STATUS", "PROVIDER", "CATEGORY", "CONFIDENCE", "EVIDENCE"])
+    } else {
+        Table::new(&["STATUS", "PROVIDER", "CATEGORY", "CONFIDENCE"])
+    };
+    if show_detail {
+        table.max_widths = vec![12, 20, 14, 12, 30];
+    } else {
+        table.max_widths = vec![12, 22, 14, 14];
+    }
+    for row in rows {
+        let status_label = search_status_label(row.status);
+        let glyph_text = glyph(row.status, caps.ascii);
+        let status_cell = format!(
+            "{} {}",
+            paint(caps.color, style_for(row.status), &glyph_text),
+            paint(caps.color, style_for(row.status), &status_label),
+        );
+        let provider_clean = truncate_display(&sanitize_human_text(&row.provider), 24);
+        let provider_cell = paint(caps.color, Style::Identifier, &provider_clean);
+        let category_raw = enrichment
+            .and_then(|e| e.categories.get(&row.provider))
+            .map(|c| sanitize_human_text(c))
+            .unwrap_or_default();
+        let category_cell = paint(
+            caps.color,
+            Style::Identifier,
+            &truncate_display(&category_raw, 14),
+        );
+        let conf_text = format!("{} {}%", confidence_label(row.confidence), row.confidence);
+        let conf_cell = paint(caps.color, style_for_confidence(row.confidence), &conf_text);
+        if show_detail {
+            let evidence = if row.detail.is_empty() {
+                paint(caps.color, Style::Muted, "-")
+            } else {
+                truncate_display(&sanitize_human_text(&row.detail), 30)
+            };
+            table.cells(vec![
+                status_cell,
+                provider_cell,
+                category_cell,
+                conf_cell,
+                evidence,
+            ]);
+        } else {
+            table.cells(vec![status_cell, provider_cell, category_cell, conf_cell]);
+        }
+    }
+    let mut rendered = table.render(caps);
+    rendered.push('\n');
+    rendered
 }
 
 fn glyph(status: &str, ascii: bool) -> String {
     search_status_glyph(status, ascii).to_string()
 }
 
+/// Semantic color mapping shared by CLI and web.
+///
+/// GREEN (Success): confirmed observation.
+/// AMBER (Warning): possible / uncertain / blocked / rate-limited.
+/// RED (Error): actual execution/provider error.
+/// GRAY (Muted): negative / unavailable / skipped / unscanned.
+/// CYAN (Identifier): URLs / evidence / metadata / category labels.
+/// WHITE (Primary/Value): headings / provider names / important text.
+/// Negative results are never bright red: red means something failed.
 fn style_for(status: &str) -> Style {
     match status {
         "confirmed" => Style::Success,
-        "probable" => Style::Info,
-        "possible" => Style::Warning,
+        "probable" | "possible" => Style::Warning,
         "rate_limited" => Style::Warning,
         "blocked" | "authentication_required" => Style::Warning,
         "error" => Style::Error,
         _ => Style::Muted,
     }
+}
+
+/// Public semantic style helper for shared parity tests and web mapping.
+pub fn style_for_search_status(status: &str) -> Style {
+    style_for(status)
 }
 
 /// Strip ANSI from `styled` and compare semantic text to `plain`.
@@ -2062,7 +2831,10 @@ mod tests {
         assert_eq!(search_status_glyph("confirmed", false), '✓');
         assert_eq!(search_status_glyph("error", true), 'x');
         assert_eq!(search_status_glyph("error", false), '×');
-        assert_eq!(search_status_glyph("authentication_required", true), 'A');
+        // Blocked / rate-limited / auth-required share `!` (amber warning).
+        assert_eq!(search_status_glyph("authentication_required", true), '!');
+        assert_eq!(search_status_glyph("blocked", true), '!');
+        assert_eq!(search_status_glyph("rate_limited", true), '!');
         assert_eq!(search_status_glyph("bogus", true), '.');
     }
 

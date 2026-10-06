@@ -73,16 +73,17 @@ impl UdpScanPolicy {
         }
     }
 
-    /// Concrete port list for one task. Explicit/`all` in task params win;
-    /// otherwise the plan-level selection resolved for UDP (`Common` means
-    /// `udp-common-v1`). Always sorted, deduped, port 0 excluded.
+    /// Concrete port list for one task. Explicit in task params wins;
+    /// `all` in a UDP task means the bounded UDP set (never 65k UDP ports:
+    /// All TCP ports does not imply full-range UDP). Otherwise the
+    /// plan-level selection resolved for UDP (`Common` means `udp-common-v1`).
+    /// Always sorted, deduped, port 0 excluded.
     pub fn ports_for_task(&self, task_ports_param: Option<&str>) -> ResolvedPorts {
         if let Some(param) = task_ports_param {
             if param == "all" {
-                return ResolvedPorts {
-                    ports: (1..=65_535).collect(),
-                    source: PortSource::All,
-                };
+                // UDP task with `ports=all` (inherited from an all-TCP-ports
+                // plan) stays bounded: no silent 65k-port UDP scan.
+                return resolve_udp_ports(&TcpPortSelection::Common, self.level);
             }
             if let Some(rest) = param.strip_prefix("explicit:") {
                 let ports = parse_port_selection(rest).unwrap_or_default();

@@ -5,7 +5,7 @@
 <h1 align="center">RXScan</h1>
 
 <p align="center">
-  <b>Raw Excess Scan</b><br>
+  <b>Reconnaissance &amp; Evidence Engine</b><br>
   Bounded reconnaissance and evidence correlation in Rust.
 </p>
 
@@ -393,11 +393,14 @@ to inspect what the current build/runtime can use.
 
 Known limitations include:
 
-- no exhaustive Nmap-style OS fingerprint database;
+- active OS fingerprint coverage is limited;
 - no NSE-equivalent scripting ecosystem;
 - raw SYN is currently Linux IPv4 only;
 - TLS observation is not exhaustive cipher-suite enumeration;
 - DNS does not currently provide every behavior of a dedicated DNS scanner;
+- public-provider coverage is finite and providers change, block, or
+  rate-limit without notice — verification states are in
+  `rxscan search providers` and `docs/PROVIDER_CONTRACT.md`;
 - Windows and macOS are not currently supported targets for the RXScan CLI.
 
 RXScan is a young project. It should not be treated as having the protocol
@@ -446,19 +449,31 @@ Test:
 cargo test --locked
 ```
 
-Full project checks:
+Full project checks are owned by [`docs/TESTING.md`](docs/TESTING.md)
+(canonical gate list). The short version:
 
 ```bash
-cargo fmt --check
-cargo check --all-targets --all-features
-cargo clippy --all-targets --all-features -- -D warnings
 cargo test --locked
-git diff --check
-cargo run -- search lint
+cargo run --locked -- search lint
 ```
 
 Network tests should use deterministic local fixtures rather than depending on
 public Internet services.
+
+## Local web interface
+
+RXScan also ships a loopback-only local console served by the binary itself:
+
+```bash
+rxscan web
+rxscan web --port 8901
+rxscan web --no-open
+```
+
+The application lives at `/` (with `/app` as an alias) and the versioned
+typed API at `/api/v1` on the same origin. Binding defaults to loopback;
+remote binding requires the explicit dangerous `--allow-remote` flag and is
+never recommended.
 
 ## Releases
 
@@ -480,7 +495,22 @@ See [`docs/ROADMAP.md`](docs/ROADMAP.md).
 The roadmap describes planned work and should not be read as a list of current
 capabilities.
 
+## Documentation
+
+README is an index; details live in `docs/`:
+
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — CLI/Web/Core map and flows
+- [`docs/EVIDENCE_MODEL.md`](docs/EVIDENCE_MODEL.md) — observation, confidence, candidate vs confirmed
+- [`docs/PROVIDER_CONTRACT.md`](docs/PROVIDER_CONTRACT.md) — verification states and evidence rules
+- [`docs/SEARCH_CORPUS.md`](docs/SEARCH_CORPUS.md) — dynamic counts and scale design
+- [`docs/TESTING.md`](docs/TESTING.md) — exact gates, local vs hosted CI
+- [`SECURITY.md`](SECURITY.md) — reporting, boundaries, non-goals
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — contribution requirements
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — planned work (not current capabilities)
+
 ## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 Keep changes bounded, evidence-driven, and testable.
 

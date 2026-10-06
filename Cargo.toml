@@ -3,8 +3,53 @@ name = "rxscan"
 version = "1.0.2"
 edition = "2024"
 rust-version = "1.85"
-description = "Reactive Recon Scanner — simple outside, serious inside."
+description = "RXScan — Reconnaissance & Evidence Engine."
 license = "MIT"
+repository = "https://github.com/DarkRX1/RXScan"
+homepage = "https://github.com/DarkRX1/RXScan"
+documentation = "https://github.com/DarkRX1/RXScan/blob/master/README.md"
+# Packaging policy: the crate ships RXScan build/runtime material only.
+# The personal portfolio (root index.html, js/, css/, _headers,
+# certificates/) and local runtime state (.rxscan-web/, databases, logs)
+# are never packaged. GUI (app/), logo, provider corpus, fingerprints,
+# and required runtime assets are intentionally included via `include`.
+include = [
+    "src/**/*",
+    "app/**/*",
+    "search/**/*",
+    "fingerprints/**/*",
+    "fixtures/**/*",
+    "tests/**/*",
+    "examples/**/*",
+    "docs/**/*",
+    "benches/**/*",
+    "scripts/**/*",
+    "build.rs",
+    "Cargo.toml",
+    "Cargo.lock",
+    "README.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "LICENSE",
+    "SECURITY.md",
+    "RXScanlogo.png",
+]
+exclude = [
+    ".rxscan-web/**",
+    "*.sqlite",
+    "*.sqlite-journal",
+    "*.db",
+    "*.log",
+    "target/**",
+    "index.html",
+    "js/**",
+    "css/**",
+    "_headers",
+    "certificates/**",
+    "portfolio/**",
+    "site/**",
+    ".env",
+]
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }

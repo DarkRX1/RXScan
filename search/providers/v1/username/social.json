@@ -49,10 +49,8 @@
       ],
       "max_redirects": 2,
       "max_body_bytes": 131072,
-      "health_state": "live_verified",
-      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B). C3B: URL identity verified; absent 404s cleanly. No verified bonus marker; confirms at 88.",
-      "verified_at": "2026-10-05",
-      "verification_method": "live-probe"
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B). C3B: URL identity verified; absent 404s cleanly. No verified bonus marker; confirms at 88."
     },
     {
       "metadata": {
@@ -153,10 +151,8 @@
       "authentication_url_markers": [],
       "max_redirects": 2,
       "max_body_bytes": 131072,
-      "health_state": "live_verified",
-      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05. C3: moved to the documented public profile API (handle identity); absent serves 400 \"Profile not found\". HTML pages are app shells.",
-      "verified_at": "2026-10-05",
-      "verification_method": "live-probe"
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05. C3: moved to the documented public profile API (handle identity); absent serves 400 \"Profile not found\". HTML pages are app shells."
     },
     {
       "metadata": {
@@ -415,10 +411,8 @@
       ],
       "max_redirects": 2,
       "max_body_bytes": 131072,
-      "health_state": "live_verified",
-      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B). C3B: URL + JSON identity markers verified on served page; absent 404s with title marker.",
-      "verified_at": "2026-10-05",
-      "verification_method": "live-probe"
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B). C3B: URL + JSON identity markers verified on served page; absent 404s with title marker."
     },
     {
       "metadata": {
@@ -576,10 +570,8 @@
       ],
       "max_redirects": 2,
       "max_body_bytes": 131072,
-      "health_state": "live_verified",
-      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B). C3B: title verb distinguishes (View=exists, Contact=absent template); both serve 200. URL-echo markers false-confirmed and were removed.",
-      "verified_at": "2026-10-05",
-      "verification_method": "live-probe"
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B). C3B: title verb distinguishes (View=exists, Contact=absent template); both serve 200. URL-echo markers false-confirmed and were removed."
     },
     {
       "metadata": {
@@ -680,10 +672,8 @@
       ],
       "max_redirects": 2,
       "max_body_bytes": 131072,
-      "health_state": "live_verified",
-      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B). C3: URL identity verified via mobile redirect chain; absent 404s with title marker. No verified bonus marker; confirms at 88.",
-      "verified_at": "2026-10-05",
-      "verification_method": "live-probe"
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B). C3: URL identity verified via mobile redirect chain; absent 404s with title marker. No verified bonus marker; confirms at 88."
     }
   ]
 }

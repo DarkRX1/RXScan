@@ -64,6 +64,19 @@ fn exit_on_output_error(context: &str, error: project::ProjectError) -> ! {
     std::process::exit(1);
 }
 
+/// Print machine-readable JSON. Serialization of a derived report
+/// practically never fails, but if it does the completed work must not be
+/// discarded with a panic: report to stderr and exit 1 instead.
+fn emit_json_pretty(value: &impl serde::Serialize) {
+    match serde_json::to_string_pretty(value) {
+        Ok(text) => out_line!("{text}"),
+        Err(error) => {
+            err!("error: cannot encode output: {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
 fn main() {
     // Phase 20: `std::env::args()` panics on non-UTF-8 input (exit 101 +
     // backtrace). Collect as `OsString` and fail cleanly instead; clap
@@ -173,7 +186,7 @@ fn main() {
         }
         let report = capabilities::probe();
         if json {
-            out_line!("{}", serde_json::to_string_pretty(&report).unwrap());
+            emit_json_pretty(&report);
         } else if explain {
             let caps = resolve_human_caps(&args);
             out!("{}", capabilities::render_human_explain_caps(&report, caps));
@@ -486,25 +499,6 @@ fn resolve_human_caps(args: &[String]) -> rxscan::terminal::TerminalCapabilities
     }
 }
 
-/// Print the compact RXScan startup mark for interactive human output.
-///
-/// Legacy helper; new renderers carry their own `RXSCAN / <WORKFLOW>`
-/// header so this is no longer emitted on primary workflows. Kept for
-/// compatibility with leaf diagnostics that have no dedicated header yet.
-#[allow(dead_code)]
-fn maybe_search_startup_mark(args: &[String], machine_output: bool) {
-    if machine_output {
-        return;
-    }
-    let mode = rxscan::terminal::parse_color_mode(args);
-    let tty = rxscan::terminal::stdout_is_tty();
-    if !tty && mode != rxscan::terminal::ColorMode::Always {
-        return;
-    }
-    let color = rxscan::terminal::color_enabled(mode, rxscan::terminal::no_color_env(), tty);
-    out_line!("{}", rxscan::terminal::startup_mark(color));
-}
-
 /// Parse flags for the `providers`/`stats` leaf subcommands. Only `--json`
 /// and `--color` are accepted; anything else is a usage error.
 fn parse_leaf_search_flags(subcommand: &str, rest: &[&String]) -> bool {
@@ -694,30 +688,36 @@ fn run_search_stats(args: &[String], offset: usize) {
         .iter()
         .filter(|provider| !provider.blocked_markers.is_empty())
         .count();
+    // Provider vs vector counts from the shared core registry model.
+    // Vectors == providers 1:1 today; both reported so growth in either
+    // dimension stays honest. Email vectors are honestly zero until real
+    // email lookup vectors land under the same quality bar.
+    let registry = rxscan::search::username_registry_counts(&pack);
+    let email = rxscan::search::email_registry_counts();
     if json {
-        out_line!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "pack_version": pack.pack_version,
-                "providers_loaded": pack.providers.len(),
-                "enabled": enabled,
-                "fixture_verified": fixture_verified,
-                "live_verified": live_verified,
-                "needs_review": needs_review,
-                "disabled": disabled,
-                "stale_verification": stale,
-                "oldest_verification": oldest,
-                "username_rules_curated": rules_curated,
-                "username_rules_missing": without_rules,
-                "absence_handling": absence_handled,
-                "api_backed": api_backed,
-                "html_backed": pack.providers.len() - api_backed,
-                "blocking_susceptible": blocking_susceptible,
-                "confirmation_ceilings": with_ceiling,
-                "categories": categories,
-            }))
-            .unwrap()
-        );
+        emit_json_pretty(&serde_json::json!({
+            "pack_version": pack.pack_version,
+            "providers_loaded": pack.providers.len(),
+            "username_vectors": registry.vectors_registered,
+            "username_providers": registry.providers_configured,
+            "email_vectors": email.vectors_registered,
+            "email_providers": email.providers_configured,
+            "enabled": enabled,
+            "fixture_verified": fixture_verified,
+            "live_verified": live_verified,
+            "needs_review": needs_review,
+            "disabled": disabled,
+            "stale_verification": stale,
+            "oldest_verification": oldest,
+            "username_rules_curated": rules_curated,
+            "username_rules_missing": without_rules,
+            "absence_handling": absence_handled,
+            "api_backed": api_backed,
+            "html_backed": pack.providers.len() - api_backed,
+            "blocking_susceptible": blocking_susceptible,
+            "confirmation_ceilings": with_ceiling,
+            "categories": categories,
+        }));
         return;
     }
     let caps = resolve_human_caps(args);
@@ -727,6 +727,10 @@ fn run_search_stats(args: &[String], offset: usize) {
     );
     out_line!("");
     out_line!("Providers loaded       {}", pack.providers.len());
+    out_line!("Username vectors       {}", registry.vectors_registered);
+    out_line!("Username providers     {}", registry.providers_configured);
+    out_line!("Email vectors          {}", email.vectors_registered);
+    out_line!("Email providers        {}", email.providers_configured);
     out_line!("Enabled                {enabled}");
     out_line!("Fixture verified       {fixture_verified}");
     out_line!("Live verified          {live_verified}");
@@ -755,6 +759,137 @@ fn run_search_stats(args: &[String], offset: usize) {
     for (category, count) in &categories {
         out_line!("  {category:<22}{count}");
     }
+}
+
+/// SIGINT reaches the real search scheduler (no new dependency).
+///
+/// Process-lifetime cancellation: the CLI runs one search per process, so
+/// the flag is a `static` that outlives every stack frame — the handler can
+/// never observe a destroyed object, and there is no raw pointer whose own
+/// access would need synchronizing. The handler only performs one atomic
+/// store on this flag; it never allocates, locks, formats, or does I/O.
+/// Completed evidence survives cancellation via the normal scheduler drain
+/// path. Uses the already-linked libc `signal` symbol directly (Linux
+/// loopback CLI only; `AtomicBool` is lock-free on all supported targets).
+static SEARCH_CANCELLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn search_cancel_handler(_: i32) {
+    SEARCH_CANCELLED.store(true, std::sync::atomic::Ordering::Release);
+}
+unsafe extern "C" {
+    fn signal(signum: i32, handler: usize) -> usize;
+}
+fn install_search_cancel() {
+    // Reset stale state first: the handler is process-global, so a previous
+    // search in this process must not leak cancellation into the next one.
+    SEARCH_CANCELLED.store(false, std::sync::atomic::Ordering::Release);
+    // SIGINT = 2.
+    unsafe {
+        let _ = signal(2, search_cancel_handler as *const () as usize);
+    }
+}
+
+/// Build terminal enrichment + per-category coverage from the same core
+/// evidence (registry categories, observation attributes, evidence,
+/// provenance). No invented values: absent data renders as absent.
+fn build_search_enrichment(
+    report: &rxscan::search::UsernameSearchReport,
+    pack: &rxscan::search::UsernameProviderPack,
+    effective: &std::collections::BTreeSet<String>,
+) -> (
+    rxscan::terminal::SearchEnrichment,
+    Vec<rxscan::terminal::SearchCategoryCoverage>,
+) {
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut provider_to_category: BTreeMap<String, String> = BTreeMap::new();
+    let mut provider_to_label: BTreeMap<String, String> = BTreeMap::new();
+    for definition in &pack.providers {
+        provider_to_category.insert(definition.metadata.id.clone(), definition.category.clone());
+        provider_to_label.insert(
+            definition.metadata.id.clone(),
+            rxscan::search::category_label(&definition.category).to_owned(),
+        );
+    }
+    let mut enrichment = rxscan::terminal::SearchEnrichment::default();
+    // Categories for every scheduled provider (including unscanned) so
+    // `--all` rows carry honest category labels.
+    for provider in effective {
+        if let Some(category) = provider_to_category.get(provider) {
+            enrichment
+                .categories
+                .insert(provider.clone(), category.clone());
+            if let Some(label) = provider_to_label.get(provider) {
+                enrichment
+                    .category_labels
+                    .insert(provider.clone(), label.clone());
+            }
+        }
+    }
+    for result in &report.results {
+        let category = result
+            .attributes
+            .get("category")
+            .cloned()
+            .or_else(|| provider_to_category.get(&result.provider_id).cloned())
+            .unwrap_or_default();
+        if !category.is_empty() {
+            enrichment
+                .categories
+                .insert(result.provider_id.clone(), category.clone());
+            let label = result
+                .attributes
+                .get("category_label")
+                .cloned()
+                .unwrap_or_else(|| rxscan::search::category_label(&category).to_owned());
+            enrichment
+                .category_labels
+                .insert(result.provider_id.clone(), label);
+        }
+        // Bounded public metadata subset with hidden count.
+        let (ordered, _) = rxscan::search::prioritized_public_metadata(&result.attributes, 100);
+        if !ordered.is_empty() {
+            let hidden = ordered.len().saturating_sub(4);
+            enrichment.metadata.insert(
+                result.provider_id.clone(),
+                ordered.into_iter().take(8).collect(),
+            );
+            if hidden > 0 {
+                enrichment
+                    .metadata_hidden
+                    .insert(result.provider_id.clone(), hidden);
+            }
+        }
+        if !result.evidence.is_empty() {
+            enrichment
+                .evidence
+                .insert(result.provider_id.clone(), result.evidence.clone());
+        }
+        enrichment.provenance.insert(
+            result.provider_id.clone(),
+            format!("{}@{}", result.provider_id, result.provider_version),
+        );
+        enrichment
+            .observed_at
+            .insert(result.provider_id.clone(), result.timestamp);
+    }
+    // Coverage by category from the REAL plan + REAL results.
+    let core_coverage =
+        rxscan::search::coverage_by_category(effective, &provider_to_category, &report.results);
+    let coverage = core_coverage
+        .into_iter()
+        .map(|entry| rxscan::terminal::SearchCategoryCoverage {
+            category: entry.category,
+            label: entry.label,
+            scheduled: entry.scheduled,
+            complete: entry.complete,
+            remaining: entry.remaining,
+        })
+        .collect();
+    // Ensure every requested provider without an observation still has a
+    // category entry for `--all` greppability (unscanned stays honest).
+    let _ = provider_to_label;
+    let _ = BTreeSet::<String>::new();
+    (enrichment, coverage)
 }
 
 fn search_status_key(status: &SearchStatus) -> &'static str {
@@ -951,7 +1086,7 @@ fn run_search_lint(args: &[String], offset: usize) {
         }
     };
     if json {
-        out_line!("{}", serde_json::to_string_pretty(&report).unwrap());
+        emit_json_pretty(&report);
     } else {
         let caps = resolve_human_caps(args);
         out_line!(
@@ -960,8 +1095,12 @@ fn run_search_lint(args: &[String], offset: usize) {
         );
         out_line!("");
         out_line!("providers checked    {}", report.providers_checked);
+        out_line!("vectors checked      {}", report.vectors_checked);
         out_line!("files checked        {}", report.files_checked);
         out_line!("fixture complete     {}", report.fixture_complete);
+        out_line!("disabled             {}", report.disabled_count);
+        out_line!("needs review         {}", report.needs_review_count);
+        out_line!("stale verification   {}", report.stale_count);
         out_line!("errors               {}", report.errors.len());
         out_line!("warnings             {}", report.warnings.len());
         for error in &report.errors {
@@ -976,6 +1115,80 @@ fn run_search_lint(args: &[String], offset: usize) {
     }
 }
 
+/// Category discovery from the real provider registry (no hardcoded counts).
+fn run_search_categories(args: &[String], offset: usize) {
+    let rest: Vec<&String> = args.iter().skip(offset + 1).collect();
+    let mut json = false;
+    let mut explain = false;
+    for arg in &rest {
+        match arg.as_str() {
+            "--json" => json = true,
+            "--explain" => explain = true,
+            "--color" => {}
+            _ if arg.as_str().starts_with("--color") => {}
+            _ if arg.as_str() == "--help" || arg.as_str() == "-h" => {
+                out_line!(
+                    "rxscan search categories [--json] [--explain] [--color MODE]\n\nList username provider categories from the registry with real provider counts."
+                );
+                return;
+            }
+            _ => {
+                err!("rxscan search categories: only --json, --explain and --color are supported");
+                std::process::exit(2);
+            }
+        }
+    }
+    // Validate --color values strictly.
+    validate_color_flags("search categories", args);
+    let pack = match rxscan::search::embedded_username_pack() {
+        Ok(pack) => pack,
+        Err(error) => {
+            err!("rxscan search categories: {error}");
+            std::process::exit(1);
+        }
+    };
+    let summary = rxscan::search::username_category_summary(&pack);
+    if json {
+        emit_json_pretty(&serde_json::json!({
+            "pack_version": pack.pack_version,
+            "categories": summary,
+        }));
+        return;
+    }
+    let caps = resolve_human_caps(args);
+    out_line!(
+        "{}",
+        rxscan::terminal::workflow_header(caps, "SEARCH CATEGORIES", None)
+    );
+    out_line!("");
+    out_line!("  CATEGORY              PROVIDERS   USABLE");
+    for entry in &summary {
+        // Human label + machine ID both visible; counts from registry only.
+        let label = if entry.label.to_ascii_lowercase() == entry.category {
+            entry.label.clone()
+        } else {
+            format!("{} [{}]", entry.label, entry.category)
+        };
+        out_line!("  {:<24}{:<11}{}", label, entry.configured, entry.usable);
+    }
+    if explain {
+        out_line!("");
+        out_line!(
+            "Use --explain detail: unavailable providers need review; disabled never schedule."
+        );
+        for entry in &summary {
+            if entry.unavailable > 0 || entry.disabled > 0 {
+                out_line!(
+                    "  {}: {} unavailable, {} disabled",
+                    entry.category,
+                    entry.unavailable,
+                    entry.disabled
+                );
+            }
+        }
+    }
+}
+
 fn run_search(args: &[String]) {
     let offset = usize::from(args.get(1).is_some_and(|arg| arg == "search")) + 1;
     if args.get(offset).is_some_and(|arg| arg == "stats") {
@@ -984,6 +1197,13 @@ fn run_search(args: &[String]) {
     }
     if args.get(offset).is_some_and(|arg| arg == "lint") {
         run_search_lint(args, offset);
+        return;
+    }
+    if args
+        .get(offset)
+        .is_some_and(|arg| arg == "categories" || arg == "category")
+    {
+        run_search_categories(args, offset);
         return;
     }
     if args.get(offset).is_some_and(|arg| arg == "providers") {
@@ -997,18 +1217,20 @@ fn run_search(args: &[String]) {
             }
         };
         if !filter.categories.is_empty() {
-            let known: std::collections::BTreeSet<&str> = pack
-                .providers
-                .iter()
-                .map(|provider| provider.category.as_str())
-                .collect();
+            // Shared vocabulary: known categories include empty ones (e.g.
+            // `adult` with zero providers today honestly schedules zero).
+            let known: std::collections::BTreeSet<&str> =
+                rxscan::search::known_username_categories()
+                    .into_iter()
+                    .collect();
             let unknown: Vec<&String> = filter
                 .categories
                 .iter()
                 .filter(|category| !known.contains(category.as_str()))
                 .collect();
             if !unknown.is_empty() {
-                let known_list: Vec<&&str> = known.iter().collect();
+                let mut known_list: Vec<&str> = known.into_iter().collect();
+                known_list.sort();
                 err!(
                     "rxscan search providers: unknown categor{}: {}; known: {}",
                     if unknown.len() == 1 { "y" } else { "ies" },
@@ -1017,11 +1239,7 @@ fn run_search(args: &[String]) {
                         .map(|category| category.as_str())
                         .collect::<Vec<_>>()
                         .join(", "),
-                    known_list
-                        .iter()
-                        .map(|category| **category)
-                        .collect::<Vec<_>>()
-                        .join(", "),
+                    known_list.join(", "),
                 );
                 std::process::exit(2);
             }
@@ -1051,6 +1269,9 @@ fn run_search(args: &[String]) {
                         "id": provider.metadata.id,
                         "name": provider.platform,
                         "category": provider.category,
+                        "category_label": rxscan::search::category_label(&provider.category),
+                        "state": rxscan::search::provider_state(provider),
+                        "type": "profile",
                         "contact_class": provider.metadata.contact_class,
                         "authentication_required": provider.metadata.requires_authentication,
                         "health_state": provider.health_state.as_str(),
@@ -1058,25 +1279,60 @@ fn run_search(args: &[String]) {
                     })
                 })
                 .collect::<Vec<_>>();
-            out_line!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "pack_version": pack.pack_version,
-                    "total_providers": pack.providers.len(),
-                    "active_providers": providers.len(),
-                    "providers": providers
-                }))
-                .unwrap()
-            );
+            emit_json_pretty(&serde_json::json!({
+                "pack_version": pack.pack_version,
+                "total_providers": pack.providers.len(),
+                "active_providers": providers.len(),
+                "providers": providers
+            }));
         } else {
             let caps = resolve_human_caps(args);
+            // Show filtered category in header when present (e.g. PROVIDERS social).
+            let header_detail = if filter.categories.len() == 1 {
+                filter.categories.iter().next().cloned()
+            } else {
+                None
+            };
             out_line!(
                 "{}",
                 rxscan::terminal::workflow_header(caps, "SEARCH PROVIDERS", None)
             );
+            if let Some(detail) = header_detail {
+                out_line!("");
+                out_line!("PROVIDERS  {detail}");
+            }
             out_line!("");
-            // Tab-separated rows stay machine-greppable; the header carries
-            // the visual identity and honors --color.
+            // Human table: PROVIDER STATE TYPE (STATE = usable/unavailable/disabled).
+            out_line!("PROVIDER             STATE        TYPE");
+            for provider in &shown {
+                let state = rxscan::search::provider_state(provider);
+                out_line!("  {:<20}{:<12}profile", provider.metadata.id, state,);
+            }
+            out_line!("");
+            let usable = shown
+                .iter()
+                .filter(|p| rxscan::search::provider_state(p) == "usable")
+                .count();
+            let unavailable = shown
+                .iter()
+                .filter(|p| rxscan::search::provider_state(p) == "unavailable")
+                .count();
+            let disabled = shown
+                .iter()
+                .filter(|p| rxscan::search::provider_state(p) == "disabled")
+                .count();
+            out_line!("Summary:");
+            out_line!("");
+            out_line!(
+                "  {} configured · {} usable · {} unavailable · {} disabled",
+                shown.len(),
+                usable,
+                unavailable,
+                disabled
+            );
+            // Legacy greppable detail (ID/NAME/CATEGORY/HEALTH) stays below
+            // for scripts that parsed the old tab-separated rows.
+            out_line!("");
             out_line!("ID\tNAME\tCATEGORY\tCONTACT\tAUTH\tHEALTH");
             for provider in shown {
                 out_line!(
@@ -1309,19 +1565,28 @@ fn run_search(args: &[String]) {
                 };
                 deadline_set = true;
             }
-            "--providers" => {
+            "--providers" | "--provider" => {
                 index += 1;
                 let Some(value) = args.get(index) else {
-                    err!("rxscan search: --providers requires a comma-separated list");
+                    err!("rxscan search: --provider requires a comma-separated list");
                     std::process::exit(2);
                 };
+                // Repeatable and comma-separated: multiple flags merge (same
+                // plan as the web multi-select).
                 let ids = value
                     .split(',')
                     .map(str::trim)
                     .filter(|id| !id.is_empty())
                     .map(str::to_owned)
-                    .collect::<std::collections::BTreeSet<_>>();
-                selected = Some(ids);
+                    .collect::<Vec<_>>();
+                match &mut selected {
+                    Some(existing) => {
+                        existing.extend(ids);
+                    }
+                    None => {
+                        selected = Some(ids.into_iter().collect());
+                    }
+                }
             }
             "--exclude-provider" => {
                 index += 1;
@@ -1361,7 +1626,7 @@ fn run_search(args: &[String]) {
             }
             "--help" | "-h" => {
                 out_line!(
-                    "RXSCAN\nReconnaissance / Evidence Engine\n\nUSAGE\n  rxscan search --username NAME [options]\n  rxscan search username NAME [options]\n  rxscan search --email EMAIL [--json|--jsonl] [--all] [--explain] [--project-db PATH]\n  rxscan search --domain DOMAIN [--json|--jsonl] [--all] [--explain] [--project-db PATH]\n  rxscan search --hostname HOST [--json|--jsonl] [--all] [--explain] [--project-db PATH]\n  rxscan search --ip IP [--json|--jsonl] [--all] [--explain] [--project-db PATH]\n  rxscan search --asn ASN [--json|--jsonl] [--all] [--explain] [--project-db PATH]\n  rxscan search --url URL [--json|--jsonl] [--all] [--explain] [--project-db PATH]\n  rxscan search --repo OWNER/NAME [--json|--jsonl] [--all] [--explain] [--project-db PATH]\n  rxscan search --org ORG [--json|--jsonl] [--all] [--explain] [--project-db PATH]\n\nWORKFLOWS\n  search         Public-source search\n\nEXAMPLES\n  rxscan search --username exampleuser\n  rxscan search --username exampleuser --all\n  rxscan search --email user@example.test\n  rxscan search --domain example.test\n  rxscan search --ip 192.0.2.10\n  rxscan search --asn AS64500\n  rxscan search --url https://example.test\n  rxscan search --repo example-org/example-project\n  rxscan search --org example-org\n\nOPTIONS\n  --username NAME            Target username (or `search username NAME`)\n  --email EMAIL              Passive local email canonicalization (no network)\n  --domain DOMAIN            Passive local domain canonicalization (no network)\n  --hostname HOST            Passive local hostname canonicalization (no network)\n  --ip IP                    Passive local IP canonicalization (no network)\n  --asn ASN                  Passive local ASN canonicalization (no network)\n  --url URL                  Passive local URL canonicalization (no network)\n  --repo OWNER/NAME          Passive local repository identity (no network, nothing cloned)\n  --org ORG                  Passive local organization identity (no network)\n  --providers IDS            Comma-separated provider allowlist (username search only)\n  --exclude-provider IDS     Comma-separated provider denylist (username search only)\n  --category CATEGORIES      Comma-separated category filter (username search only)\n  --deadline 30s             Per-search deadline (username search only)\n  --project-db PATH          Persist the report to a project database\n  --all                      Show complete human detail (all findings + provider notes)\n  --color MODE               auto (TTY only), always, or never\n  --json | --jsonl           Machine output (never styled, always complete)\n  --explain                  Show the search plan without contacting providers\n\nLEAF COMMANDS\n  rxscan search providers [--json] [--health STATE] [--category CAT] [--stale] [--color MODE]\n  rxscan search stats [--json] [--color MODE]\n  rxscan search lint [--json] [--corpus-root DIR] [--color MODE]\n  rxscan --username NAME [same options]"
+                    "RXSCAN\nReconnaissance / Evidence Engine\n\nUSAGE\n  rxscan search --username NAME [options]\n  rxscan search username NAME [options]\n  rxscan search --email EMAIL [--json|--jsonl] [--all] [--explain] [--project-db PATH]\n  rxscan search --domain DOMAIN [--json|--jsonl] [--all] [--explain] [--project-db PATH]\n  rxscan search --hostname HOST [--json|--jsonl] [--all] [--explain] [--project-db PATH]\n  rxscan search --ip IP [--json|--jsonl] [--all] [--explain] [--project-db PATH]\n  rxscan search --asn ASN [--json|--jsonl] [--all] [--explain] [--project-db PATH]\n  rxscan search --url URL [--json|--jsonl] [--all] [--explain] [--project-db PATH]\n  rxscan search --repo OWNER/NAME [--json|--jsonl] [--all] [--explain] [--project-db PATH]\n  rxscan search --org ORG [--json|--jsonl] [--all] [--explain] [--project-db PATH]\n\nWORKFLOWS\n  search         Public-source search\n\nEXAMPLES\n  rxscan search --username exampleuser\n  rxscan search --username exampleuser --all\n  rxscan search --email user@example.test\n  rxscan search --domain example.test\n  rxscan search --ip 192.0.2.10\n  rxscan search --asn AS64500\n  rxscan search --url https://example.test\n  rxscan search --repo example-org/example-project\n  rxscan search --org example-org\n\nOPTIONS\n  --username NAME            Target username (or `search username NAME`)\n  --email EMAIL              Passive local email canonicalization (no network)\n  --domain DOMAIN            Passive local domain canonicalization (no network)\n  --hostname HOST            Passive local hostname canonicalization (no network)\n  --ip IP                    Passive local IP canonicalization (no network)\n  --asn ASN                  Passive local ASN canonicalization (no network)\n  --url URL                  Passive local URL canonicalization (no network)\n  --repo OWNER/NAME          Passive local repository identity (no network, nothing cloned)\n  --org ORG                  Passive local organization identity (no network)\n  --provider IDS, --providers IDS  Comma-separated provider allowlist, repeatable (username search only)\n  --exclude-provider IDS     Comma-separated provider denylist (username search only)\n  --category CATEGORIES      Comma-separated category filter, repeatable (username search only, same plan as web Sources)\n  --deadline 30s             Per-search deadline (username search only)\n  --project-db PATH          Persist the report to a project database\n  --all                      Show complete human detail (all findings + provider notes)\n  --color MODE               auto (TTY only), always, or never\n  --json | --jsonl           Machine output (never styled, always complete)\n  --explain                  Show the search plan (alone, offline) or classification evidence with --all\n\nLEAF COMMANDS\n  rxscan search categories [--json] [--explain] [--color MODE]\n  rxscan search providers [--json] [--health STATE] [--category CAT] [--stale] [--color MODE]\n  rxscan search stats [--json] [--color MODE]\n  rxscan search lint [--json] [--corpus-root DIR] [--color MODE]\n  rxscan --username NAME [same options]"
                 );
                 return;
             }
@@ -1453,57 +1718,39 @@ fn run_search(args: &[String]) {
             std::process::exit(1);
         }
     };
-    let available = pack
-        .providers
-        .iter()
-        .map(|provider| provider.metadata.id.as_str())
-        .collect::<std::collections::BTreeSet<_>>();
-    for requested in selected.iter().flatten().chain(excluded.iter()) {
-        if !available.contains(requested.as_str()) {
-            err!("rxscan search: unknown provider: {requested}");
+    // Shared core planning (same as web API): validates unknown
+    // providers/categories and returns the REAL execution plan.
+    let effective = match rxscan::search::plan_username_providers(
+        &pack,
+        selected.as_ref(),
+        &excluded,
+        &categories,
+    ) {
+        Ok(effective) => effective,
+        Err(message) => {
+            err!("rxscan search: {message}");
             std::process::exit(2);
         }
-    }
-    let available_categories = pack
-        .providers
-        .iter()
-        .map(|provider| provider.category.as_str())
-        .collect::<std::collections::BTreeSet<_>>();
-    let unknown_categories = categories
-        .iter()
-        .filter(|category| !available_categories.contains(category.as_str()))
-        .cloned()
-        .collect::<Vec<_>>();
-    if !unknown_categories.is_empty() {
-        err!(
-            "rxscan search: unknown categor{}: {}",
-            if unknown_categories.len() == 1 {
-                "y"
-            } else {
-                "ies"
-            },
-            unknown_categories.join(", ")
-        );
-        std::process::exit(2);
-    }
-    let effective = pack
-        .providers
-        .iter()
-        .filter(|provider| {
-            selected
-                .as_ref()
-                .is_none_or(|ids| ids.contains(&provider.metadata.id))
-                && !excluded.contains(&provider.metadata.id)
-                && (categories.is_empty() || categories.contains(&provider.category))
-        })
-        .map(|provider| provider.metadata.id.clone())
-        .collect::<std::collections::BTreeSet<_>>();
+    };
     let selected_count = effective.len();
     if selected_count == 0 {
         err!("rxscan search: provider selection matched no providers");
         std::process::exit(2);
     }
-    if explain {
+    // --explain prints the deterministic plan (offline, no network) AND,
+    // for human output, continues to run the search so classification
+    // evidence/provenance becomes visible. Machine output (--json/--jsonl)
+    // stays pure JSONL when requested.
+    // --explain alone shows the deterministic offline plan (no network).
+    // --explain with --all runs the search and shows classification
+    // evidence/provenance (online). This keeps planning offline-deterministic
+    // while still exposing WHY behind --explain when full detail is asked.
+    let show_plan_only = explain && !show_all && !json && !jsonl;
+    let show_plan = explain && !json && !jsonl;
+    if show_plan_only {
+        // Fall through to plan printing below, then return early (no network).
+    }
+    if show_plan {
         out_line!("Username search plan");
         out_line!("seed: username:{username}");
         out_line!("providers selected: {selected_count}");
@@ -1547,16 +1794,46 @@ fn run_search(args: &[String]) {
         );
         out_line!("direct network scanning: disabled");
         out_line!("network scans: 0");
+        out_line!("");
+    }
+    if show_plan_only {
         return;
     }
-    let cancelled = std::sync::atomic::AtomicBool::new(false);
-    let report = match rxscan::search::execute_username_search(
+    // Cancellation reaches the real scheduler: SIGINT sets the
+    // process-lifetime atomic the core polls; completed evidence survives.
+    install_search_cancel();
+    let cancelled = &SEARCH_CANCELLED;
+    // Restrained TTY progress (never into pipes/machine output, never faked).
+    let progress_caps = resolve_human_caps(args);
+    let show_progress = progress_caps.tty && progress_caps.color && !json && !jsonl;
+    let username_owned = username.clone();
+    let progress_hook = |completed: usize, total: usize| {
+        if show_progress {
+            use std::io::Write as _;
+            let _ = write!(
+                std::io::stderr(),
+                "\rSEARCHING  {}  {}/{} complete",
+                username_owned,
+                completed,
+                total
+            );
+            let _ = std::io::stderr().flush();
+        }
+    };
+    if show_progress {
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), "SEARCHING  {username}");
+    }
+    let report = match rxscan::search::execute_username_search_full(
         &username,
-        4,
-        1,
+        rxscan::search::DEFAULT_SEARCH_CONCURRENCY,
+        rxscan::search::MAX_SEARCH_PER_HOST,
         deadline,
         Some(&effective),
-        &cancelled,
+        &excluded,
+        &categories,
+        cancelled,
+        Some(&progress_hook),
     ) {
         Ok(report) => report,
         Err(error) => {
@@ -1564,6 +1841,11 @@ fn run_search(args: &[String]) {
             std::process::exit(1);
         }
     };
+    if show_progress {
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr());
+    }
+    let was_cancelled = cancelled.load(std::sync::atomic::Ordering::Acquire);
     if let Some(path) = project_db {
         let mut db = match rxscan::project_db::ProjectDb::open(&path) {
             Ok(db) => db,
@@ -1578,12 +1860,73 @@ fn run_search(args: &[String]) {
         }
     }
     if json {
-        out_line!("{}", serde_json::to_string_pretty(&report).unwrap());
+        emit_json_pretty(&report);
     } else if jsonl {
         out!("{}", rxscan::search::render_username_jsonl(&report));
     } else {
         let caps = resolve_human_caps(args);
-        let rows = search_report_rows(&report);
+        let mut rows = search_report_rows(&report);
+        // --all makes unscanned/skipped providers visible (honest, never
+        // invented observations): synthesize quiet rows for scheduled
+        // providers without an observation.
+        {
+            use rxscan::terminal::{RowTier, SearchRow};
+            let completed: std::collections::BTreeSet<&str> = report
+                .results
+                .iter()
+                .map(|result| result.provider_id.as_str())
+                .collect();
+            let mut missing: Vec<(&String, String)> = Vec::new();
+            for provider in &effective {
+                if !completed.contains(provider.as_str()) {
+                    // Distinguish skip reasons (disabled/rules) from
+                    // deadline/cancel unscanned.
+                    let reason = pack
+                        .providers
+                        .iter()
+                        .find(|definition| &definition.metadata.id == provider)
+                        .and_then(|definition| {
+                            rxscan::search::username_skip_reason(definition, &username)
+                        })
+                        .unwrap_or_else(|| {
+                            if was_cancelled || report.accounting.cancelled > 0 {
+                                "cancelled".to_owned()
+                            } else {
+                                "deadline reached".to_owned()
+                            }
+                        });
+                    let status: &'static str = if reason == "provider is disabled" {
+                        "unscanned"
+                    } else if reason.contains("cancelled") {
+                        "cancelled"
+                    } else if reason.contains("shorter")
+                        || reason.contains("exceeds")
+                        || reason.contains("characters")
+                    {
+                        "skipped"
+                    } else {
+                        "unscanned"
+                    };
+                    // Leak a 'static status via known set.
+                    let key: &'static str = match status {
+                        "cancelled" => "cancelled",
+                        "skipped" => "skipped",
+                        _ => "unscanned",
+                    };
+                    rows.push(SearchRow {
+                        status: key,
+                        provider: (*provider).clone(),
+                        confidence: 0,
+                        detail: reason.clone(),
+                        tier: RowTier::Quiet,
+                        url: String::new(),
+                        url_observed: false,
+                    });
+                    missing.push((provider, reason));
+                }
+            }
+            let _ = missing;
+        }
         let summary = rxscan::terminal::SearchSummary {
             requested: report.accounting.providers_requested,
             completed: report.accounting.providers_completed,
@@ -1592,15 +1935,30 @@ fn run_search(args: &[String]) {
             unscanned: report.accounting.unscanned,
             truncated: report.accounting.truncated,
         };
+        // Enrichment from the same core evidence (categories, metadata,
+        // evidence, provenance) + per-category coverage from the real plan.
+        let (enrichment, category_coverage) = build_search_enrichment(&report, &pack, &effective);
+        // Registry-wide denominators stay distinct from the per-run
+        // scheduled set, so the header is honest at any corpus size.
+        let registry = rxscan::search::username_registry_counts(&pack);
+        let scale = rxscan::terminal::SearchScaleHeader {
+            vectors_registered: registry.vectors_registered,
+            providers_usable: registry.usable,
+        };
         out!(
             "{}",
-            rxscan::terminal::render_search_report_caps(
+            rxscan::terminal::render_search_report_full(
                 &report.seed.display_value,
                 report.accounting.providers_requested,
                 &rows,
                 &summary,
                 show_all,
+                explain,
+                was_cancelled || summary.cancelled > 0,
                 caps,
+                Some(&enrichment),
+                Some(&category_coverage),
+                Some(&scale),
             )
         );
     }
@@ -1685,7 +2043,7 @@ fn run_entity_search(
         }
     }
     if json {
-        out_line!("{}", serde_json::to_string_pretty(&report).unwrap());
+        emit_json_pretty(&report);
     } else if jsonl {
         out!("{}", rxscan::entity_search::render_entity_jsonl(&report));
     } else {
@@ -1764,7 +2122,7 @@ fn run_project(args: &[String]) {
             match project::load_project_with_timing(std::path::Path::new(path)) {
                 Ok((state, _, bytes)) if json => {
                     let summary = state.summary(bytes);
-                    out_line!("{}", serde_json::to_string_pretty(&summary).unwrap());
+                    emit_json_pretty(&summary);
                 }
                 Ok((state, _, bytes)) => out_line!("{}", project::render_summary(&state, bytes)),
                 Err(error) => {
@@ -1785,7 +2143,7 @@ fn run_project(args: &[String]) {
             let json = args[5..].iter().any(|a| a == "--json");
             match project::load_project(std::path::Path::new(path)) {
                 Ok(state) if json => match state.entities.get(entity) {
-                    Some(found) => out_line!("{}", serde_json::to_string_pretty(found).unwrap()),
+                    Some(found) => emit_json_pretty(&found),
                     None => {
                         err!("rxscan project show: project entity not found: {entity}");
                         std::process::exit(1);
@@ -1832,9 +2190,7 @@ fn run_project(args: &[String]) {
             }
             match project::load_project(std::path::Path::new(path)) {
                 Ok(state) => match project::explain_entity(&state, entity, limit) {
-                    Ok(explanation) if json => {
-                        out_line!("{}", serde_json::to_string_pretty(&explanation).unwrap())
-                    }
+                    Ok(explanation) if json => emit_json_pretty(&explanation),
                     Ok(explanation) => out_line!("{}", project::render_explanation(&explanation)),
                     Err(error) => {
                         err!("rxscan project explain: {error}");
@@ -1898,7 +2254,7 @@ fn run_project(args: &[String]) {
                     }
                 }
                 Ok(state) if json => match state.neighbors(entity, depth, limit) {
-                    Ok(result) => out_line!("{}", serde_json::to_string_pretty(&result).unwrap()),
+                    Ok(result) => emit_json_pretty(&result),
                     Err(error) => {
                         err!("rxscan project {command}: {error}");
                         std::process::exit(1);
@@ -1944,9 +2300,7 @@ fn run_project(args: &[String]) {
             let json = args[6..].iter().any(|a| a == "--json");
             match project::load_project(std::path::Path::new(path)) {
                 Ok(state) => match state.path(from, to, project::MAX_QUERY_DEPTH) {
-                    Ok(chain) if json => {
-                        out_line!("{}", serde_json::to_string_pretty(&chain).unwrap())
-                    }
+                    Ok(chain) if json => emit_json_pretty(&chain),
                     Ok(chain) if chain.is_empty() => {
                         out_line!("path {from} -> {to}: same entity (0 hops) network_requests=0")
                     }
@@ -1986,7 +2340,7 @@ fn run_project(args: &[String]) {
             match project::load_project_with_timing(std::path::Path::new(path)) {
                 Ok((state, _, bytes)) if json => {
                     let summary = state.summary(bytes);
-                    out_line!("{}", serde_json::to_string_pretty(&summary).unwrap());
+                    emit_json_pretty(&summary);
                 }
                 Ok((state, _, bytes)) => {
                     out_line!("{}", project::render_summary(&state, bytes));
@@ -2053,7 +2407,7 @@ fn run_project(args: &[String]) {
             match project::load_project(std::path::Path::new(path)) {
                 Ok(state) if json => {
                     let scans: Vec<_> = state.scans.values().collect();
-                    out_line!("{}", serde_json::to_string_pretty(&scans).unwrap());
+                    emit_json_pretty(&scans);
                 }
                 Ok(state) => {
                     for scan in state.scans.values() {
@@ -2142,9 +2496,7 @@ fn run_project(args: &[String]) {
                         }
                     } else if json {
                         match state.findings_query(entity_ref, limit) {
-                            Ok(result) => {
-                                out_line!("{}", serde_json::to_string_pretty(&result).unwrap())
-                            }
+                            Ok(result) => emit_json_pretty(&result),
                             Err(error) => {
                                 err!("rxscan project findings: {error}");
                                 std::process::exit(1);
@@ -2179,9 +2531,7 @@ fn run_project(args: &[String]) {
                         }
                     } else if json {
                         match state.changes_query(entity_ref, limit) {
-                            Ok(result) => {
-                                out_line!("{}", serde_json::to_string_pretty(&result).unwrap())
-                            }
+                            Ok(result) => emit_json_pretty(&result),
                             Err(error) => {
                                 err!("rxscan project {command}: {error}");
                                 std::process::exit(1);
@@ -2216,9 +2566,7 @@ fn run_project(args: &[String]) {
                         }
                     } else if json {
                         match state.attention_query(entity_ref, limit) {
-                            Ok(result) => {
-                                out_line!("{}", serde_json::to_string_pretty(&result).unwrap())
-                            }
+                            Ok(result) => emit_json_pretty(&result),
                             Err(error) => {
                                 err!("rxscan project attention: {error}");
                                 std::process::exit(1);
@@ -2306,7 +2654,7 @@ fn run_project_db(args: &[String]) {
         "scans" => {
             let scans = db.scan_ids().unwrap_or_default();
             if json {
-                out_line!("{}", serde_json::to_string_pretty(&scans).unwrap());
+                emit_json_pretty(&scans);
             } else if scans.is_empty() {
                 out_line!("no scans imported");
             } else {
@@ -2341,7 +2689,7 @@ fn run_project_db(args: &[String]) {
             };
             let stored = db.changes_since(scan, limit).unwrap_or_default();
             if json {
-                out_line!("{}", serde_json::to_string_pretty(&stored).unwrap());
+                emit_json_pretty(&stored);
             } else if stored.is_empty() {
                 out_line!("no recorded changes for {scan}");
             } else {
@@ -2383,7 +2731,7 @@ fn run_project_db(args: &[String]) {
                 std::process::exit(1);
             }
             if json {
-                out_line!("{}", serde_json::to_string_pretty(&changes).unwrap());
+                emit_json_pretty(&changes);
             } else {
                 out_line!("{}", rxscan::project_db::human_changes_summary(&changes));
             }
@@ -2436,15 +2784,11 @@ fn run_project_db(args: &[String]) {
                 current = edge.from_id.clone();
             }
             if json {
-                out_line!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "entity": entity,
-                        "chain": chain,
-                        "observations": observations,
-                    }))
-                    .unwrap()
-                );
+                emit_json_pretty(&serde_json::json!({
+                    "entity": entity,
+                    "chain": chain,
+                    "observations": observations,
+                }));
             } else {
                 out_line!("Why is {entity} present?");
                 out_line!("");
@@ -2700,9 +3044,7 @@ fn run_unknown(args: &[String]) {
         std::process::exit(2);
     };
     match unknown::export_unknown(std::path::Path::new(&current), limit) {
-        Ok(export) if json => {
-            out_line!("{}", serde_json::to_string_pretty(&export).unwrap())
-        }
+        Ok(export) if json => emit_json_pretty(&export),
         Ok(export) => out!("{}", unknown::render_human(&export)),
         Err(error) => {
             err!("rxscan unknown: {error}");
@@ -2779,10 +3121,7 @@ fn run_investigate(args: &[String]) {
         }
         let registry = inv::TransformRegistry::new();
         if json {
-            out_line!(
-                "{}",
-                serde_json::to_string_pretty(&registry.infos()).unwrap()
-            );
+            emit_json_pretty(&registry.infos());
         } else {
             let caps = resolve_human_caps(args);
             out_line!(
@@ -3247,7 +3586,7 @@ fn run_investigate(args: &[String]) {
             }
             "--help" | "-h" => {
                 out_line!(
-                    "RXSCAN\nReconnaissance / Evidence Engine\n\nUSAGE\n  rxscan investigate --username NAME [options]\n  rxscan investigate --domain NAME [options]\n  rxscan investigate --url URL [options]\n  rxscan investigate --email EMAIL [options]\n  rxscan investigate --ip IP [options]\n  rxscan investigate --asn ASN [options]\n  rxscan investigate --repo OWNER/NAME [options]\n  rxscan investigate --org ORG [options]\n\nWORKFLOWS\n  investigate    Evidence investigation\n\nEXAMPLES\n  rxscan investigate --username exampleuser\n  rxscan investigate --username exampleuser --depth 3\n  rxscan investigate --domain example.test\n  rxscan investigate --email user@example.test\n\nOPTIONS\n  --depth 0-{}               Graph-transform depth (default 2)\n  --deadline 60s             Global investigation deadline\n  --max-entities N           Entity budget\n  --max-relationships N      Relationship budget\n  --max-http-requests N      HTTP budget\n  --max-dns-queries N        DNS budget\n  --providers IDS            Provider allowlist\n  --project-db PATH          Persist to a project database\n  --exposure                 Opt-in defensive exposure enrichment\n  --network --scope CIDR     Explicit authorized network pivots\n  --all                      Show complete (untruncated) detail\n  --color MODE               auto (TTY only), always, or never\n  --json | --jsonl           Machine output (never styled)\n  --explain                  Show the plan without contacting anything\n\nPassive by default: never port scans discovered infrastructure. Exposure lookups run only with --exposure. Network pivots run only with explicit --network and valid --scope.",
+                    "RXSCAN\nReconnaissance / Evidence Engine\n\nUSAGE\n  rxscan investigate --username NAME [options]\n  rxscan investigate --domain NAME [options]\n  rxscan investigate --url URL [options]\n  rxscan investigate --email EMAIL [options]\n  rxscan investigate --ip IP [options]\n  rxscan investigate --asn ASN [options]\n  rxscan investigate --repo OWNER/NAME [options]\n  rxscan investigate --org ORG [options]\n\nWORKFLOWS\n  investigate    Evidence investigation\n\nEXAMPLES\n  rxscan investigate --username exampleuser\n  rxscan investigate --username exampleuser --depth 3\n  rxscan investigate --domain example.test\n  rxscan investigate --email user@example.test\n\nOPTIONS\n  --depth 0-{}               Graph-transform depth (default 2)\n  --deadline 60s             Global investigation deadline\n  --max-entities N           Entity budget\n  --max-relationships N      Relationship budget\n  --max-http-requests N      HTTP budget\n  --max-dns-queries N        DNS budget\n  --providers IDS            Provider allowlist\n  --project-db PATH          Persist to a project database\n  --exposure                 Opt-in defensive exposure enrichment\n  --network --scope CIDR     Explicit authorized network pivots\n  --max-network-pivots N     Cap network pivots (default 10, max 100)\n  --all                      Show complete (untruncated) detail\n  --color MODE               auto (TTY only), always, or never\n  --json | --jsonl           Machine output (never styled)\n  --explain                  Show the plan without contacting anything\n\nPassive by default: never port scans discovered infrastructure. Exposure lookups run only with --exposure. Network pivots run only with explicit --network and valid --scope.",
                     inv::MAX_DEPTH
                 );
                 return;
@@ -3341,26 +3680,22 @@ fn run_investigate(args: &[String]) {
     if explain {
         // Plan-only: no provider contact.
         if json {
-            out_line!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "seed_kind": config.seed_kind,
-                    "seed": config.seed_value,
-                    "depth": config.depth,
-                    "max_depth": inv::MAX_DEPTH,
-                    "budgets": {
-                        "max_entities": config.max_entities,
-                        "max_relationships": config.max_relationships,
-                        "max_http_requests": config.max_http_requests,
-                        "max_dns_queries": config.max_dns_queries,
-                        "max_providers": config.max_providers,
-                    },
-                    "transforms": inv::TransformRegistry::new().infos(),
-                    "direct_network": false,
-                    "network_scans": 0,
-                }))
-                .unwrap()
-            );
+            emit_json_pretty(&serde_json::json!({
+                "seed_kind": config.seed_kind,
+                "seed": config.seed_value,
+                "depth": config.depth,
+                "max_depth": inv::MAX_DEPTH,
+                "budgets": {
+                    "max_entities": config.max_entities,
+                    "max_relationships": config.max_relationships,
+                    "max_http_requests": config.max_http_requests,
+                    "max_dns_queries": config.max_dns_queries,
+                    "max_providers": config.max_providers,
+                },
+                "transforms": inv::TransformRegistry::new().infos(),
+                "direct_network": false,
+                "network_scans": 0,
+            }));
         } else {
             out_line!("{}", inv::explain_plan(&config));
         }
@@ -3392,7 +3727,7 @@ fn run_investigate(args: &[String]) {
         }
     }
     if json {
-        out_line!("{}", serde_json::to_string_pretty(&report).unwrap());
+        emit_json_pretty(&report);
     } else if jsonl {
         out!("{}", inv::render_jsonl(&report));
     } else {
@@ -3843,7 +4178,7 @@ fn run_exposure_cli(args: &[String]) {
         }
     }
     if json {
-        out_line!("{}", serde_json::to_string_pretty(&report).unwrap());
+        emit_json_pretty(&report);
     } else if jsonl {
         out!("{}", exp::render_jsonl(&report));
     } else {

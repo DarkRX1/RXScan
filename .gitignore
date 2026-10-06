@@ -4,4 +4,23 @@ dist/
 *.log
 .vite/
 target/
+# RXScan local runtime state (never committed): GUI job store, databases,
+# generated reports, screenshots, local logs.
 .rxscan-web/
+*.sqlite
+*.sqlite-journal
+*.db
+*.rxscan.tmp
+*.rxproj.tmp
+scan.jsonl
+scan.rxscan
+.env
+# Personal portfolio is a separate project and must never be re-added here.
+# Defense-in-depth: ignore portfolio paths if they are ever recreated.
+/index.html
+/js/
+/css/
+/_headers
+/certificates/*.pdf
+/portfolio/
+/site/

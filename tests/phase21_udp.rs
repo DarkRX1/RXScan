@@ -169,15 +169,15 @@ fn udp_common_v1_is_small_sorted_versioned() {
 }
 
 #[test]
-fn udp_explicit_reuses_operator_list_all_covers_everything_once() {
+fn udp_explicit_reuses_operator_list_all_stays_bounded() {
     let resolved = resolve_udp_ports(
         &rxscan::plan::TcpPortSelection::Explicit(vec![9999, 53, 53, 0]),
         3,
     );
     assert_eq!(resolved.ports, vec![53, 9999]);
+    // All TCP ports must NOT imply a 65k-port UDP scan: UDP stays bounded.
     let all = resolve_udp_ports(&rxscan::plan::TcpPortSelection::All, 3);
-    assert_eq!(all.ports.len(), 65_535);
-    assert_eq!(all.ports, (1u16..=65_535).collect::<Vec<_>>());
+    assert_eq!(all.ports, UDP_COMMON_V1.to_vec());
 }
 
 #[test]

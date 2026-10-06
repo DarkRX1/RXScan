@@ -51,10 +51,8 @@
       ],
       "max_redirects": 2,
       "max_body_bytes": 131072,
-      "health_state": "live_verified",
-      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05. C3: canonical URL is the echo-safe identity signal (404 pages echo the request path). Absent 404s with title marker.",
-      "verified_at": "2026-10-05",
-      "verification_method": "live-probe"
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05. C3: canonical URL is the echo-safe identity signal (404 pages echo the request path). Absent 404s with title marker."
     },
     {
       "metadata": {
@@ -313,10 +311,8 @@
       ],
       "max_redirects": 2,
       "max_body_bytes": 131072,
-      "health_state": "live_verified",
-      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B). C3B: profile-path + link identity verified; absent 404 lacks both. Full-URL echo never appears; path form is echo-safe.",
-      "verified_at": "2026-10-05",
-      "verification_method": "live-probe"
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B). C3B: profile-path + link identity verified; absent 404 lacks both. Full-URL echo never appears; path form is echo-safe."
     }
   ]
 }

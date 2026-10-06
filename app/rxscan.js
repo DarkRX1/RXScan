@@ -114,9 +114,6 @@
     const k = String(kind).toLowerCase();
     return KIND_COLORS[k] || KIND_COLORS.default;
   }
-  function kindLabel(kind) {
-    return String(kind || "unknown");
-  }
 
   /* -- graph renderer ----------------------------------------------------- */
   function makeGraph(svg, legendNode, inspectorBox, inspectorEmpty) {
@@ -640,10 +637,22 @@
   /* -- scan ------------------------------------------------------------------- */
   function scanBody() {
     const fd = new FormData($("scan-form"));
-    const allPorts = $("scan-allports").checked;
+    const checkboxAll = $("scan-allports").checked;
     const portsRaw = String(fd.get("ports") || "").trim();
+    // `all` (case-insensitive) in the ports field and the checkbox are the
+    // SAME core option: never generate a 65k-element frontend array.
+    const textAll = portsRaw.toLowerCase() === "all";
+    const allPorts = checkboxAll || textAll;
     const scope = String(fd.get("scope") || "").split("\n").map((s) => s.trim()).filter(Boolean);
     const exclude = String(fd.get("exclude") || "").split("\n").map((s) => s.trim()).filter(Boolean);
+    // Inline validation (no silent fallback to defaults): malformed port
+    // expressions are rejected here with a useful message.
+    if (!allPorts && portsRaw) {
+      const ok = /^[\d\s,\-]+$/.test(portsRaw) && /[\d]/.test(portsRaw);
+      if (!ok) {
+        throw new Error("Ports must be like 22,80,443, 1-1024, or all.");
+      }
+    }
     return {
       target: String(fd.get("target") || "").trim(),
       ports: allPorts ? undefined : (portsRaw || undefined),
@@ -766,6 +775,173 @@
 
   /* -- search ------------------------------------------------------------------ */
   const PASSIVE_KINDS = ["email", "domain", "hostname", "ip", "asn", "url", "repository", "organization"];
+  // SOURCES: category registry from the API (same as CLI `search categories`).
+  // No hardcoded category list here: the core owns categories, the GUI renders them.
+  let searchCategoryCache = [];
+  async function loadSearchCategories() {
+    const wrap = $("search-sources");
+    const empty = $("search-sources-empty");
+    if (!wrap) return;
+    try {
+      const data = await api("/api/v1/username-searches/categories");
+      clear(wrap);
+      const cats = data.categories || [];
+      searchCategoryCache = cats;
+      if (!cats.length) {
+        if (empty) empty.textContent = "No categories in registry.";
+        return;
+      }
+      if (empty) empty.hidden = true;
+      for (const c of cats) {
+        const label = document.createElement("label");
+        label.className = "source-check";
+        const box = document.createElement("input");
+        box.type = "checkbox";
+        box.value = c.category;
+        box.checked = true;
+        box.dataset.usable = String(c.usable ?? 0);
+        box.dataset.vectors = String(c.vectors ?? c.configured ?? 0);
+        box.addEventListener("change", updateSelectedVectorsLine);
+        box.setAttribute("aria-label", (c.label || c.category) + " (" + (c.vectors ?? c.configured ?? 0) + " vectors)");
+        const text = document.createElement("span");
+        // e.g. "Social — 612 vectors" — values from the core, never hardcoded.
+        text.textContent = (c.label || c.category) + "  " + (c.vectors ?? c.configured ?? 0) + " vectors";
+        label.append(box, text);
+        wrap.appendChild(label);
+      }
+      updateSelectedVectorsLine();
+      fillProviderCategorySelect(cats);
+    } catch (_) {
+      if (empty) empty.textContent = "Categories unavailable (API unreachable).";
+    }
+  }
+  function updateSelectedVectorsLine() {
+    const node = $("search-sources-selected");
+    if (!node) return;
+    const wrap = $("search-sources");
+    if (!wrap) return;
+    const boxes = Array.from(wrap.querySelectorAll("input[type=checkbox]"));
+    if (!boxes.length) { node.textContent = "— usable vectors selected"; return; }
+    let usable = 0;
+    let vectors = 0;
+    for (const b of boxes) {
+      if (!b.checked) continue;
+      usable += Number(b.dataset.usable || 0);
+      vectors += Number(b.dataset.vectors || 0);
+    }
+    node.textContent = usable.toLocaleString("en-US") + " usable vectors selected (" + vectors.toLocaleString("en-US") + " registered in scope)";
+  }
+  function fillProviderCategorySelect(cats) {
+    const sel = $("search-prov-cat");
+    if (!sel) return;
+    const current = sel.value;
+    clear(sel);
+    const all = document.createElement("option");
+    all.value = "";
+    all.textContent = "All";
+    sel.appendChild(all);
+    for (const c of cats) {
+      const o = document.createElement("option");
+      o.value = c.category;
+      o.textContent = (c.label || c.category) + " (" + (c.vectors ?? c.configured ?? 0) + ")";
+      sel.appendChild(o);
+    }
+    sel.value = current;
+  }
+  // Bounded provider browser: one 50-row page at a time, selection kept in
+  // a Set across pages. Never renders thousands of nodes on load.
+  const provBrowser = { page: 0, limit: 50, total: 0, selected: new Set() };
+  async function loadProviderPage() {
+    const list = $("search-prov-list");
+    const pageNote = $("search-prov-page");
+    if (!list) return;
+    const q = ($("search-prov-q") || {}).value || "";
+    const cat = ($("search-prov-cat") || {}).value || "";
+    const state = ($("search-prov-state") || {}).value || "";
+    const params = new URLSearchParams({
+      limit: String(provBrowser.limit),
+      offset: String(provBrowser.page * provBrowser.limit),
+    });
+    if (q.trim()) params.set("q", q.trim());
+    if (cat) params.set("category", cat);
+    if (state) params.set("state", state);
+    try {
+      const data = await api("/api/v1/username-searches/providers?" + params.toString());
+      clear(list);
+      provBrowser.total = data.total ?? (data.providers || []).length;
+      for (const p of data.providers || []) {
+        const li = document.createElement("li");
+        li.className = "prov-row";
+        const box = document.createElement("input");
+        box.type = "checkbox";
+        box.checked = provBrowser.selected.has(p.id);
+        box.setAttribute("aria-label", "Select provider " + p.id);
+        box.addEventListener("change", () => {
+          if (box.checked) provBrowser.selected.add(p.id);
+          else provBrowser.selected.delete(p.id);
+        });
+        const name = document.createElement("strong");
+        name.textContent = p.name || p.id;
+        const meta = document.createElement("span");
+        meta.className = "muted";
+        meta.textContent = " " + (p.id || "") + " · " + (p.category_label || p.category || "") + " · " + (p.vectors ?? 1) + " vector" + ((p.vectors ?? 1) === 1 ? "" : "s") + " · " + (p.state || "");
+        li.append(box, name, meta);
+        list.appendChild(li);
+      }
+      if (!(data.providers || []).length) list.appendChild(el("li", "No providers match this filter."));
+      if (pageNote) {
+        const from = provBrowser.total ? provBrowser.page * provBrowser.limit + 1 : 0;
+        const to = Math.min(provBrowser.total, (provBrowser.page + 1) * provBrowser.limit);
+        pageNote.textContent = "Showing " + from + "–" + to + " of " + provBrowser.total + " · " + provBrowser.selected.size + " selected";
+      }
+    } catch (_) {
+      clear(list);
+      list.appendChild(el("li", "Provider list unavailable (API unreachable)."));
+    }
+  }
+  function resetProviderPage() { provBrowser.page = 0; loadProviderPage().catch(() => {}); }
+  function selectedSearchCategories() {
+    const wrap = $("search-sources");
+    if (!wrap) return [];
+    const boxes = Array.from(wrap.querySelectorAll("input[type=checkbox]"));
+    if (!boxes.length) return [];
+    // Unchecked categories are excluded from the plan (same as CLI --category).
+    // When all are checked, send no filter (same plan as CLI with no --category).
+    const checked = boxes.filter((b) => b.checked).map((b) => b.value);
+    if (checked.length === boxes.length) return [];
+    return checked;
+  }
+  // Load categories when the Search view becomes visible + at startup.
+  loadSearchCategories().catch(() => {});
+  loadProviderPage().catch(() => {});
+  let provDebounce = 0;
+  const provFilterChanged = () => {
+    window.clearTimeout(provDebounce);
+    provDebounce = window.setTimeout(resetProviderPage, 250);
+  };
+  if ($("search-prov-q")) $("search-prov-q").addEventListener("input", provFilterChanged);
+  if ($("search-prov-cat")) $("search-prov-cat").addEventListener("change", resetProviderPage);
+  if ($("search-prov-state")) $("search-prov-state").addEventListener("change", resetProviderPage);
+  if ($("search-prov-prev")) $("search-prov-prev").addEventListener("click", () => {
+    if (provBrowser.page > 0) { provBrowser.page--; loadProviderPage().catch(() => {}); }
+  });
+  if ($("search-prov-next")) $("search-prov-next").addEventListener("click", () => {
+    if ((provBrowser.page + 1) * provBrowser.limit < provBrowser.total) { provBrowser.page++; loadProviderPage().catch(() => {}); }
+  });
+  if ($("search-prov-clear")) $("search-prov-clear").addEventListener("click", () => {
+    provBrowser.selected.clear();
+    loadProviderPage().catch(() => {});
+  });
+  $("search-type").addEventListener("change", () => {
+    const isUser = $("search-type").value === "username";
+    const wrap = $("search-sources-wrap");
+    if (wrap) wrap.hidden = !isUser;
+    const prov = $("search-providers-wrap");
+    if (prov) prov.hidden = !isUser;
+  });
+  if ($("search-sources-wrap")) $("search-sources-wrap").hidden = $("search-type").value !== "username";
+  if ($("search-providers-wrap")) $("search-providers-wrap").hidden = $("search-type").value !== "username";
+
   $("search-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const kind = $("search-type").value;
@@ -785,7 +961,12 @@
       formMsg($("search-msg"), "Submitting username search…", false);
       try {
         const deadline = Number($("search-deadline").value || 25);
-        const job = await postJson("/api/v1/username-searches", { value, deadline_seconds: deadline, project });
+        const categories = selectedSearchCategories();
+        const body = { value, deadline_seconds: deadline, project };
+        if (categories.length) body.categories = categories;
+        // Explicit provider ticks narrow the plan like CLI --provider.
+        if (provBrowser.selected.size) body.providers = Array.from(provBrowser.selected).sort();
+        const job = await postJson("/api/v1/username-searches", body);
         formMsg($("search-msg"), "Username search accepted as " + job.job_id + ".", true);
         startUsernameLive(job.job_id);
       } catch (err) {
@@ -795,12 +976,27 @@
   });
 
   function honestUrlLabel(item) {
-    // Backend honesty: url_observed is true only for confirmed/probable
-    // identity-specific URLs. Never imply an API endpoint is a profile.
-    const url = item.final_url || item.profile_url || "";
+    // Backend honesty: url_kind comes from the core (same as CLI).
+    // Profile = observed identity-specific, Resource = API/resource,
+    // Candidate = unconfirmed, Provider Endpoint = generic.
+    const kind = String(item.url_kind || "");
+    const url = item.url || item.final_url || item.profile_url || "";
+    if (kind === "observed_profile") return "Profile: " + (url || "—");
+    if (kind === "observed_resource") return "Resource: " + (url || "—");
+    if (kind === "candidate") return "Candidate: " + (url || "—");
     if (!url) return "Provider Endpoint";
     if (item.url_observed) return "Profile: " + url;
     return "Candidate: " + url;
+  }
+  function searchStatusClass(status) {
+    // Same semantics as the terminal: green=confirmed, amber=possible/
+    // blocked/rate-limited, red=error, gray=negative/unavailable/unscanned,
+    // cyan=urls/metadata.
+    const s = String(status || "").toLowerCase();
+    if (s === "confirmed") return "s-confirmed";
+    if (s === "possible" || s === "probable" || s === "blocked" || s === "rate_limited") return "s-possible";
+    if (s === "error") return "s-error";
+    return "s-muted";
   }
   function renderPassiveSearch(data) {
     $("search-results-card").hidden = false;
@@ -877,14 +1073,31 @@
     const shown = top.length ? top : [];
     $("search-empty").hidden = sorted.length !== 0;
     if (!sorted.length) $("search-empty").textContent = "No provider results. Unqueried stays unqueried.";
+    // Bounded rendering note: at thousands of vectors only the first page of
+    // findings renders; totals come from coverage denominators.
+    const sampleNote = $("search-sample-note");
+    if (sampleNote) {
+      if (r && r.results_total != null && sorted.length) {
+        sampleNote.textContent = "Showing " + shown.slice(0, 60).length + " of " + r.results_total + " results (" + (r.results_truncated ? "truncated sample — refine filters" : "complete sample") + ").";
+        sampleNote.hidden = false;
+      } else {
+        sampleNote.hidden = true;
+      }
+    }
     for (const item of shown.slice(0, 60)) {
       const tr = document.createElement("tr");
+      tr.className = searchStatusClass(item.status);
+      const cat = item.category_label || item.category || "—";
+      const meta = item.metadata ? Object.entries(item.metadata).slice(0, 3).map(([k, v]) => k + ": " + String(v).slice(0, 40)).join(" · ") : "";
+      const prov = item.provenance ? (item.provenance.provider_id || "") + "@" + (item.provenance.provider_version || "") : "";
+      const evidence = ((item.evidence || []).slice(0, 2).join(" · ") || "—") + (meta ? " · " + meta : "") + (prov ? " · " + prov : "");
       tr.append(
         el("td", item.provider || "?"),
+        el("td", (item.category_label || item.category || "—")),
         el("td", item.status || "?"),
         el("td", String(item.confidence ?? "—")),
         el("td", honestUrlLabel(item)),
-        el("td", (item.evidence || []).slice(0, 2).join(" · ") || "—")
+        el("td", evidence)
       );
       tbody.appendChild(tr);
     }
@@ -899,8 +1112,10 @@
         if (summary) summary.textContent = "Other provider outcomes (" + rest.length + ": negative / blocked / unknown)";
         for (const item of rest.slice(0, 60)) {
           const tr = document.createElement("tr");
+          tr.className = searchStatusClass(item.status);
           tr.append(
             el("td", item.provider || "?"),
+            el("td", (item.category_label || item.category || "—")),
             el("td", item.status || "?"),
             el("td", String(item.confidence ?? "—")),
             el("td", honestUrlLabel(item)),
@@ -910,7 +1125,34 @@
         }
       }
     }
-    renderCoverage($("search-viz-coverage"), r && r.coverage);
+    // Coverage with the same denominators as Core/CLI/JSONL: scheduled is
+    // the effective plan for this run; configured/enabled/usable describe
+    // the registry. Per-category rows stay bounded (20 max).
+    const cov = r && r.coverage;
+    if (cov && cov.by_category) {
+      const box = $("search-viz-coverage");
+      clear(box);
+      const head = document.createElement("div");
+      head.className = "bar-row";
+      const parts = [];
+      if (cov.scheduled != null) parts.push("scheduled " + cov.scheduled);
+      if (cov.completed != null) parts.push("completed " + cov.completed);
+      if (cov.remaining != null) parts.push("remaining " + cov.remaining);
+      if (cov.configured != null) parts.push("registry " + cov.configured);
+      head.appendChild(el("span", parts.join(" · ") || "coverage"));
+      box.appendChild(head);
+      for (const entry of cov.by_category.slice(0, 20)) {
+        const row = document.createElement("div");
+        row.className = "bar-row";
+        row.appendChild(el("span", (entry.label || entry.category) + ": " + entry.complete + " complete"));
+        box.appendChild(row);
+      }
+      if (cov.by_category.length > 20) {
+        box.appendChild(el("span", "…and " + (cov.by_category.length - 20) + " more categories (see Raw / JSON)."));
+      }
+    } else {
+      renderCoverage($("search-viz-coverage"), cov);
+    }
     $("search-raw").textContent = r ? JSON.stringify({ job: job.id, status: job.status, result: r }, null, 2) : "No result yet.";
   }
 

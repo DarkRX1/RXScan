@@ -9,12 +9,25 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const PROVIDER_SCHEMA_VERSION: u32 = 1;
-pub const MAX_PROVIDER_DEFINITIONS: usize = 2_000;
+// NOTE: there is deliberately NO maximum registry size. Registry size and
+// execution concurrency are separate concepts: thousands of registered
+// vectors are fine; only a bounded number ever runs concurrently (see
+// `SearchScheduler.max_concurrency`). Pack transport stays bounded by
+// `MAX_PROVIDER_PACK_BYTES` so a corrupt/huge file cannot OOM the loader.
+// Never reintroduce an arbitrary provider/vector count cap here.
+pub const MAX_PROVIDER_PACK_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_SEARCH_EVIDENCE: usize = 8;
 pub const MAX_SEARCH_BODY_BYTES: usize = 256 * 1024;
 pub const MAX_SEARCH_HEADERS: usize = 32;
+/// Default username-search fan-out shared by CLI and Web so both entry
+/// points schedule the same plan. Registry size and concurrency stay
+/// separate concepts: thousands of vectors are fine, only this many run
+/// concurrently (plus at most one in flight per provider).
+pub const DEFAULT_SEARCH_CONCURRENCY: usize = 4;
+pub const MAX_SEARCH_PER_HOST: usize = 1;
 pub const SEARCH_USER_AGENT: &str = "RXScan/0.1 public-search";
 pub const USERNAME_PROVIDER_CATEGORIES: &[&str] = &[
+    // Legacy corpus categories (stable, still valid for existing providers).
     "commerce",
     "creative",
     "developer",
@@ -25,7 +38,497 @@ pub const USERNAME_PROVIDER_CATEGORIES: &[&str] = &[
     "professional",
     "security",
     "social",
+    // Shared forward-looking category vocabulary (stable machine IDs).
+    // Categories with zero configured providers are valid selection targets
+    // but honestly report zero scheduled; they are never hardcoded with fake
+    // counts. `adult` and `intelligence` exist as explicit classes so such
+    // providers are never hidden inside `other`/`misc`.
+    "community",
+    "creator",
+    "shopping",
+    "finance",
+    "music",
+    "education",
+    "news-media",
+    "messaging",
+    "archives",
+    "adult",
+    "other",
+    "intelligence",
 ];
+
+/// Human label for a machine category ID.
+///
+/// Stable mapping shared by CLI and web: the registry owns the IDs, this
+/// owns the presentation labels. Unknown IDs fall back to the raw ID so
+/// future registry categories never break presentation.
+pub fn category_label(category: &str) -> &str {
+    match category {
+        "social" => "Social",
+        "developer" => "Developer",
+        "community" => "Community",
+        "gaming" => "Gaming",
+        "creator" => "Creator",
+        "creative" => "Creator",
+        "shopping" => "Shopping",
+        "commerce" => "Shopping",
+        "finance" => "Finance",
+        "music" => "Music",
+        "media" => "News / Media",
+        "news-media" => "News / Media",
+        "messaging" => "Messaging",
+        "archives" => "Archives",
+        "adult" => "Adult / NSFW",
+        "professional" => "Professional",
+        "education" => "Education",
+        "forum" => "Community",
+        "security" => "Security",
+        "misc" => "Other",
+        "other" => "Other",
+        "intelligence" => "Intelligence",
+        _ => category,
+    }
+}
+
+/// Canonical known categories (registry vocabulary, sorted, deduped).
+/// Used by both CLI and web to validate `--category` / category selection:
+/// unknown IDs are rejected, known-but-empty IDs honestly schedule zero.
+pub fn known_username_categories() -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = USERNAME_PROVIDER_CATEGORIES.to_vec();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Discovery state for one provider definition.
+///
+/// Shared by CLI (`search providers`) and the web API: a single definition
+/// of usable vs review-queue vs never-scheduled.
+pub fn provider_state(definition: &UsernameProviderDefinition) -> &'static str {
+    match definition.health_state {
+        HealthState::Disabled => "disabled",
+        HealthState::NeedsReview => "unavailable",
+        HealthState::FixtureVerified | HealthState::LiveVerified => "usable",
+    }
+}
+
+/// Per-category registry summary. Counts come from the loaded pack only.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProviderCategorySummary {
+    pub category: String,
+    pub label: String,
+    pub configured: usize,
+    pub usable: usize,
+    pub unavailable: usize,
+    pub disabled: usize,
+}
+
+/// Category discovery from the real provider registry (no hardcoded counts).
+pub fn username_category_summary(pack: &UsernameProviderPack) -> Vec<ProviderCategorySummary> {
+    let mut by_category: BTreeMap<String, Vec<&UsernameProviderDefinition>> = BTreeMap::new();
+    for provider in &pack.providers {
+        by_category
+            .entry(provider.category.clone())
+            .or_default()
+            .push(provider);
+    }
+    let mut out = Vec::new();
+    for (category, providers) in by_category {
+        let mut usable = 0usize;
+        let mut unavailable = 0usize;
+        let mut disabled = 0usize;
+        for provider in providers.iter() {
+            match provider_state(provider) {
+                "usable" => usable += 1,
+                "unavailable" => unavailable += 1,
+                _ => disabled += 1,
+            }
+        }
+        out.push(ProviderCategorySummary {
+            label: category_label(&category).to_owned(),
+            category: category.clone(),
+            configured: providers.len(),
+            usable,
+            unavailable,
+            disabled,
+        });
+    }
+    out.sort_by(|a, b| a.category.cmp(&b.category));
+    out
+}
+
+/// Provider vs search vector.
+///
+/// Do NOT assume one website == one search vector. A provider may expose
+/// several genuinely different lookup/detection paths (e.g. a username
+/// vector, a public-profile vector, a metadata vector). Every vector must
+/// represent a different lookup path — never duplicate vectors to inflate a
+/// count, and never advertise "N sites" when the implementation holds fewer
+/// sites with multiple vectors.
+///
+/// Today each username definition registers exactly one vector whose stable
+/// ID equals the provider ID. The model below keeps provider and vector
+/// counts distinct so multi-vector providers can land later without
+/// double-counting sites, and so every frontend reports both numbers
+/// honestly from the same registry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchVectorRef {
+    /// Stable vector ID (`provider-id` today; `provider-id/vector-name`
+    /// for future multi-vector providers).
+    pub vector_id: String,
+    pub provider_id: String,
+    pub provider_name: String,
+    pub category: String,
+    pub category_label: String,
+    /// Entity kind this vector accepts (`username` today).
+    pub entity_kind: &'static str,
+    /// Discovery state of the owning provider (`usable`/`unavailable`/`disabled`).
+    pub state: &'static str,
+}
+
+/// All registered username search vectors, sorted by stable vector ID.
+///
+/// Derived from the loaded pack only — never hardcoded, never inflated.
+pub fn username_search_vectors(pack: &UsernameProviderPack) -> Vec<SearchVectorRef> {
+    let mut out: Vec<SearchVectorRef> = pack
+        .providers
+        .iter()
+        .map(|definition| SearchVectorRef {
+            vector_id: definition.metadata.id.clone(),
+            provider_id: definition.metadata.id.clone(),
+            provider_name: definition.platform.clone(),
+            category: definition.category.clone(),
+            category_label: category_label(&definition.category).to_owned(),
+            entity_kind: "username",
+            state: provider_state(definition),
+        })
+        .collect();
+    out.sort_by(|a, b| a.vector_id.cmp(&b.vector_id));
+    out
+}
+
+/// Honest registry counts shared by CLI, API, GUI, and machine output.
+///
+/// Definitions (spec section "configured / enabled / usable / scheduled /
+/// completed / remaining"):
+///
+/// * `providers_configured` — definitions in the registry.
+/// * `vectors_registered` — registered lookup paths (1:1 with definitions
+///   today; larger only when providers genuinely expose more paths).
+/// * `enabled` — configured minus `disabled` (never scheduled).
+/// * `usable` — enabled with verified detection (`fixture_verified` or
+///   `live_verified`); `needs_review` stays `unavailable`, never usable.
+/// * `scheduled` is per-run (the effective plan), NOT part of this struct:
+///   see [`plan_username_providers`] and progress denominators.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegistryCounts {
+    pub providers_configured: usize,
+    pub vectors_registered: usize,
+    pub enabled: usize,
+    pub usable: usize,
+    pub unavailable: usize,
+    pub disabled: usize,
+}
+
+/// Registry counts for the username corpus. All values derive from the
+/// loaded pack; report exactly what RXScan has, never a target number.
+pub fn username_registry_counts(pack: &UsernameProviderPack) -> RegistryCounts {
+    let vectors = username_search_vectors(pack);
+    let mut enabled = 0usize;
+    let mut usable = 0usize;
+    let mut unavailable = 0usize;
+    let mut disabled = 0usize;
+    for vector in &vectors {
+        match vector.state {
+            "usable" => {
+                usable += 1;
+                enabled += 1;
+            }
+            "unavailable" => {
+                unavailable += 1;
+                enabled += 1;
+            }
+            _ => disabled += 1,
+        }
+    }
+    let mut provider_ids = BTreeSet::new();
+    for vector in &vectors {
+        provider_ids.insert(vector.provider_id.as_str());
+    }
+    RegistryCounts {
+        providers_configured: provider_ids.len(),
+        vectors_registered: vectors.len(),
+        enabled,
+        usable,
+        unavailable,
+        disabled,
+    }
+}
+
+/// Email search-vector registry.
+///
+/// The email vector registry is defined but currently unpopulated: email
+/// search stays passive local canonicalization until real email lookup
+/// vectors (stable ID, target construction, positive + absence rules,
+/// fixtures, provenance, review status) land under the same quality bar.
+/// Reporting `0` honestly beats advertising vectors RXScan does not have.
+pub fn email_registry_counts() -> RegistryCounts {
+    RegistryCounts {
+        providers_configured: 0,
+        vectors_registered: 0,
+        enabled: 0,
+        usable: 0,
+        unavailable: 0,
+        disabled: 0,
+    }
+}
+
+/// Shared execution-plan selection for username search.
+///
+/// Both the terminal CLI and the web API call this: given the loaded pack
+/// plus operator-selected provider IDs, excluded IDs, and categories, it
+/// validates unknown entries and returns the exact provider ID set the
+/// scheduler will run. Category/provider selection affects the REAL plan
+/// (never post-filters after contacting every provider).
+pub fn plan_username_providers(
+    pack: &UsernameProviderPack,
+    selected: Option<&BTreeSet<String>>,
+    excluded: &BTreeSet<String>,
+    categories: &BTreeSet<String>,
+) -> Result<BTreeSet<String>, String> {
+    let available: BTreeSet<&str> = pack
+        .providers
+        .iter()
+        .map(|provider| provider.metadata.id.as_str())
+        .collect();
+    for requested in selected
+        .iter()
+        .flat_map(|ids| ids.iter())
+        .chain(excluded.iter())
+    {
+        if !available.contains(requested.as_str()) {
+            return Err(format!("unknown provider: {requested}"));
+        }
+    }
+    let known: BTreeSet<&str> = known_username_categories().into_iter().collect();
+    let mut unknown_categories = Vec::new();
+    for category in categories {
+        if !known.contains(category.as_str()) {
+            unknown_categories.push(category.clone());
+        }
+    }
+    if !unknown_categories.is_empty() {
+        unknown_categories.sort();
+        let label = if unknown_categories.len() == 1 {
+            "unknown category"
+        } else {
+            "unknown categories"
+        };
+        return Err(format!(
+            "{label}: {} (known: {})",
+            unknown_categories.join(", "),
+            known.into_iter().collect::<Vec<_>>().join(", ")
+        ));
+    }
+    let effective: BTreeSet<String> = pack
+        .providers
+        .iter()
+        .filter(|provider| {
+            selected
+                .as_ref()
+                .is_none_or(|ids| ids.contains(&provider.metadata.id))
+                && !excluded.contains(&provider.metadata.id)
+                && (categories.is_empty() || categories.contains(&provider.category))
+        })
+        .map(|provider| provider.metadata.id.clone())
+        .collect();
+    Ok(effective)
+}
+
+/// Per-category coverage derived from the real plan + real results.
+///
+/// `effective` is the exact scheduled set from [`plan_username_providers`];
+/// `results` are completed observations; `provider_to_category` maps every
+/// scheduled provider to its registry category. Scheduled counts come from
+/// the plan, complete counts from observations — never invented.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UsernameCategoryCoverage {
+    pub category: String,
+    pub label: String,
+    pub scheduled: usize,
+    pub complete: usize,
+    pub remaining: usize,
+}
+
+pub fn coverage_by_category(
+    effective: &BTreeSet<String>,
+    provider_to_category: &BTreeMap<String, String>,
+    results: &[SearchObservation],
+) -> Vec<UsernameCategoryCoverage> {
+    let mut scheduled: BTreeMap<String, usize> = BTreeMap::new();
+    for provider in effective {
+        let category = provider_to_category
+            .get(provider)
+            .cloned()
+            .unwrap_or_else(|| "other".to_owned());
+        *scheduled.entry(category).or_default() += 1;
+    }
+    let mut complete: BTreeMap<String, usize> = BTreeMap::new();
+    for result in results {
+        if let Some(category) = provider_to_category.get(&result.provider_id) {
+            *complete.entry(category.clone()).or_default() += 1;
+        }
+    }
+    let mut out = Vec::new();
+    for (category, scheduled_count) in scheduled {
+        let complete_count = complete
+            .get(&category)
+            .copied()
+            .unwrap_or(0)
+            .min(scheduled_count);
+        out.push(UsernameCategoryCoverage {
+            label: category_label(&category).to_owned(),
+            category: category.clone(),
+            scheduled: scheduled_count,
+            complete: complete_count,
+            remaining: scheduled_count.saturating_sub(complete_count),
+        });
+    }
+    out.sort_by(|a, b| a.category.cmp(&b.category));
+    out
+}
+
+/// Core URL-kind semantics shared by CLI, web, and machine output.
+///
+/// Mirrors the terminal presentation honesty (`Profile` vs `Resource` vs
+/// `Candidate` vs `ProviderEndpoint`) without any presentation styling:
+/// the same inputs always yield the same kind in every frontend.
+pub fn core_url_kind(url: &str, username: &str, observed: bool) -> &'static str {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return "none";
+    }
+    let user = username.trim().to_ascii_lowercase();
+    let lower = trimmed.to_ascii_lowercase();
+    let identity = if user.is_empty() {
+        false
+    } else if lower.contains(&user) {
+        true
+    } else {
+        // Percent-encoded username form (provider templates encode).
+        let mut encoded = String::with_capacity(user.len());
+        for byte in username.trim().as_bytes() {
+            if byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'.' | b'_' | b'~') {
+                encoded.push(char::from(*byte).to_ascii_lowercase());
+            } else {
+                encoded.push('%');
+                encoded.push(
+                    char::from(b"0123456789ABCDEF"[(byte >> 4) as usize]).to_ascii_lowercase(),
+                );
+                encoded.push(
+                    char::from(b"0123456789ABCDEF"[(byte & 15) as usize]).to_ascii_lowercase(),
+                );
+            }
+        }
+        encoded != user && lower.contains(&encoded)
+    };
+    if !identity {
+        return "provider_endpoint";
+    }
+    if observed {
+        // API/resource shape detection (same heuristic as terminal).
+        let host = lower
+            .split("://")
+            .nth(1)
+            .unwrap_or(&lower)
+            .split('/')
+            .next()
+            .unwrap_or("")
+            .split('?')
+            .next()
+            .unwrap_or("")
+            .split('#')
+            .next()
+            .unwrap_or("");
+        let path = lower.split("://").nth(1).unwrap_or(&lower);
+        let is_api = host.starts_with("api.")
+            || host.contains(".api.")
+            || path.contains("/api/")
+            || path.contains("/xrpc/")
+            || path.contains("/v1/users/")
+            || path.contains("/v2/users/")
+            || path.contains("/v1/user/")
+            || path.contains("about.json")
+            || path.contains("lookup.json")
+            || path.trim_end_matches('/').ends_with(".json");
+        if is_api {
+            "observed_resource"
+        } else {
+            "observed_profile"
+        }
+    } else {
+        "candidate"
+    }
+}
+
+/// Bounded public-metadata prioritization shared by CLI and web.
+///
+/// Deterministic order, visible hidden-count: the default renderer shows
+/// only a useful subset; `--all`/`--explain` (or web expand) may show more.
+/// A provider returning 100 keys never destroys readability.
+pub fn prioritized_public_metadata(
+    attributes: &BTreeMap<String, String>,
+    limit: usize,
+) -> (Vec<(String, String)>, usize) {
+    const PRIORITY: &[&str] = &[
+        "username",
+        "display_name",
+        "displayname",
+        "name",
+        "joined",
+        "created",
+        "created_at",
+        "followers",
+        "following",
+        "website",
+        "url",
+        "bio",
+        "location",
+        "account_type",
+        "platform",
+        "profile_url",
+        "final_url",
+        "http_status",
+        "provider_health",
+        "elapsed_ms",
+    ];
+    let mut ordered: Vec<(String, String)> = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for key in PRIORITY {
+        if let Some(value) = attributes.get(*key) {
+            let value = value.trim();
+            if !value.is_empty() {
+                ordered.push(((*key).to_owned(), value.to_owned()));
+                seen.insert((*key).to_owned());
+            }
+        }
+    }
+    let mut rest: Vec<(String, String)> = attributes
+        .iter()
+        .filter(|(key, value)| !seen.contains(*key) && !value.trim().is_empty())
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    rest.sort_by(|a, b| a.0.cmp(&b.0));
+    // Technical hashes stay last; they prove observation but rarely help.
+    ordered.extend(rest);
+    if ordered.len() <= limit {
+        (ordered, 0)
+    } else {
+        let hidden = ordered.len() - limit;
+        ordered.truncate(limit);
+        (ordered, hidden)
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoundedHttpResponse {
@@ -352,9 +855,9 @@ pub struct UsernameProviderPack {
 }
 
 pub fn parse_provider_pack(json: &str, source: &str) -> Result<UsernameProviderPack, SearchError> {
-    if json.len() > 4 * 1024 * 1024 {
+    if json.len() > MAX_PROVIDER_PACK_BYTES {
         return Err(SearchError::InvalidProvider(format!(
-            "provider pack '{source}' exceeds 4 MiB"
+            "provider pack '{source}' exceeds 32 MiB"
         )));
     }
     let pack: UsernameProviderPack = serde_json::from_str(json).map_err(|error| {
@@ -1315,6 +1818,16 @@ impl UsernameProviderDefinition {
                 "provider '{id}' carries a verification method without a verification date"
             )));
         }
+        // A live_verified claim must not be contradicted by its own notes.
+        // Provisional/awaiting-verification language means the provider was
+        // never actually verified and must stay in needs_review.
+        if self.health_state == HealthState::LiveVerified
+            && verification_notes_contradict_live(self.source_notes.as_deref())
+        {
+            return Err(SearchError::InvalidProvider(format!(
+                "provider '{id}' claims live_verified with provisional/unverified source notes"
+            )));
+        }
         if let Some(method) = self.verification_method.as_deref() {
             if method.trim().is_empty() || method.len() > 64 {
                 return Err(SearchError::InvalidProvider(format!(
@@ -1483,11 +1996,21 @@ impl SearchProvider for DefinitionProvider {
         };
         let mut attributes = BTreeMap::from([
             ("platform".to_owned(), self.definition.platform.clone()),
+            ("category".to_owned(), self.definition.category.clone()),
+            (
+                "category_label".to_owned(),
+                category_label(&self.definition.category).to_owned(),
+            ),
+            ("username".to_owned(), entity.display_value.clone()),
             ("profile_url".to_owned(), url.to_string()),
             ("final_url".to_owned(), response.final_url.clone()),
             (
                 "provider_health".to_owned(),
                 self.definition.health_state.as_str().to_owned(),
+            ),
+            (
+                "provider_state".to_owned(),
+                provider_state(&self.definition).to_owned(),
             ),
             ("body_sha256".to_owned(), body_hash),
             ("http_status".to_owned(), response.status.to_string()),
@@ -1616,6 +2139,20 @@ impl SearchAccounting {
     pub fn accounted(&self) -> usize {
         self.providers_completed + self.skipped + self.cancelled + self.unscanned
     }
+
+    /// Work still outstanding: scheduled but neither completed nor skipped.
+    /// Progress denominators elsewhere MUST use scheduled (`requested`) and
+    /// this remainder — never the registry size.
+    pub fn remaining(&self) -> usize {
+        self.cancelled + self.unscanned
+    }
+
+    /// Scheduled work for this run. `providers_requested` IS the scheduled
+    /// set: planning already applied category/provider selection, so the
+    /// denominator is real scheduled vectors, never the registry total.
+    pub fn scheduled(&self) -> usize {
+        self.providers_requested
+    }
 }
 
 /// Simple rate limiter that honors `requests_per_minute` per provider.
@@ -1660,6 +2197,14 @@ impl RateLimiter {
     }
 }
 
+/// Bounded execution over an unbounded registry.
+///
+/// The scheduler admits up to `max_providers` vectors and runs at most
+/// `max_concurrency` at once: 2,391 scheduled vectors with 4 concurrent
+/// means ~598 sequential waves, NOT 2,391 simultaneous requests. Registry
+/// growth never changes the concurrency profile; raise the registry, keep
+/// the waves bounded. Admission is O(scheduled); per-wave thread count is
+/// O(concurrency), independent of registry size.
 #[allow(private_interfaces)]
 pub struct SearchScheduler {
     pub max_providers: usize,
@@ -1670,11 +2215,45 @@ pub struct SearchScheduler {
 }
 
 impl SearchScheduler {
+    /// Bounded execution over any registry size: `max_providers` caps
+    /// admission, `max_concurrency` caps simultaneous requests. A 2,500
+    /// registry with concurrency 20 runs ~125 sequential waves — registry
+    /// growth never widens the concurrency profile.
+    pub fn new(
+        max_providers: usize,
+        max_concurrency: usize,
+        max_per_host: usize,
+        deadline: Instant,
+    ) -> Self {
+        Self {
+            max_providers,
+            max_concurrency,
+            max_per_host,
+            deadline,
+            rate_limiter: RateLimiter::new(0),
+        }
+    }
+
     pub fn run(
         &mut self,
         providers: &[Box<dyn SearchProvider>],
         entity: &SearchEntity,
         cancelled: &AtomicBool,
+    ) -> (Vec<SearchObservation>, SearchAccounting) {
+        self.run_with_progress(providers, entity, cancelled, &|_, _| {})
+    }
+
+    /// Scheduler with a real progress hook `(completed, total)`.
+    ///
+    /// The hook fires after each wave with honest counts (completed providers
+    /// vs requested). Frontends use it for restrained TTY progress or SSE;
+    /// the hook never affects scheduling, evidence, or accounting.
+    pub fn run_with_progress(
+        &mut self,
+        providers: &[Box<dyn SearchProvider>],
+        entity: &SearchEntity,
+        cancelled: &AtomicBool,
+        progress: &dyn Fn(usize, usize),
     ) -> (Vec<SearchObservation>, SearchAccounting) {
         let mut accounting = SearchAccounting {
             providers_requested: providers.len(),
@@ -1777,6 +2356,11 @@ impl SearchScheduler {
                 self.rate_limiter.record_request(&provider.host_key());
             }
             pending = deferred;
+            // Real progress: completed vs requested after each wave.
+            progress(
+                accounting.providers_completed,
+                accounting.providers_requested,
+            );
         }
         observations.sort_by(|a, b| {
             a.provider_id
@@ -1817,11 +2401,8 @@ pub enum SearchError {
 }
 
 pub fn validate_definitions(definitions: &[UsernameProviderDefinition]) -> Result<(), SearchError> {
-    if definitions.len() > MAX_PROVIDER_DEFINITIONS {
-        return Err(SearchError::InvalidProvider(
-            "provider pack exceeds definition limit".to_owned(),
-        ));
-    }
+    // No count limit: the registry is designed for thousands of vectors.
+    // Safety comes from the pack byte cap plus per-definition validation.
     let mut ids = BTreeSet::new();
     for definition in definitions {
         definition.validate()?;
@@ -1870,7 +2451,7 @@ pub fn stale_cutoff(days_back: u64) -> String {
     format!("{year:04}-{month:02}-{day:02}")
 }
 
-/// A verification date is `YYYY-MM-DD` with plausible month/day ranges.
+/// A verification date is `YYYY-MM-DD` with a real calendar date.
 /// Lexicographic compare stays chronological for this format, which is what
 /// staleness derivation relies on.
 pub fn is_verification_date(date: &str) -> bool {
@@ -1886,9 +2467,42 @@ pub fn is_verification_date(date: &str) -> bool {
             return false;
         }
     }
+    let year: u32 = date[0..4].parse().unwrap_or(0);
     let month: u32 = date[5..7].parse().unwrap_or(0);
     let day: u32 = date[8..10].parse().unwrap_or(0);
-    (1..=12).contains(&month) && (1..=31).contains(&day)
+    if year == 0 || !(1..=12).contains(&month) || day == 0 {
+        return false;
+    }
+    // Calendar-valid day: reject impossible dates such as 2026-02-31 that
+    // pass a naive month/day-range check.
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    day <= max_day
+}
+
+/// `source_notes` that explicitly describe a provisional/unverified state
+/// contradict a `live_verified` health claim. The note text — not a
+/// separate boolean — is the historical source of the contradiction, so
+/// lint treats this as an error rather than trusting the health flag.
+pub fn verification_notes_contradict_live(notes: Option<&str>) -> bool {
+    let Some(text) = notes else {
+        return false;
+    };
+    let lowered = text.to_ascii_lowercase();
+    lowered.contains("provisional")
+        || lowered.contains("needs_review")
+        || lowered.contains("needs review")
+        || lowered.contains("await live verification")
+        || lowered.contains("awaiting live verification")
+        || lowered.contains("awaiting verification")
+        || lowered.contains("unverified")
+        || lowered.contains("not yet verified")
 }
 
 /// Derived staleness: a `live_verified` provider whose `verified_at` is
@@ -1920,6 +2534,20 @@ pub struct CorpusLintReport {
     pub providers_checked: usize,
     pub files_checked: usize,
     pub fixture_complete: usize,
+    /// Registered search vectors checked (1:1 with providers today; kept
+    /// distinct so multi-vector providers never inflate either number).
+    #[serde(default)]
+    pub vectors_checked: usize,
+    /// Distinct provider IDs seen.
+    #[serde(default)]
+    pub providers_count: usize,
+    #[serde(default)]
+    pub disabled_count: usize,
+    #[serde(default)]
+    pub needs_review_count: usize,
+    /// `live_verified` definitions older than the 180-day review window.
+    #[serde(default)]
+    pub stale_count: usize,
 }
 
 impl CorpusLintReport {
@@ -1939,14 +2567,88 @@ fn normalized_template(template: &str) -> String {
 }
 
 /// Definition-level checks shared by file lint and the embedded fallback.
-fn lint_definitions(definitions: &[UsernameProviderDefinition], report: &mut CorpusLintReport) {
+///
+/// Scales with the registry: all checks are O(definitions) hash joins, so
+/// thousands of vectors lint as fast as dozens. Every check names the
+/// offending vector — at 2,500 vectors a bare count is unactionable.
+pub fn lint_definitions(definitions: &[UsernameProviderDefinition], report: &mut CorpusLintReport) {
     if let Err(error) = validate_definitions(definitions) {
         report.errors.push(format!("definitions: {error}"));
     }
+    let stale_cutoff = stale_cutoff(180);
     let mut templates = BTreeMap::new();
     let mut normalized = BTreeMap::new();
+    let mut vector_ids = BTreeSet::new();
+    let mut provider_ids = BTreeSet::new();
+    let mut disabled_count = 0usize;
+    let mut needs_review_count = 0usize;
+    let mut stale_count = 0usize;
     for definition in definitions {
         let id = definition.metadata.id.as_str();
+        provider_ids.insert(id);
+        // Explicit vector-identity check: vector IDs must be unique even
+        // when several vectors later share one provider.
+        if !vector_ids.insert(id) {
+            report.errors.push(format!(
+                "duplicate search vector '{id}' (vector IDs must be unique)"
+            ));
+        }
+        match definition.health_state {
+            HealthState::Disabled => disabled_count += 1,
+            HealthState::NeedsReview => needs_review_count += 1,
+            HealthState::LiveVerified => {
+                if verification_stale(
+                    &definition.health_state,
+                    definition.verified_at.as_deref(),
+                    &stale_cutoff,
+                ) {
+                    stale_count += 1;
+                }
+            }
+            HealthState::FixtureVerified => {}
+        }
+        if definition.category.trim().is_empty() {
+            report.errors.push(format!(
+                "provider '{id}' has a missing category (every vector needs one)"
+            ));
+        } else if !USERNAME_PROVIDER_CATEGORIES.contains(&definition.category.as_str()) {
+            report.errors.push(format!(
+                "provider '{id}' has unsupported category '{}'",
+                definition.category
+            ));
+        }
+        if definition.metadata.weight == 0 {
+            report.warnings.push(format!(
+                "provider '{id}' has zero weight (scheduling priority misconfiguration)"
+            ));
+        }
+        // Conflicting rules: a marker cannot prove presence AND absence.
+        {
+            let success_markers: BTreeSet<&str> = definition
+                .success
+                .required
+                .iter()
+                .chain(definition.success.any.iter())
+                .map(String::as_str)
+                .collect();
+            let absence_markers: BTreeSet<&str> = definition
+                .not_found
+                .required
+                .iter()
+                .chain(definition.not_found.any.iter())
+                .map(String::as_str)
+                .collect();
+            let conflicting: Vec<&&str> = success_markers.intersection(&absence_markers).collect();
+            if !conflicting.is_empty() {
+                report.errors.push(format!(
+                    "provider '{id}' has conflicting rules (marker proves presence and absence: {:?})",
+                    conflicting
+                        .into_iter()
+                        .take(3)
+                        .collect::<Vec<_>>()
+                ));
+            }
+        }
         if !has_absence_handling(definition) {
             report.errors.push(format!(
                 "provider '{id}' has no absence handling (no not-found status, marker, or redirect)"
@@ -1974,6 +2676,13 @@ fn lint_definitions(definitions: &[UsernameProviderDefinition], report: &mut Cor
         {
             report.errors.push(format!(
                 "provider '{id}' carries verification metadata without live_verified health"
+            ));
+        }
+        if definition.health_state == HealthState::LiveVerified
+            && verification_notes_contradict_live(definition.source_notes.as_deref())
+        {
+            report.errors.push(format!(
+                "provider '{id}' claims live_verified with provisional/unverified source notes"
             ));
         }
         if definition.metadata.source_category != definition.category {
@@ -2025,6 +2734,11 @@ fn lint_definitions(definitions: &[UsernameProviderDefinition], report: &mut Cor
         }
     }
     report.providers_checked = definitions.len();
+    report.vectors_checked = vector_ids.len();
+    report.providers_count = provider_ids.len();
+    report.disabled_count = disabled_count;
+    report.needs_review_count = needs_review_count;
+    report.stale_count = stale_count;
 }
 
 fn lint_expected_status(name: &str) -> Option<SearchStatus> {
@@ -2565,14 +3279,50 @@ pub fn execute_username_search(
     selected: Option<&BTreeSet<String>>,
     cancelled: &AtomicBool,
 ) -> Result<UsernameSearchReport, SearchError> {
+    execute_username_search_full(
+        username,
+        max_concurrency,
+        max_per_host,
+        deadline,
+        selected,
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+        cancelled,
+        None,
+    )
+}
+
+/// Full core entry point with category/provider selection.
+///
+/// `selected` (explicit provider IDs), `excluded`, and `categories` form the
+/// REAL execution plan via [`plan_username_providers`]: providers outside
+/// the plan are never contacted (no post-filtering). Both CLI and web call
+/// this so the same query yields the same plan. `progress` is an optional
+/// real progress hook `(completed, total)` invoked after each scheduler wave;
+/// frontends use it for restrained TTY progress or SSE, never faked.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_username_search_full(
+    username: &str,
+    max_concurrency: usize,
+    max_per_host: usize,
+    deadline: std::time::Duration,
+    selected: Option<&BTreeSet<String>>,
+    excluded: &BTreeSet<String>,
+    categories: &BTreeSet<String>,
+    cancelled: &AtomicBool,
+    progress: Option<&dyn Fn(usize, usize)>,
+) -> Result<UsernameSearchReport, SearchError> {
     let started_at = unix_timestamp();
     let seed = SearchEntity::username(username, started_at)?;
     let pack = embedded_username_pack()?;
     let pack_version = pack.pack_version.clone();
+    // Shared planning: identical validation + effective set for CLI and web.
+    let effective = plan_username_providers(&pack, selected, excluded, categories)
+        .map_err(SearchError::InvalidProvider)?;
     let client = Arc::new(SharedHttpClient::new()?);
     let mut providers: Vec<Box<dyn SearchProvider>> = Vec::new();
     for definition in pack.providers {
-        if selected.is_some_and(|ids| !ids.contains(&definition.metadata.id)) {
+        if !effective.contains(&definition.metadata.id) {
             continue;
         }
         providers.push(Box::new(DefinitionProvider::new(
@@ -2589,7 +3339,11 @@ pub fn execute_username_search(
         deadline: Instant::now() + deadline,
         rate_limiter,
     };
-    let (results, accounting) = scheduler.run(&providers, &seed, cancelled);
+    let (results, accounting) = if let Some(hook) = progress {
+        scheduler.run_with_progress(&providers, &seed, cancelled, hook)
+    } else {
+        scheduler.run(&providers, &seed, cancelled)
+    };
     let mut graph = crate::graph::ScanGraph::default();
     graph.upsert_entity(
         seed.id.clone(),
@@ -2832,6 +3586,7 @@ pub fn render_username_jsonl(report: &UsernameSearchReport) -> String {
             "seed_display": report.seed.display_value,
             "provider_pack_version": report.provider_pack_version,
             "providers_requested": report.accounting.providers_requested,
+            "scheduled": report.accounting.scheduled(),
             "network_scans": report.network_scans,
             "started_at": report.started_at,
         }),
@@ -2839,6 +3594,24 @@ pub fn render_username_jsonl(report: &UsernameSearchReport) -> String {
     output.push('\n');
     for result in &report.results {
         let attribute = |key: &str| result.attributes.get(key).cloned().unwrap_or_default();
+        // Core URL-kind semantics (same as CLI/web presentation, no ANSI).
+        let profile = attribute("profile_url");
+        let final_url = attribute("final_url");
+        let observed = matches!(
+            result.status,
+            SearchStatus::Confirmed | SearchStatus::Probable
+        );
+        // Prefer final URL when identity-specific, else profile template.
+        let kind_url = if !final_url.trim().is_empty() {
+            final_url.clone()
+        } else {
+            profile.clone()
+        };
+        let url_kind = core_url_kind(
+            &kind_url,
+            &report.seed.display_value,
+            observed && !kind_url.trim().is_empty(),
+        );
         output.push_str(&envelope(
             "observation",
             serde_json::json!({
@@ -2846,14 +3619,32 @@ pub fn render_username_jsonl(report: &UsernameSearchReport) -> String {
                 "provider_id": result.provider_id,
                 "definition_version": result.provider_version,
                 "provider_health": attribute("provider_health"),
+                "provider_state": attribute("provider_state"),
+                "categories": [attribute("category")],
+                "category": attribute("category"),
+                "category_label": attribute("category_label"),
                 "status": result.status,
                 "confidence": result.confidence,
                 "profile_url": attribute("profile_url"),
                 "final_url": attribute("final_url"),
-                "contact_class": result.contact_class,
+                "url": if !final_url.is_empty() { final_url.clone() } else { profile.clone() },
+                "url_kind": url_kind,
+                "metadata": result.attributes,
                 "evidence": result.evidence,
+                "provenance": {
+                    "provider_id": result.provider_id,
+                    "provider_version": result.provider_version,
+                    "task_id": result.task_id,
+                    "input_entity_id": result.input_entity_id,
+                    "contact_class": result.contact_class,
+                    "scan_plan_id": "search",
+                    "module": format!("search.provider.{}", result.provider_id),
+                },
+                "contact_class": result.contact_class,
                 "task_id": result.task_id,
                 "timestamp": result.timestamp,
+                "started_at": report.started_at,
+                "observed_at": result.timestamp,
             }),
         ));
         output.push('\n');
@@ -2888,6 +3679,10 @@ pub fn render_username_jsonl(report: &UsernameSearchReport) -> String {
         serde_json::json!({
             "run_id": report.run_id,
             "providers_requested": report.accounting.providers_requested,
+            // Explicit scheduled/remaining aliases: the denominator is the
+            // real scheduled set for this run, never the registry size.
+            "scheduled": report.accounting.scheduled(),
+            "remaining": report.accounting.remaining(),
             "providers_completed": report.accounting.providers_completed,
             "skipped": report.accounting.skipped,
             "cancelled": report.accounting.cancelled,
@@ -3392,6 +4187,9 @@ mod tests {
         assert!(is_verification_date("2026-10-05"));
         assert!(!is_verification_date("2026-13-01"));
         assert!(!is_verification_date("2026-00-10"));
+        assert!(!is_verification_date("2026-02-31"));
+        assert!(!is_verification_date("2026-02-29"));
+        assert!(is_verification_date("2024-02-29"));
         assert!(!is_verification_date("not-a-date"));
         assert!(!is_verification_date("2026/10/05"));
         assert!(!is_verification_date(""));
@@ -3405,6 +4203,23 @@ mod tests {
         let mut method_only = definition();
         method_only.verification_method = Some("live-probe".to_owned());
         assert!(method_only.validate().is_err());
+        // A live_verified claim contradicted by its own notes is an error.
+        let mut contradicted = definition();
+        contradicted.health_state = HealthState::LiveVerified;
+        contradicted.verified_at = Some("2026-10-05".to_owned());
+        contradicted.verification_method = Some("live-probe".to_owned());
+        contradicted.source_notes =
+            Some("Provisional definition (needs_review): await live verification.".to_owned());
+        assert!(contradicted.validate().is_err());
+        let mut report = CorpusLintReport::default();
+        lint_definitions(&[contradicted], &mut report);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.contains("provisional/unverified")),
+            "lint must flag live_verified with provisional notes"
+        );
     }
 
     #[test]
@@ -3636,7 +4451,10 @@ mod tests {
             expected: String,
         }
         let pack = embedded_username_pack().unwrap();
-        assert_eq!(pack.providers.len(), 100);
+        assert!(
+            !pack.providers.is_empty(),
+            "registry must hold real providers"
+        );
         for provider in pack.providers {
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("search/fixtures/username")

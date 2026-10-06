@@ -24,8 +24,9 @@ DNS resolution is a `DnsQuery`, not a scan.
 
 Forbidden by default: `direct_network`, `authenticated_api`. A
 discovered `IpAddress` **stops** at `RESOLVES_TO` — it never triggers SYN
-scans, service probes, or TLS probing. There is no `--network` bridge in
-this phase; it stays an explicit future operator decision (deferred).
+scans, service probes, or TLS probing unless the operator passes the
+explicit opt-in `investigate --network --scope CIDR` bridge (authorized
+targets only) or `--exposure` enrichment. Passive remains the default.
 
 `rxscan investigate --username exampleuser` does **not** port scan
 anything. Ever.

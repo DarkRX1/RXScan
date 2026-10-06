@@ -8,7 +8,8 @@ use crate::plan::SpeedSetting;
     name = "rxscan",
     version,
     about = "RXScan — Reconnaissance & Evidence Engine",
-    long_about = "RXScan — Reconnaissance & Evidence Engine\n\nUSAGE\n  rxscan <target> [options]\n  rxscan search <options>\n  rxscan investigate <options>\n  rxscan project <command>\n  rxscan capabilities\n\nQUICK START\n  rxscan example.test\n  rxscan 192.0.2.10 --ports 22,80,443\n  rxscan search --username exampleuser\n  rxscan investigate --username exampleuser\n\nWORKFLOWS\n  Scan          Discover ports, services, and evidence\n  Search        Search public sources\n  Investigate   Correlate public evidence\n  Project       Inspect persisted reconnaissance\n  Capabilities  Inspect runtime support\n\nRun `rxscan <command> --help` for workflow-specific options."
+    long_about = "RXScan — Reconnaissance & Evidence Engine\n\nUSAGE\n  rxscan <target> [options]\n  rxscan search <options>\n  rxscan investigate <options>\n  rxscan project <command>\n  rxscan project-db <command>\n  rxscan web [options]\n  rxscan capabilities\n\nQUICK START\n  rxscan example.test\n  rxscan 192.0.2.10 --ports 22,80,443\n  rxscan search --username exampleuser\n  rxscan investigate --username exampleuser\n\nWORKFLOWS\n  Scan          Discover ports, services, and evidence\n  Search        Search public sources\n  Investigate   Correlate public evidence\n  Project       Inspect persisted reconnaissance\n  Project-db    Offline project database ops\n  Web           Local GUI & API (loopback)\n  Capabilities  Inspect runtime support\n\nRun `rxscan <command> --help` for workflow-specific options.",
+    after_help = "Web console: `rxscan web [--port PORT]` serves the loopback-only GUI + /api/v1."
 )]
 pub struct Cli {
     /// A target: IPv4, IPv6, hostname, URL, CIDR, or '-' for standard input.

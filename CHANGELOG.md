@@ -1,31 +1,39 @@
 # Changelog
 
-## Unreleased
+## Unreleased (master, newer than v1.0.2)
 
-Host discovery is first-class: local neighbor-cache reads, bounded active ARP
-and NDP on directly connected targets, interface/link-scope awareness, TCP
-SYN/ACK technique identities, and
-corroboration without confidence summing (strongest source wins, capped at
-95). TCP scan modes `connect|syn|auto`, Linux IPv4 raw SYN with capability-
-gated fallback, and the full open/closed/filtered/open|filtered/unknown/error
-state model.
-Deterministic feedback-driven adaptive pacing within scheduler budgets.
-UDP Wave-2 safe probes (TFTP/SIP/IKE/mDNS/SNMP-response-grammar/QUIC
-indicator) alongside DNS/NTP/SSDP. Fingerprint corpus grown from 5 to 265
-rules across 13 packs with per-rule
-self-consistency tests. Read-only SMB/RDP/MongoDB/MQTT identification (no
-auth). DNS SRV with a typed service-discovery relation. Web technology
-normalization with weak-signal caps, emitted per web observation. Canonical
-endpoint/service asset registry. `rxscan project explain` for per-entity
-conclusions, evidence, findings, changes, and discovery chain.
-Coverage-aware vulnerability resolution
-(resolved_by_software_change/dataset_changed/coverage_insufficient/unknown).
-Local web console (`rxscan web`): loopback-only same-origin GUI plus a
-versioned typed API (`/api/v1`) over the same core — health, capabilities,
-projects, bounded scan/investigation jobs with real core cancellation,
-server-sent progress, and project evidence views (entities, findings,
-graph, timeline) from the existing SQLite store. No command-execution
-endpoint; no new dependencies (standard-library HTTP).
+- Host discovery: neighbor-cache reads, bounded ARP/NDP, SYN/ACK technique
+  identities, corroboration without confidence summing.
+- TCP `connect|syn|auto` modes (Linux IPv4 raw SYN with fallback) and the
+  full port-state model; adaptive pacing within scheduler budgets.
+- UDP: bounded Wave-2 probes alongside DNS/NTP/SSDP; `open|filtered`
+  uncertainty preserved.
+- Fingerprints: 13 packs with per-rule self-consistency tests; read-only
+  SMB/RDP/MongoDB/MQTT identification (no auth); DNS SRV relation; web
+  technology normalization with weak-signal caps.
+- Asset registry, `project explain`, coverage-aware vulnerability
+  resolution.
+- Local web console (`rxscan web`): loopback-only same-origin GUI plus
+  versioned `/api/v1` over the same core (jobs with cancellation,
+  server-sent progress, project evidence views). No command-execution
+  endpoint; no new dependencies.
+- Search: shared category registry with CLI/Web parity, findings-first
+  terminal output, metadata/provenance, coverage accounting, and
+  `all_ports` parity (TCP-only; UDP stays bounded).
+
+## v1.0.2
+
+First correctly versioned 1.x release (`Cargo.toml` version `1.0.2`).
+No code changes beyond version metadata relative to the v1.0.0/v1.0.1
+commit. Historical tags are left unchanged (see Releases in README).
+
+## v1.0.1 / v1.0.0 (same commit)
+
+Published tags `v1.0.0` and `v1.0.1` point at the same commit and carry
+incorrect `0.1.0` Cargo package metadata. Left unchanged for tag
+immutability; `v1.0.2` is the first correctly versioned 1.x release.
+Capability baseline for these tags is the Phase 0–20 prerelease scope
+described below.
 
 ## v0.1.0 (prerelease, unreleased)
 

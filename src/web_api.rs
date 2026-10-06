@@ -82,6 +82,24 @@ pub const MAX_SCAN_PORTS: usize = 5000;
 pub const MAX_SCOPE_ENTRIES: usize = 64;
 /// Project name policy: filesystem-safe, traversal-proof.
 const PROJECT_NAME_MAX: usize = 64;
+/// Maximum request-line length (longer -> `414 uri_too_long`).
+pub const MAX_REQUEST_LINE_BYTES: usize = 8192;
+/// Maximum request path length.
+pub const MAX_PATH_BYTES: usize = 4096;
+/// Maximum request header count.
+pub const MAX_HEADER_COUNT: usize = 100;
+/// Default scan-job deadline (seconds) when the request omits one.
+pub const DEFAULT_SCAN_DEADLINE_SECS: u64 = 60;
+/// Hard scan-job deadline ceiling (seconds).
+pub const MAX_SCAN_DEADLINE_SECS: u64 = 3600;
+/// Default username-search deadline (seconds) when the request omits one.
+pub const DEFAULT_SEARCH_DEADLINE_SECS: u64 = 25;
+/// Hard username-search deadline ceiling (seconds).
+pub const MAX_SEARCH_DEADLINE_SECS: u64 = 120;
+/// Default investigation deadline (seconds) when the request omits one.
+pub const DEFAULT_INVESTIGATION_DEADLINE_SECS: u64 = 60;
+/// Hard investigation deadline ceiling (seconds).
+pub const MAX_INVESTIGATION_DEADLINE_SECS: u64 = 600;
 
 // ---------------------------------------------------------------------------
 // Error model.
@@ -197,6 +215,10 @@ pub struct EntitySearchRequest {
 /// status/evidence/confidence/coverage and candidate-vs-observed honesty.
 /// Runs as a job so progress/cancellation stream over SSE like scans and
 /// investigations.
+///
+/// Category/provider selection uses the SAME registry and planning as the
+/// CLI (`rxscan search --category/--provider`): identical options yield
+/// the identical provider execution plan.
 #[derive(Debug, Deserialize)]
 pub struct UsernameSearchRequest {
     pub value: Option<String>,
@@ -206,6 +228,17 @@ pub struct UsernameSearchRequest {
     pub deadline_seconds: Option<u64>,
     #[serde(default)]
     pub project: Option<String>,
+    /// Category selection (machine IDs, e.g. `social`, `developer`).
+    /// Same vocabulary and planning as CLI `--category`.
+    #[serde(default)]
+    pub categories: Vec<String>,
+    /// Explicit provider selection (IDs, e.g. `github`).
+    /// Same planning as CLI `--provider`.
+    #[serde(default)]
+    pub providers: Vec<String>,
+    /// Providers to exclude (same as CLI `--exclude-provider`).
+    #[serde(default)]
+    pub exclude_providers: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -617,7 +650,9 @@ fn project_db_path(data_dir: &std::path::Path, project: &str) -> PathBuf {
     data_dir.join(format!("{project}.db"))
 }
 
-fn truncate_display(text: &str, max_bytes: usize) -> String {
+/// Truncate to a byte budget on a char boundary (terminal's similarly
+/// named helper counts chars instead — the units differ, so the names do).
+fn truncate_bytes(text: &str, max_bytes: usize) -> String {
     if text.len() <= max_bytes {
         return text.to_owned();
     }
@@ -680,7 +715,7 @@ fn read_request(stream: &mut BufReader<TcpStream>) -> Result<HttpRequest, ApiErr
     stream
         .read_line(&mut request_line)
         .map_err(|_| ApiErrorBody::new("bad_request", "could not read request"))?;
-    if request_line.len() > 8192 || request_line.is_empty() {
+    if request_line.len() > MAX_REQUEST_LINE_BYTES || request_line.is_empty() {
         return Err(ApiErrorBody::new("bad_request", "malformed request line"));
     }
     let parts: Vec<&str> = request_line.trim_end().splitn(3, ' ').collect();
@@ -696,7 +731,7 @@ fn read_request(stream: &mut BufReader<TcpStream>) -> Result<HttpRequest, ApiErr
         Some((path, query)) => (path.to_owned(), parse_query(query)),
         None => (target.to_owned(), BTreeMap::new()),
     };
-    if path.len() > 4096 || !path.starts_with('/') {
+    if path.len() > MAX_PATH_BYTES || !path.starts_with('/') {
         return Err(ApiErrorBody::new("bad_request", "malformed request path"));
     }
     let mut headers = HashMap::new();
@@ -710,7 +745,7 @@ fn read_request(stream: &mut BufReader<TcpStream>) -> Result<HttpRequest, ApiErr
         if head_bytes > MAX_HEAD_BYTES {
             return Err(ApiErrorBody::new("bad_request", "headers too large"));
         }
-        if headers.len() > 100 {
+        if headers.len() > MAX_HEADER_COUNT {
             return Err(ApiErrorBody::new("bad_request", "too many headers"));
         }
         let trimmed = line.trim_end();
@@ -969,6 +1004,12 @@ fn build_scan_cli(request: ScanRequest) -> Result<ValidatedScan, ApiErrorBody> {
     TargetSpec::parse(&target)
         .map_err(|error| ApiErrorBody::new("invalid_target", format!("invalid target: {error}")))?;
 
+    // All-ports intent: `all` (case-insensitive) in the ports field and the
+    // explicit `all_ports` checkbox are the SAME core option. The frontend
+    // never generates a 65,535-element array; the API expresses intent
+    // structurally (`all_ports: true`) and the core planner expands it as
+    // one bounded task. UDP stays bounded (never full-range).
+    let mut all_ports = request.all_ports;
     let ports: Option<String> = match request.ports {
         None => None,
         Some(PortsSpec::Text(text)) => {
@@ -979,7 +1020,21 @@ fn build_scan_cli(request: ScanRequest) -> Result<ValidatedScan, ApiErrorBody> {
                     "ports specification too long",
                 ));
             }
-            if text.is_empty() { None } else { Some(text) }
+            if text.is_empty() {
+                None
+            } else if text.eq_ignore_ascii_case("all") {
+                // Textual `all` means all TCP ports 1-65535 (same as CLI
+                // `--all-ports` and the GUI checkbox). Do not expand here.
+                all_ports = true;
+                None
+            } else {
+                // Validate eagerly so malformed input fails with 422 instead
+                // of silently falling back to default ports.
+                if let Err(reason) = crate::ports::parse_port_selection(&text) {
+                    return Err(ApiErrorBody::new("invalid_target", reason));
+                }
+                Some(text)
+            }
         }
         Some(PortsSpec::List(list)) => {
             if list.len() > MAX_SCAN_PORTS {
@@ -1062,8 +1117,10 @@ fn build_scan_cli(request: ScanRequest) -> Result<ValidatedScan, ApiErrorBody> {
             ApiErrorBody::new("invalid_scope", format!("invalid exclude entry '{entry}'"))
         })?;
     }
-    let deadline = request.deadline_seconds.unwrap_or(60);
-    if deadline == 0 || deadline > 3600 {
+    let deadline = request
+        .deadline_seconds
+        .unwrap_or(DEFAULT_SCAN_DEADLINE_SECS);
+    if deadline == 0 || deadline > MAX_SCAN_DEADLINE_SECS {
         return Err(ApiErrorBody::new(
             "unprocessable",
             "deadline_seconds must be 1..=3600",
@@ -1090,7 +1147,7 @@ fn build_scan_cli(request: ScanRequest) -> Result<ValidatedScan, ApiErrorBody> {
         scope,
         exclude: request.exclude.clone(),
         ports,
-        all_ports: request.all_ports,
+        all_ports,
         ping: false,
         discover: false,
         udp: request.udp,
@@ -1156,8 +1213,10 @@ fn build_investigation_config(
             format!("depth must be 0..={INVEST_MAX_DEPTH}"),
         ));
     }
-    let deadline = request.deadline_seconds.unwrap_or(60);
-    if deadline == 0 || deadline > 600 {
+    let deadline = request
+        .deadline_seconds
+        .unwrap_or(DEFAULT_INVESTIGATION_DEADLINE_SECS);
+    if deadline == 0 || deadline > MAX_INVESTIGATION_DEADLINE_SECS {
         return Err(ApiErrorBody::new(
             "unprocessable",
             "deadline_seconds must be 1..=600",
@@ -1361,13 +1420,13 @@ fn spawn_scan_worker(state: Arc<ServerState>, id: String, validated: ValidatedSc
                             "service": detail.service,
                             "product": detail.product,
                             "version": detail.version,
-                            "banner": detail.banner.as_deref().map(|b| truncate_display(b, 512)),
+                            "banner": detail.banner.as_deref().map(|b| truncate_bytes(b, 512)),
                             "endpoint": detail.endpoint,
                             "http_title": detail.title,
                             "technologies": detail.technologies,
                             "tls_name": detail.tls_name,
                             "tls_issuer": detail.tls_issuer,
-                            "ssh_key": detail.ssh_key.as_deref().map(|k| truncate_display(k, 256)),
+                            "ssh_key": detail.ssh_key.as_deref().map(|k| truncate_bytes(k, 256)),
                         })
                     })
                     .collect();
@@ -1579,7 +1638,7 @@ fn spawn_investigation_worker(
                     None,
                     Some(ApiError {
                         code: "investigation_failed",
-                        message: truncate_display(&message, 512),
+                        message: truncate_bytes(&message, 512),
                     }),
                 );
             }
@@ -1677,6 +1736,9 @@ struct ValidatedUsernameSearch {
     username: String,
     deadline: Duration,
     project: String,
+    categories: std::collections::BTreeSet<String>,
+    providers: Option<std::collections::BTreeSet<String>>,
+    exclude_providers: std::collections::BTreeSet<String>,
 }
 
 fn build_username_search(
@@ -1703,18 +1765,82 @@ fn build_username_search(
             return Err(ApiErrorBody::new("invalid_entity", e.to_string()));
         }
     }
-    let deadline = request.deadline_seconds.unwrap_or(25);
-    if deadline == 0 || deadline > 120 {
+    let deadline = request
+        .deadline_seconds
+        .unwrap_or(DEFAULT_SEARCH_DEADLINE_SECS);
+    if deadline == 0 || deadline > MAX_SEARCH_DEADLINE_SECS {
         return Err(ApiErrorBody::new(
             "unprocessable",
             "deadline_seconds must be 1..=120",
         ));
     }
     let project = validate_project_name(request.project.as_deref().unwrap_or("default"))?;
+    // Shared planning validation (same as CLI): unknown categories/providers
+    // fail here with 422 before any job exists. Selection affects the REAL
+    // execution plan (never post-filters).
+    let mut categories: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for entry in request.categories {
+        for part in entry.split(',') {
+            let trimmed = part.trim().to_owned();
+            if !trimmed.is_empty() {
+                categories.insert(trimmed);
+            }
+        }
+    }
+    let mut providers_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for entry in request.providers {
+        for part in entry.split(',') {
+            let trimmed = part.trim().to_owned();
+            if !trimmed.is_empty() {
+                providers_set.insert(trimmed);
+            }
+        }
+    }
+    let providers = if providers_set.is_empty() {
+        None
+    } else {
+        Some(providers_set)
+    };
+    let mut exclude_providers: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
+    for entry in request.exclude_providers {
+        for part in entry.split(',') {
+            let trimmed = part.trim().to_owned();
+            if !trimmed.is_empty() {
+                exclude_providers.insert(trimmed);
+            }
+        }
+    }
+    // Validate against the real registry via the shared core planner.
+    match crate::search::embedded_username_pack() {
+        Ok(pack) => {
+            if let Err(message) = crate::search::plan_username_providers(
+                &pack,
+                providers.as_ref(),
+                &exclude_providers,
+                &categories,
+            ) {
+                // Distinguish unknown provider vs category for stable codes.
+                if message.contains("unknown provider") {
+                    return Err(ApiErrorBody::new("invalid_entity", message));
+                }
+                return Err(ApiErrorBody::new("unprocessable", message));
+            }
+        }
+        Err(error) => {
+            return Err(ApiErrorBody::new(
+                "internal",
+                format!("provider registry unavailable: {error}"),
+            ));
+        }
+    }
     Ok(ValidatedUsernameSearch {
         username: raw,
         deadline: Duration::from_secs(deadline),
         project,
+        categories,
+        providers,
+        exclude_providers,
     })
 }
 
@@ -1756,16 +1882,46 @@ fn spawn_username_search_worker(
             let mut store = state.jobs.lock().expect("job store poisoned");
             push_event(&mut store, &id, "progress", "querying providers".to_owned());
         }
+        // Bounded SSE progress with the real scheduled denominator: at most
+        // ~21 progress events per run (one per 5% step + completion), so a
+        // 2,500-vector search streams live counts without flooding the
+        // 200-event buffer. The denominator is scheduled vectors, never the
+        // registry total.
+        let progress_hook = {
+            let progress_state = state.clone();
+            let progress_id = id.clone();
+            let progress_step = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX));
+            move |completed: usize, total: usize| {
+                if total == 0 {
+                    return;
+                }
+                let step = (completed.saturating_mul(20) / total) as u64;
+                let last = progress_step.swap(step, Ordering::Release);
+                if step != last || completed >= total {
+                    if let Ok(mut store) = progress_state.jobs.lock() {
+                        push_event(
+                            &mut store,
+                            &progress_id,
+                            "progress",
+                            format!("{completed}/{total} complete"),
+                        );
+                    }
+                }
+            }
+        };
         let outcome: Result<crate::search::UsernameSearchReport, String> = if fixture {
             fixture_username_search(&validated.username, &cancel)
         } else {
-            crate::search::execute_username_search(
+            crate::search::execute_username_search_full(
                 &validated.username,
-                4,
-                1,
+                crate::search::DEFAULT_SEARCH_CONCURRENCY,
+                crate::search::MAX_SEARCH_PER_HOST,
                 validated.deadline,
-                None,
+                validated.providers.as_ref(),
+                &validated.exclude_providers,
+                &validated.categories,
                 &cancel,
+                Some(&progress_hook),
             )
             .map_err(|e| e.to_string())
         };
@@ -1800,49 +1956,149 @@ fn spawn_username_search_worker(
                         None
                     }
                 };
-                // Findings-first sample: status + confidence + honest URL.
-                // Candidate-vs-observed honesty preserved: `url_observed`
-                // is true only for confirmed/probable identity-specific URLs.
-                let sample: Vec<serde_json::Value> = report
-                    .results
-                    .iter()
+                // Findings-first sample with the SAME semantics as the CLI:
+                // category, url_kind, metadata, evidence, provenance all come
+                // from the core (never reinterpreted by the API layer).
+                // Semantic colors match the terminal: confirmed=green,
+                // possible/blocked/rate-limited=amber, error=red,
+                // negative/unavailable/unscanned=gray, urls/metadata=cyan.
+                //
+                // Bounded at any corpus size: confirmed/probable/possible
+                // sort first, then the first 100. `results_total` carries
+                // the honest total; the GUI pages from it and never renders
+                // thousands of cards at once.
+                fn sample_rank(status: &crate::search::SearchStatus) -> u8 {
+                    match status {
+                        crate::search::SearchStatus::Confirmed => 0,
+                        crate::search::SearchStatus::Probable => 1,
+                        crate::search::SearchStatus::Possible => 2,
+                        _ => 3,
+                    }
+                }
+                let mut ordered: Vec<&crate::search::SearchObservation> =
+                    report.results.iter().collect();
+                ordered.sort_by(|a, b| {
+                    sample_rank(&a.status)
+                        .cmp(&sample_rank(&b.status))
+                        .then(a.provider_id.cmp(&b.provider_id))
+                });
+                let results_total = ordered.len();
+                let sample: Vec<serde_json::Value> = ordered
+                    .into_iter()
                     .take(100)
                     .map(|r| {
                         let profile = r.attributes.get("profile_url").cloned().unwrap_or_default();
                         let final_url = r.attributes.get("final_url").cloned().unwrap_or_default();
+                        let category = r.attributes.get("category").cloned().unwrap_or_default();
+                        let category_label = r.attributes.get("category_label").cloned().unwrap_or_else(|| crate::search::category_label(&category).to_owned());
                         let observed = matches!(
                             r.status,
                             crate::search::SearchStatus::Confirmed
                                 | crate::search::SearchStatus::Probable
                         ) && (!final_url.is_empty() || !profile.is_empty());
+                        let kind_url = if !final_url.is_empty() { final_url.clone() } else { profile.clone() };
+                        let url_kind = crate::search::core_url_kind(&kind_url, &report.seed.display_value, observed && !kind_url.trim().is_empty());
+                        let url_label = match url_kind {
+                            "observed_profile" => "Profile",
+                            "observed_resource" => "Resource",
+                            "candidate" => "Candidate",
+                            "provider_endpoint" => "Provider Endpoint",
+                            _ => "",
+                        };
                         serde_json::json!({
                             "provider": r.provider_id,
                             "status": format!("{:?}", r.status).to_ascii_lowercase(),
                             "confidence": r.confidence,
-                            "evidence": r.evidence.iter().take(3).collect::<Vec<_>>(),
+                            "confidence_label": match r.confidence { 75..=100 => "high", 40..=74 => "medium", _ => "low" },
+                            "category": category,
+                            "category_label": category_label,
+                            "evidence": r.evidence.iter().take(8).collect::<Vec<_>>(),
                             "profile_url": profile,
                             "final_url": final_url,
+                            "url": kind_url,
+                            "url_kind": url_kind,
+                            "url_label": url_label,
                             "url_observed": observed,
+                            "metadata": r.attributes,
+                            "provenance": {
+                                "provider_id": r.provider_id,
+                                "provider_version": r.provider_version,
+                                "task_id": r.task_id,
+                                "input_entity_id": r.input_entity_id,
+                                "contact_class": r.contact_class,
+                                "module": format!("search.provider.{}", r.provider_id),
+                            },
+                            "observed_at": r.timestamp,
+                            "started_at": report.started_at,
                         })
                     })
                     .collect();
+                // Per-category coverage from the real plan + real results.
+                let by_category = {
+                    // For scheduled-but-uncompleted providers the pack lookup
+                    // fills gaps; here we derive from observations only (the
+                    // full plan coverage is in `coverage_by_category` when the
+                    // effective set is known — the sample stays honest).
+                    let mut counts: std::collections::BTreeMap<String, usize> =
+                        std::collections::BTreeMap::new();
+                    for item in &sample {
+                        if let Some(category) = item.get("category").and_then(|v| v.as_str()) {
+                            if !category.is_empty() {
+                                *counts.entry(category.to_owned()).or_default() += 1;
+                            }
+                        }
+                    }
+                    counts
+                        .into_iter()
+                        .map(|(category, complete)| {
+                            serde_json::json!({
+                                "category": category,
+                                "label": crate::search::category_label(&category),
+                                "complete": complete,
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                };
+                // Denominators shared with Core/CLI/JSONL: scheduled is the
+                // effective plan for this run; configured/enabled/usable
+                // describe the registry. All from real data.
+                let registry = crate::search::embedded_username_pack()
+                    .map(|pack| crate::search::username_registry_counts(&pack))
+                    .unwrap_or(crate::search::RegistryCounts {
+                        providers_configured: 0,
+                        vectors_registered: 0,
+                        enabled: 0,
+                        usable: 0,
+                        unavailable: 0,
+                        disabled: 0,
+                    });
                 let coverage = serde_json::json!({
                     "requested": report.accounting.providers_requested,
+                    "scheduled": report.accounting.scheduled(),
+                    "remaining": report.accounting.remaining(),
                     "completed": report.accounting.providers_completed,
                     "skipped": report.accounting.skipped,
                     "cancelled": report.accounting.cancelled,
                     "unscanned": report.accounting.unscanned,
                     "truncated": report.accounting.truncated,
+                    "configured": registry.vectors_registered,
+                    "enabled": registry.enabled,
+                    "usable": registry.usable,
+                    "by_category": by_category,
                 });
                 let result = serde_json::json!({
                     "run_id": report.run_id,
                     "seed": report.seed.display_value,
                     "seed_canonical": report.seed.canonical_value,
                     "provider_pack": report.provider_pack_version,
+                    "categories": validated.categories.iter().collect::<Vec<_>>(),
                     "coverage": coverage,
                     "results": sample.len(),
+                    "results_total": results_total,
+                    "results_truncated": results_total > sample.len(),
                     "results_sample": sample,
                     "network_scans": report.network_scans,
+                    "deadline_seconds": validated.deadline.as_secs(),
                     "persisted": persisted,
                 });
                 let status = if was_cancelled {
@@ -1863,7 +2119,7 @@ fn spawn_username_search_worker(
                     None,
                     Some(ApiError {
                         code: "search_failed",
-                        message: truncate_display(&message, 512),
+                        message: truncate_bytes(&message, 512),
                     }),
                 );
             }
@@ -2392,7 +2648,7 @@ fn handle_project_graph(
                 confidence: edge.confidence,
                 scan_run: edge.scan_run.clone(),
                 module: edge.module.clone(),
-                evidence: truncate_display(&edge.evidence, 512),
+                evidence: truncate_bytes(&edge.evidence, 512),
             });
             if visited.insert(neighbor.clone()) && nodes.len() + frontier.len() < limit {
                 frontier.push((neighbor, current_depth + 1));
@@ -2774,6 +3030,204 @@ fn handle_search_sync(state: &Arc<ServerState>, stream: &mut TcpStream, rid: u64
     );
 }
 
+/// Category discovery from the real registry (same as CLI `search categories`).
+fn handle_username_categories(stream: &mut TcpStream, rid: u64) {
+    let pack = match crate::search::embedded_username_pack() {
+        Ok(pack) => pack,
+        Err(error) => {
+            error_response(
+                stream,
+                rid,
+                &ApiErrorBody::new("internal", format!("registry unavailable: {error}")),
+            );
+            return;
+        }
+    };
+    let mut categories = crate::search::username_category_summary(&pack);
+    // Explicit vector counts per category (1:1 with providers today).
+    let categories = categories
+        .drain(..)
+        .map(|entry| {
+            serde_json::json!({
+                "category": entry.category,
+                "label": entry.label,
+                "configured": entry.configured,
+                "vectors": entry.configured,
+                "usable": entry.usable,
+                "unavailable": entry.unavailable,
+                "disabled": entry.disabled,
+            })
+        })
+        .collect::<Vec<_>>();
+    let registry = crate::search::username_registry_counts(&pack);
+    json_response(
+        stream,
+        rid,
+        200,
+        &serde_json::json!({
+            "pack_version": pack.pack_version,
+            "providers": registry.providers_configured,
+            "vectors": registry.vectors_registered,
+            "categories": categories,
+        }),
+    );
+}
+
+/// Provider discovery from the real registry (same as CLI `search providers`).
+fn handle_username_providers(stream: &mut TcpStream, rid: u64, query: &BTreeMap<String, String>) {
+    let pack = match crate::search::embedded_username_pack() {
+        Ok(pack) => pack,
+        Err(error) => {
+            error_response(
+                stream,
+                rid,
+                &ApiErrorBody::new("internal", format!("registry unavailable: {error}")),
+            );
+            return;
+        }
+    };
+    // Optional `?category=` filter (repeatable via comma). Unknown categories
+    // are rejected with the known set (same as CLI). `?state=` filters by
+    // discovery state (`usable`/`unavailable`/`disabled`); `?q=` matches a
+    // case-insensitive id/name substring. `?limit=`/`?offset=` paginate so
+    // the GUI never has to render thousands of rows at once — pass no limit
+    // for the full registry (backwards compatible).
+    let mut filter_categories: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
+    if let Some(raw) = query.get("category") {
+        for part in raw.split(',') {
+            let trimmed = part.trim().to_owned();
+            if !trimmed.is_empty() {
+                filter_categories.insert(trimmed);
+            }
+        }
+    }
+    let filter_state = query
+        .get("state")
+        .map(|raw| raw.trim().to_ascii_lowercase())
+        .filter(|state| !state.is_empty());
+    if let Some(state) = filter_state.as_deref() {
+        if !matches!(state, "usable" | "unavailable" | "disabled") {
+            error_response(
+                stream,
+                rid,
+                &ApiErrorBody::new(
+                    "unprocessable",
+                    "state must be one of usable, unavailable, disabled",
+                ),
+            );
+            return;
+        }
+    }
+    let filter_query = query
+        .get("q")
+        .map(|raw| raw.trim().to_ascii_lowercase())
+        .filter(|q| !q.is_empty());
+    // Bounded pagination: defaults to the full registry for backwards
+    // compatibility; the GUI always passes an explicit small limit.
+    let limit: usize = match query.get("limit") {
+        None => usize::MAX,
+        Some(raw) => match raw.trim().parse::<usize>() {
+            Ok(limit) if (1..=5000).contains(&limit) => limit,
+            _ => {
+                error_response(
+                    stream,
+                    rid,
+                    &ApiErrorBody::new("bad_request", "limit must be 1..=5000"),
+                );
+                return;
+            }
+        },
+    };
+    let offset: usize = match query.get("offset") {
+        None => 0,
+        Some(raw) => match raw.trim().parse::<usize>() {
+            Ok(offset) => offset,
+            _ => {
+                error_response(
+                    stream,
+                    rid,
+                    &ApiErrorBody::new("bad_request", "offset must be a non-negative integer"),
+                );
+                return;
+            }
+        },
+    };
+    if !filter_categories.is_empty() {
+        let known: std::collections::BTreeSet<&str> = crate::search::known_username_categories()
+            .into_iter()
+            .collect();
+        let unknown: Vec<String> = filter_categories
+            .iter()
+            .filter(|c| !known.contains(c.as_str()))
+            .cloned()
+            .collect();
+        if !unknown.is_empty() {
+            error_response(
+                stream,
+                rid,
+                &ApiErrorBody::new(
+                    "unprocessable",
+                    format!("unknown category: {}", unknown.join(", ")),
+                ),
+            );
+            return;
+        }
+    }
+    let filtered: Vec<&crate::search::UsernameProviderDefinition> = pack
+        .providers
+        .iter()
+        .filter(|definition| {
+            (filter_categories.is_empty() || filter_categories.contains(&definition.category))
+                && filter_state
+                    .as_deref()
+                    .is_none_or(|state| crate::search::provider_state(definition) == state)
+                && filter_query.as_deref().is_none_or(|q| {
+                    definition.metadata.id.to_ascii_lowercase().contains(q)
+                        || definition.platform.to_ascii_lowercase().contains(q)
+                })
+        })
+        .collect();
+    let total = filtered.len();
+    // Each provider registers exactly one vector today; report both so the
+    // GUI can show "N vectors" per provider without double-counting sites.
+    let providers: Vec<serde_json::Value> = filtered
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|definition| {
+            serde_json::json!({
+                "id": definition.metadata.id,
+                "name": definition.platform,
+                "category": definition.category,
+                "category_label": crate::search::category_label(&definition.category),
+                "state": crate::search::provider_state(definition),
+                "type": "profile",
+                "vectors": 1,
+                "health_state": definition.health_state.as_str(),
+                "verified_at": definition.verified_at,
+            })
+        })
+        .collect();
+    let registry = crate::search::username_registry_counts(&pack);
+    json_response(
+        stream,
+        rid,
+        200,
+        &serde_json::json!({
+            "pack_version": pack.pack_version,
+            "total_providers": pack.providers.len(),
+            "total": total,
+            "limit": if limit == usize::MAX { serde_json::Value::Null } else { serde_json::json!(limit) },
+            "offset": offset,
+            "active_providers": providers.len(),
+            "providers_count": registry.providers_configured,
+            "vectors_count": registry.vectors_registered,
+            "providers": providers,
+        }),
+    );
+}
+
 fn handle_username_search_create(
     state: &Arc<ServerState>,
     stream: &mut TcpStream,
@@ -3071,6 +3525,12 @@ fn route_request(state: &Arc<ServerState>, stream: &mut TcpStream, rid: u64, req
         }
         ("POST", ["", "api", "v1", "username-searches"]) => {
             handle_username_search_create(state, stream, rid, &request.body);
+        }
+        ("GET", ["", "api", "v1", "username-searches", "categories"]) => {
+            handle_username_categories(stream, rid);
+        }
+        ("GET", ["", "api", "v1", "username-searches", "providers"]) => {
+            handle_username_providers(stream, rid, &request.query);
         }
         ("GET", ["", "api", "v1", "username-searches", id]) => {
             handle_job_get(state, stream, rid, id, Some(JobKind::UsernameSearch));

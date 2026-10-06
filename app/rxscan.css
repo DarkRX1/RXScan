@@ -228,6 +228,34 @@ button:hover { filter: brightness(1.08); }
 .search-mode-passive { border-left: 3px solid var(--neutral); }
 .search-mode-username { border-left: 3px solid var(--rx-cyan); background: rgba(7, 88, 255, 0.08); }
 
+/* Sources: category registry checkboxes (same vocabulary as CLI). */
+.sources { margin-top: 0.75rem; border: 1px solid var(--line); border-radius: var(--radius); padding: 0.6rem 0.75rem; }
+.sources legend { font-weight: 700; padding: 0 0.4rem; }
+.sources-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.4rem; margin-top: 0.4rem; }
+.source-check { display: flex; gap: 0.5rem; align-items: center; border: 1px solid var(--line); border-radius: var(--radius); padding: 0.35rem 0.5rem; background: var(--panel-2); font-size: 0.85rem; }
+.source-check input { width: auto; }
+
+/* Bounded provider browser: Categories → Providers → Vectors. One 50-row
+   page renders at a time so thousands of registry entries never freeze the
+   browser; selection narrows the plan like CLI --provider. */
+.prov-filter { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 0.75rem; }
+.prov-row { display: flex; gap: 0.5rem; align-items: baseline; }
+.prov-row input { width: auto; flex: none; }
+.prov-row strong { overflow-wrap: anywhere; }
+#search-prov-list { max-height: 22rem; overflow: auto; }
+
+/* Search result semantics: same meaning as the terminal.
+   GREEN=confirmed, AMBER=possible/blocked/rate-limited,
+   RED=error, GRAY=negative/unavailable/unscanned, CYAN=urls/metadata. */
+tr.s-confirmed td:nth-child(3) { color: var(--ok); font-weight: 700; }
+tr.s-possible td:nth-child(3) { color: var(--warn); font-weight: 700; }
+tr.s-error td:nth-child(3) { color: var(--bad); font-weight: 700; }
+tr.s-muted td:nth-child(3) { color: var(--muted); }
+tr.s-confirmed td:first-child { border-left: 3px solid var(--ok); }
+tr.s-possible td:first-child { border-left: 3px solid var(--warn); }
+tr.s-error td:first-child { border-left: 3px solid var(--bad); }
+tr.s-muted td:first-child { border-left: 3px solid var(--neutral); }
+
 /* Lists / tables */
 .caps, .jobs, .entities, .events { list-style: none; margin: 0.4rem 0; padding: 0; }
 .caps li, .events li, .entities li { padding: 0.35rem 0.5rem; border: 1px solid var(--line); border-radius: var(--radius); margin-bottom: 0.35rem; overflow-wrap: anywhere; background: var(--panel-2); }
@@ -248,7 +276,6 @@ tr.status-failed td:first-child { border-left: 3px solid var(--bad); }
 tr.status-cancelled td:first-child { border-left: 3px solid var(--neutral); }
 tr.status-timed_out td:first-child, tr.status-partial td:first-child { border-left: 3px solid var(--warn); }
 tr.status-running { background: rgba(0, 239, 255, 0.03); }
-.conf-low { color: var(--muted); font-size: 0.85em; }
 .table-wrap { overflow-x: auto; margin-top: 0.5rem; }
 table.findings { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
 table.findings caption { text-align: left; color: var(--muted); padding: 0.4rem 0; font-size: 0.85rem; }
@@ -297,7 +324,6 @@ tr.status-running td:nth-child(3) { color: var(--rx-cyan-bright); font-weight: 7
 .gnode.dim { opacity: 0.45; }
 .glabel { fill: var(--rx-text); font-size: 11px; pointer-events: none; font-family: var(--sans); }
 .gedge { stroke: #1c3d5f; stroke-width: 1.5; cursor: pointer; }
-.gedge.highlight { stroke: var(--rx-cyan); stroke-width: 2.5; }
 .gedge.selected { stroke: var(--rx-cyan-bright); stroke-width: 2.5; }
 .gedge.contradictory { stroke: #b07cc4; stroke-dasharray: 5 4; }
 .inspector { background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius); padding: 0.6rem; min-width: 0; max-height: 360px; overflow: auto; }

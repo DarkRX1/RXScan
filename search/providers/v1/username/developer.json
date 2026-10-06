@@ -467,10 +467,8 @@
       ],
       "max_redirects": 2,
       "max_body_bytes": 196608,
-      "health_state": "live_verified",
-      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05. C3: title is the echo-safe identity signal. Absence is status-driven (404); no verified absence text. Fetch budget raised to 192KiB: profile pages measured near 146KiB.",
-      "verified_at": "2026-10-05",
-      "verification_method": "live-probe"
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05. C3: title is the echo-safe identity signal. Absence is status-driven (404); no verified absence text. Fetch budget raised to 192KiB: profile pages measured near 146KiB."
     },
     {
       "metadata": {
@@ -899,10 +897,8 @@
       ],
       "max_redirects": 2,
       "max_body_bytes": 131072,
-      "health_state": "live_verified",
-      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B). C3B: og:url-style URL identity verified on served page (note: some historic handles 404). No verified bonus marker; confirms at 88.",
-      "verified_at": "2026-10-05",
-      "verification_method": "live-probe"
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B). C3B: og:url-style URL identity verified on served page (note: some historic handles 404). No verified bonus marker; confirms at 88."
     },
     {
       "metadata": {
@@ -1055,10 +1051,8 @@
       ],
       "max_redirects": 2,
       "max_body_bytes": 131072,
-      "health_state": "live_verified",
-      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05. C3: profile URL identity verified on served page; absent 404s with title marker. No verified bonus marker; confirms at 88. Fetch timeout raised to 15000ms: 113KB profile pages observed near 4.5s.",
-      "verified_at": "2026-10-05",
-      "verification_method": "live-probe"
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05. C3: profile URL identity verified on served page; absent 404s with title marker. No verified bonus marker; confirms at 88. Fetch timeout raised to 15000ms: 113KB profile pages observed near 4.5s."
     },
     {
       "metadata": {

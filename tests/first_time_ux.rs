@@ -79,9 +79,29 @@ fn help_explains_workflows_first() {
     assert!(stdout.contains("rxscan example.test"));
     assert!(stdout.contains("rxscan search --username exampleuser"));
     assert!(stdout.contains("rxscan investigate --username exampleuser"));
-    for workflow in ["Scan", "Search", "Investigate", "Project", "Capabilities"] {
+    for workflow in [
+        "Scan",
+        "Search",
+        "Investigate",
+        "Project",
+        "Web",
+        "Capabilities",
+    ] {
         assert!(stdout.contains(workflow), "missing {workflow}: {stdout}");
     }
+    // The Web workflow is implemented (`rxscan web --help` succeeds) so it
+    // must stay discoverable from the top-level help.
+    assert!(
+        stdout.contains("rxscan web"),
+        "web workflow must stay discoverable: {stdout}"
+    );
+    // Short help carries the same promise via the footer line.
+    let (code, short, _) = run_cli(&["-h"]);
+    assert_eq!(code, 0);
+    assert!(
+        short.contains("rxscan web"),
+        "short help must also advertise web: {short}"
+    );
     // Workflows come before dozens of switches.
     let quick = stdout.find("QUICK START").unwrap();
     let advanced = stdout.find("--max-tasks").unwrap_or(stdout.len());

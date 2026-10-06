@@ -316,10 +316,8 @@
       ],
       "max_redirects": 2,
       "max_body_bytes": 131072,
-      "health_state": "live_verified",
-      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B). C3B: title + profile-link identity verified; absent 404s with title marker.",
-      "verified_at": "2026-10-05",
-      "verification_method": "live-probe"
+      "health_state": "needs_review",
+      "source_notes": "Provisional definition (needs_review): the profile URL is a well-known public pattern, but markers are best-effort and await live verification. Required markers are page-identity anchored so absent pages cannot confirm. Added 2026-10-05 (Gate B). C3B: title + profile-link identity verified; absent 404s with title marker."
     },
     {
       "metadata": {

@@ -13,8 +13,8 @@ permissions:
 jobs:
   rust:
     # Primary supported platform is Linux x86_64 (the only platform RXScan
-    # is built, tested, and benchmarked on for v0.1.0). No macOS/Windows
-    # support is claimed.
+    # is built, tested, and benchmarked on). No macOS/Windows support is
+    # claimed.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,6 +24,18 @@ jobs:
           components: rustfmt, clippy
       - run: cargo fmt --check
       - run: cargo check --locked
-      - run: cargo test --locked
+      - run: cargo check --all-targets --all-features --locked
       - run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      - run: cargo test --locked
       - run: cargo build --release --locked
+      - run: cargo run --locked -- search lint
+      - run: git diff --check
+      - run: cargo package --list --allow-dirty
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: node --check app/rxscan.js
