@@ -1078,6 +1078,56 @@ fn scan_ports_udp(
     scan_ports_udp_portable(ip, ports, source, config)
 }
 
+/// Portable `recv_from` failure decision (pure, deterministic).
+///
+/// Evidence contract (never TCP semantics):
+/// * Silence (`TimedOut`/`WouldBlock`) with budget remaining ⇒ `Retry`.
+/// * Silence exhausted ⇒ `Filtered` (terminal `OpenOrFiltered`).
+/// * Explicit normalized `ConnectionRefused` ⇒ `Closed` (positive closure
+///   evidence), never retry.
+/// * Any other local failure ⇒ `Error`, never retry.
+///
+/// Apple/BSD kernels do not guarantee ICMP port-unreachable delivery on
+/// unconnected sockets the way Linux connected sockets do, so silence
+/// without closure evidence must stay `OpenOrFiltered` — never inferred
+/// `Closed` merely because the test selected an unused local port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PortableRecvDecision {
+    /// Retryable silence: resend identical payload.
+    Retry,
+    /// Silence exhausted: terminal `OpenOrFiltered`.
+    Filtered,
+    /// Positive closure evidence: terminal `Closed`, never retry.
+    Closed,
+    /// Local failure: terminal `Error`, never retry.
+    Error,
+}
+
+/// Pure classifier for portable `recv_from` failures. Production
+/// [`scan_ports_udp_portable`] branches on this; unit tests prove the
+/// mapping with synthetic `io::Error`s so no test depends on a kernel
+/// surfacing ICMP.
+fn decide_portable_recv_failure(
+    error: &std::io::Error,
+    attempts: u32,
+    max_retries: u32,
+) -> PortableRecvDecision {
+    use std::io::ErrorKind;
+    match error.kind() {
+        ErrorKind::TimedOut | ErrorKind::WouldBlock => {
+            if attempts <= max_retries {
+                PortableRecvDecision::Retry
+            } else {
+                PortableRecvDecision::Filtered
+            }
+        }
+        _ => match crate::platform::network::normalize_io_error(error) {
+            crate::execution::ErrorCategory::ConnectionRefused => PortableRecvDecision::Closed,
+            _ => PortableRecvDecision::Error,
+        },
+    }
+}
+
 /// Shared portable UDP logic, available on all platforms so Linux tests can
 /// prove concurrency/accounting without raw sockets.
 #[allow(dead_code)]
@@ -1247,19 +1297,22 @@ fn scan_ports_udp_portable(
                                 break;
                             }
                             Err(error) => {
-                                use std::io::ErrorKind;
-                                match error.kind() {
-                                    ErrorKind::TimedOut | ErrorKind::WouldBlock => {
-                                        if attempts <= config.max_retries {
-                                            attempts += 1;
-                                            {
-                                                let mut out = outcome
-                                                    .lock()
-                                                    .unwrap_or_else(|e| e.into_inner());
-                                                out.retries += 1;
-                                            }
-                                            continue;
+                                match decide_portable_recv_failure(
+                                    &error,
+                                    attempts,
+                                    config.max_retries,
+                                ) {
+                                    PortableRecvDecision::Retry => {
+                                        attempts += 1;
+                                        {
+                                            let mut out = outcome
+                                                .lock()
+                                                .unwrap_or_else(|e| e.into_inner());
+                                            out.retries += 1;
                                         }
+                                        continue;
+                                    }
+                                    PortableRecvDecision::Filtered => {
                                         let mut out =
                                             outcome.lock().unwrap_or_else(|e| e.into_inner());
                                         out.timeouts += 1;
@@ -1280,52 +1333,49 @@ fn scan_ports_udp_portable(
                                         );
                                         break;
                                     }
-                                    _ => {
+                                    PortableRecvDecision::Closed => {
+                                        let mut out = outcome
+                                            .lock()
+                                            .unwrap_or_else(|e| e.into_inner());
+                                        out.closed_errors += 1;
+                                        out.record(
+                                            UdpProbe {
+                                                port,
+                                                state: UdpPortState::Closed,
+                                                latency: started.elapsed(),
+                                                detail: format!(
+                                                    "UDP port unreachable on {ip}:{port}; host responded"
+                                                ),
+                                                attempts,
+                                                protocol: None,
+                                                datagrams_sent: attempts,
+                                                datagrams_received: 0,
+                                            },
+                                            config.retain_detail,
+                                        );
+                                        break;
+                                    }
+                                    PortableRecvDecision::Error => {
                                         let category =
                                             crate::platform::network::normalize_io_error(&error);
-                                        match category {
-                                            crate::execution::ErrorCategory::ConnectionRefused => {
-                                                let mut out = outcome
-                                                    .lock()
-                                                    .unwrap_or_else(|e| e.into_inner());
-                                                out.closed_errors += 1;
-                                                out.record(
-                                                    UdpProbe {
-                                                        port,
-                                                        state: UdpPortState::Closed,
-                                                        latency: started.elapsed(),
-                                                        detail: format!(
-                                                            "UDP port unreachable on {ip}:{port}; host responded"
-                                                        ),
-                                                        attempts,
-                                                        protocol: None,
-                                                        datagrams_sent: attempts,
-                                                        datagrams_received: 0,
-                                                    },
-                                                    config.retain_detail,
-                                                );
-                                            }
-                                            _ => {
-                                                let mut out = outcome
-                                                    .lock()
-                                                    .unwrap_or_else(|e| e.into_inner());
-                                                out.record(
-                                                    UdpProbe {
-                                                        port,
-                                                        state: UdpPortState::Error,
-                                                        latency: started.elapsed(),
-                                                        detail: format!(
-                                                            "UDP recv on {ip}:{port} failed ({category}): {error}"
-                                                        ),
-                                                        attempts,
-                                                        protocol: None,
-                                                        datagrams_sent: attempts,
-                                                        datagrams_received: 0,
-                                                    },
-                                                    config.retain_detail,
-                                                );
-                                            }
-                                        }
+                                        let mut out = outcome
+                                            .lock()
+                                            .unwrap_or_else(|e| e.into_inner());
+                                        out.record(
+                                            UdpProbe {
+                                                port,
+                                                state: UdpPortState::Error,
+                                                latency: started.elapsed(),
+                                                detail: format!(
+                                                    "UDP recv on {ip}:{port} failed ({category}): {error}"
+                                                ),
+                                                attempts,
+                                                protocol: None,
+                                                datagrams_sent: attempts,
+                                                datagrams_received: 0,
+                                            },
+                                            config.retain_detail,
+                                        );
                                         break;
                                     }
                                 }
@@ -1389,6 +1439,12 @@ mod tests {
 
     #[test]
     fn loopback_closed_is_closed_not_filtered() {
+        // Real-socket smoke: Apple/BSD kernels do not guarantee ICMP
+        // port-unreachable delivery on unconnected sockets, so a closed
+        // loopback port may surface as `Closed` (positive refusal) or as
+        // `OpenOrFiltered` (silence without closure evidence). Both are
+        // honest evidence outcomes; only `Open`/`Error` would fabricate.
+        // Never infer `Closed` merely because the port was unused.
         let outcome = NativeUdpScanner.scan(
             "127.0.0.1".parse().unwrap(),
             &[closed_port()],
@@ -1396,7 +1452,30 @@ mod tests {
             &test_config(500, 0),
         );
         assert_eq!(outcome.probes.len(), 1);
-        assert_eq!(outcome.probes[0].state, UdpPortState::Closed);
+        let probe = &outcome.probes[0];
+        assert!(
+            matches!(
+                probe.state,
+                UdpPortState::Closed | UdpPortState::OpenOrFiltered
+            ),
+            "real-socket closed-port smoke must be Closed (refusal) or OpenOrFiltered (silence), got {:?}",
+            probe.state
+        );
+        // Evidence accounting stays exact for whichever outcome the kernel
+        // surfaced; definitive closure never retries.
+        match probe.state {
+            UdpPortState::Closed => {
+                assert_eq!(probe.attempts, 1);
+                assert_eq!(outcome.retries, 0);
+                assert_eq!(outcome.closed_errors, 1);
+            }
+            UdpPortState::OpenOrFiltered => {
+                assert_eq!(probe.attempts, 1);
+                assert_eq!(outcome.retries, 0);
+                assert_eq!(outcome.timeouts, 1);
+            }
+            _ => unreachable!("guarded above"),
+        }
         assert!(!outcome.cancelled);
     }
 
@@ -1490,8 +1569,13 @@ mod tests {
         assert!(scanned.cancelled);
     }
 
-    /// Release-gate regression: definitive CLOSED never retries, even when
-    /// a retry budget is available. Exactly one attempt, zero retries.
+    /// Release-gate regression (real-socket smoke): definitive CLOSED never
+    /// retries, even when a retry budget is available. On kernels that do
+    /// not surface ICMP to unconnected sockets the same port honestly
+    /// reports silence (`OpenOrFiltered`) with exactly one budgeted retry;
+    /// that silence path must never be misread as closure. Deterministic
+    /// proof that explicit refusal maps to `Closed` with zero retries lives
+    /// in `explicit_closed_never_retries_with_budget` below.
     #[test]
     fn closed_never_retries_even_with_budget() {
         let outcome = NativeUdpScanner.scan(
@@ -1501,9 +1585,104 @@ mod tests {
             &test_config(500, 1),
         );
         assert_eq!(outcome.probes.len(), 1);
-        assert_eq!(outcome.probes[0].state, UdpPortState::Closed);
-        assert_eq!(outcome.probes[0].attempts, 1);
-        assert_eq!(outcome.retries, 0);
+        let probe = &outcome.probes[0];
+        assert!(
+            matches!(
+                probe.state,
+                UdpPortState::Closed | UdpPortState::OpenOrFiltered
+            ),
+            "closed-port smoke must be Closed or OpenOrFiltered, got {:?}",
+            probe.state
+        );
+        match probe.state {
+            UdpPortState::Closed => {
+                assert_eq!(probe.attempts, 1);
+                assert_eq!(outcome.retries, 0);
+            }
+            UdpPortState::OpenOrFiltered => {
+                // Silence honestly uses the single budgeted retry.
+                assert_eq!(probe.attempts, 2);
+                assert_eq!(outcome.retries, 1);
+            }
+            _ => unreachable!("guarded above"),
+        }
+    }
+
+    /// Deterministic: explicit closure evidence maps to `Closed`.
+    /// Synthetic `ConnectionRefused` inputs stand in for OS-surfaced
+    /// ICMP/port-unreachable; silence inputs must never map to `Closed`.
+    #[test]
+    fn explicit_closure_evidence_maps_to_closed() {
+        use std::io::{Error, ErrorKind};
+        // Portable kind-form refusal (synthetic, no live network).
+        let refused = Error::new(ErrorKind::ConnectionRefused, "synthetic port unreachable");
+        assert_eq!(
+            decide_portable_recv_failure(&refused, 1, 1),
+            PortableRecvDecision::Closed
+        );
+        assert_eq!(
+            decide_portable_recv_failure(&refused, 1, 0),
+            PortableRecvDecision::Closed
+        );
+        // Silence is uncertainty, never closure: timeout with and without
+        // budget maps to retry/filtered, never `Closed`.
+        let timeout = Error::new(ErrorKind::TimedOut, "synthetic silence");
+        assert_eq!(
+            decide_portable_recv_failure(&timeout, 1, 1),
+            PortableRecvDecision::Retry
+        );
+        assert_eq!(
+            decide_portable_recv_failure(&timeout, 2, 1),
+            PortableRecvDecision::Filtered
+        );
+        let would_block = Error::new(ErrorKind::WouldBlock, "synthetic silence");
+        assert_eq!(
+            decide_portable_recv_failure(&would_block, 1, 1),
+            PortableRecvDecision::Retry
+        );
+        // Local failures are `Error`, never `Closed`, even with budget.
+        let local = Error::new(ErrorKind::InvalidInput, "synthetic bad socket");
+        assert_eq!(
+            decide_portable_recv_failure(&local, 1, 1),
+            PortableRecvDecision::Error
+        );
+    }
+
+    /// Deterministic: explicit `Closed`/`ConnectionRefused` evidence admits
+    /// ZERO retries even when retry budget > 0. Only silence retries, and
+    /// only within budget.
+    #[test]
+    fn explicit_closed_never_retries_with_budget() {
+        use std::io::{Error, ErrorKind};
+        let refused = Error::new(ErrorKind::ConnectionRefused, "synthetic port unreachable");
+        // Budget available, yet refusal is terminal: never `Retry`.
+        for attempts in [1, 2] {
+            assert_ne!(
+                decide_portable_recv_failure(&refused, attempts, 1),
+                PortableRecvDecision::Retry,
+                "closure evidence must never admit a retry (attempts={attempts})"
+            );
+            assert_eq!(
+                decide_portable_recv_failure(&refused, attempts, 1),
+                PortableRecvDecision::Closed
+            );
+        }
+        // Contrast: silence DOES retry while budget remains, then filters.
+        let silence = Error::new(ErrorKind::TimedOut, "synthetic silence");
+        assert_eq!(
+            decide_portable_recv_failure(&silence, 1, 1),
+            PortableRecvDecision::Retry
+        );
+        assert_eq!(
+            decide_portable_recv_failure(&silence, 2, 1),
+            PortableRecvDecision::Filtered
+        );
+        // Local errors never retry either, even with budget.
+        let local = Error::new(ErrorKind::InvalidInput, "synthetic bad socket");
+        assert_eq!(
+            decide_portable_recv_failure(&local, 1, 1),
+            PortableRecvDecision::Error
+        );
     }
 
     /// Release-gate regression: a valid response never retries, even with

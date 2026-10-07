@@ -521,21 +521,49 @@ mod tests {
 
     #[test]
     fn nonlocal_probe_never_sends() {
+        // 203.0.113.99 is TEST-NET-3 (reserved): never a real target.
+        let target = Ipv4Addr::new(203, 0, 113, 99);
         let outcome = probe_arp(
-            Ipv4Addr::new(203, 0, 113, 99),
+            target,
             Duration::from_millis(100),
             &CancellationToken::default(),
         );
         match outcome {
             ArpOutcome::Unavailable(reason) => {
-                assert!(
-                    reason.contains("directly connected")
-                        || reason.contains("interface")
-                        || reason.contains("CAP_NET_RAW")
-                );
+                // Invariant on every platform: the structured
+                // `Unavailable` state already proves no ARP observation
+                // was falsely claimed. Reason strings below only document
+                // platform truth; they never manufacture evidence.
+                #[cfg(target_os = "linux")]
+                {
+                    assert!(
+                        reason.contains("directly connected")
+                            || reason.contains("interface")
+                            || reason.contains("CAP_NET_RAW"),
+                        "Linux nonlocal probe must explain direct-interface/capability failure, got: {reason:?}"
+                    );
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    // Non-Linux builds have no AF_PACKET ARP implementation;
+                    // production truth is explicit platform-unavailable.
+                    // Never assert Linux network wording here.
+                    assert!(
+                        matches!(interface_for_target(target), Err(ArpError::Unavailable(_))),
+                        "non-Linux ARP must be structurally unavailable"
+                    );
+                    let lower = reason.to_ascii_lowercase();
+                    assert!(
+                        reason.contains("Linux-only") || lower.contains("unavailable"),
+                        "non-Linux nonlocal probe must report platform-unavailable, got: {reason:?}"
+                    );
+                }
             }
+            // Silence without an observation is also valid: no probe claimed.
             ArpOutcome::Timeout => {}
-            other => panic!("unexpected {other:?}"),
+            // Alive would falsely claim an ARP observation for a nonlocal
+            // target; Cancelled without cancellation would misreport.
+            other => panic!("nonlocal target must never yield an ARP observation, got {other:?}"),
         }
     }
 

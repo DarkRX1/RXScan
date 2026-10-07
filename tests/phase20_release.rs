@@ -862,6 +862,25 @@ fn concurrent_project_writes_conflict_instead_of_silently_losing() {
 
 // ---------- §120 failure injection: read-only dir, disk-full-ish writer ----------
 
+/// Windows-only cleanup helper: clear `FILE_ATTRIBUTE_READONLY` so the
+/// failure-injection directory can be removed.
+///
+/// Why clearing is required: the test marks `ro/` read-only to simulate a
+/// failed report write, then must restore writability before
+/// `remove_dir_all` (Windows refuses to delete read-only directories).
+/// On Windows `set_readonly(false)` clears `FILE_ATTRIBUTE_READONLY`;
+/// the Unix world-writable concern behind the Clippy lint does not apply
+/// here because Unix cleanup uses mode bits below and never calls this
+/// helper.
+#[cfg(windows)]
+#[allow(
+    clippy::permissions_set_readonly_false,
+    reason = "Windows-only cleanup clears FILE_ATTRIBUTE_READONLY; Unix path uses mode bits and never calls this helper"
+)]
+fn clear_readonly_flag(perms: &mut std::fs::Permissions) {
+    perms.set_readonly(false);
+}
+
 #[test]
 fn read_only_destination_fails_cleanly_without_panic() {
     let dir = test_dir("readonly");
@@ -909,9 +928,11 @@ fn read_only_destination_fails_cleanly_without_panic() {
         );
     }
     let mut perms = std::fs::metadata(&ro).unwrap().permissions();
-    // Restore writability. The POSIX permission-bit invariant (mode 0755)
-    // is Unix-specific: only Unix has mode bits. On Windows the same
-    // product behavior (read-only flag) is restored via set_readonly(false).
+    // Restore writability for cleanup (`remove_dir_all` below refuses to
+    // delete a read-only directory on Windows). The POSIX permission-bit
+    // invariant (mode 0755) is Unix-specific: only Unix has mode bits.
+    // On Windows the same product behavior (read-only flag) is restored
+    // via the Windows-only helper above, which never compiles on Unix.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -919,7 +940,7 @@ fn read_only_destination_fails_cleanly_without_panic() {
     }
     #[cfg(windows)]
     {
-        perms.set_readonly(false);
+        clear_readonly_flag(&mut perms);
     }
     #[cfg(not(any(unix, windows)))]
     {
