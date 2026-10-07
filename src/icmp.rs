@@ -113,6 +113,10 @@ fn last_errno() -> c_int {
     unsafe { *__errno_location() }
 }
 
+/// Pure ICMP checksum. Portable algorithm (no syscalls): Linux production
+/// uses it for echo construction and unit tests prove it everywhere.
+/// `any(linux, test)` avoids dead_code in non-test Windows/macOS builds.
+#[cfg(any(target_os = "linux", test))]
 fn icmp_checksum(bytes: &[u8]) -> u16 {
     let mut sum: u32 = 0;
     let mut chunks = bytes.chunks_exact(2);
@@ -128,6 +132,8 @@ fn icmp_checksum(bytes: &[u8]) -> u16 {
     !(sum as u16)
 }
 
+/// Pure IPv4 echo construction. Portable (no syscalls); tested everywhere.
+#[cfg(any(target_os = "linux", test))]
 fn build_icmp_v4_echo(identifier: u16, sequence: u16) -> Vec<u8> {
     // Type 8 (echo request), code 0, checksum, id, seq, 24-byte payload.
     let mut packet = vec![0u8; 8 + 24];
@@ -143,6 +149,10 @@ fn build_icmp_v4_echo(identifier: u16, sequence: u16) -> Vec<u8> {
     packet
 }
 
+/// Pure IPv6 echo construction. Portable (no syscalls); unit-tested
+/// everywhere (see `v6_echo_is_well_formed` below) though only the Linux
+/// prober sends it in production.
+#[cfg(any(target_os = "linux", test))]
 fn build_icmp_v6_echo(identifier: u16, sequence: u16) -> Vec<u8> {
     // Type 128 (echo request), code 0. Checksum left zero so a kernel that
     // auto-fills ping-socket checksums can do so; kernels requiring a full
@@ -471,6 +481,19 @@ mod tests {
         let packet = build_icmp_v4_echo(0, 0);
         assert_eq!(packet[0], 8);
         assert_eq!(icmp_checksum(&packet), 0);
+    }
+
+    #[test]
+    fn v6_echo_is_well_formed() {
+        // Type 128 (echo request), code 0, id/seq round-trip, fixed length.
+        // Portable construction test: proves the builder everywhere even
+        // though only the Linux prober transmits it.
+        let packet = build_icmp_v6_echo(0x1234, 0x0007);
+        assert_eq!(packet.len(), 8 + 24);
+        assert_eq!(packet[0], 128);
+        assert_eq!(packet[1], 0);
+        assert_eq!(&packet[4..6], &0x1234u16.to_be_bytes());
+        assert_eq!(&packet[6..8], &0x0007u16.to_be_bytes());
     }
 
     #[test]

@@ -61,7 +61,7 @@ pub fn config_dir() -> Option<PathBuf> {
         if let Some(home) = home_dir() {
             return Some(home.join("AppData").join("Roaming").join("rxscan"));
         }
-        return None;
+        None
     }
     #[cfg(target_os = "macos")]
     {
@@ -72,7 +72,7 @@ pub fn config_dir() -> Option<PathBuf> {
                     .join("rxscan"),
             );
         }
-        return None;
+        None
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
@@ -101,7 +101,7 @@ pub fn data_dir() -> Option<PathBuf> {
         if let Some(home) = home_dir() {
             return Some(home.join("AppData").join("Local").join("rxscan"));
         }
-        return None;
+        None
     }
     #[cfg(target_os = "macos")]
     {
@@ -112,7 +112,7 @@ pub fn data_dir() -> Option<PathBuf> {
                     .join("rxscan"),
             );
         }
-        return None;
+        None
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
@@ -137,14 +137,14 @@ pub fn cache_dir() -> Option<PathBuf> {
         if let Some(base) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
             return Some(base.join("rxscan").join("cache"));
         }
-        return data_dir().map(|d| d.join("cache"));
+        data_dir().map(|d| d.join("cache"))
     }
     #[cfg(target_os = "macos")]
     {
         if let Some(home) = home_dir() {
             return Some(home.join("Library").join("Caches").join("rxscan"));
         }
-        return None;
+        None
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {

@@ -34,6 +34,12 @@ pub fn lookup_arp_cache(target: Ipv4Addr) -> Option<NeighborEntry> {
     }
 }
 
+/// Bounded file-backed ARP-cache lookup. The pure parser below
+/// ([`parse_arp_table`]) is intentionally portable and unit-tested on every
+/// platform; only the live `/proc/net/arp` path is Linux-gated via the
+/// caller. `any(linux, test)` keeps portable test coverage on
+/// Windows/macOS without dead_code in non-test builds.
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn lookup_arp_cache_at(path: &str, target: Ipv4Addr) -> Option<NeighborEntry> {
     let bytes = std::fs::read(path).ok()?;
     if bytes.len() > MAX_ARP_BYTES {
@@ -43,6 +49,10 @@ pub(crate) fn lookup_arp_cache_at(path: &str, target: Ipv4Addr) -> Option<Neighb
     parse_arp_table(&text, target)
 }
 
+/// Pure `/proc/net/arp` table parser. Portable (no syscalls) and
+/// unit-tested everywhere; shares the `any(linux, test)` boundary with its
+/// file-backed caller so non-test Windows/macOS builds stay dead-code-free.
+#[cfg(any(target_os = "linux", test))]
 fn parse_arp_table(text: &str, target: Ipv4Addr) -> Option<NeighborEntry> {
     for line in text.lines().skip(1) {
         let mut parts = line.split_whitespace();
@@ -67,6 +77,7 @@ fn parse_arp_table(text: &str, target: Ipv4Addr) -> Option<NeighborEntry> {
     None
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn is_mac(value: &str) -> bool {
     let parts: Vec<&str> = value.split(':').collect();
     parts.len() == 6

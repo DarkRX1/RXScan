@@ -1,0 +1,20 @@
+# cross-rs container images, pinned immutably by digest (CI #24).
+#
+# cross 0.2.5's stable images are based on Ubuntu 16.04 (GLIBC 2.23), too
+# old for modern Rust (proc-macro2 build scripts fail). The main-branch
+# images use a newer Ubuntu base with sufficient GLIBC, so the musl lanes
+# pin main-branch images by SHA digest: upstream cannot silently rotate
+# underneath us; any image change is an explicit diff.
+#
+# Pinned 2026-10-07 (capture via `docker pull <image>:main`, digest from
+# pull output). To refresh: `docker pull ghcr.io/cross-rs/<target>:main`
+# and replace the sha256 below with the new `Digest:` value as one reviewed
+# change. Never track `:main`/`:latest` without a digest pin.
+#
+# Only aarch64-unknown-linux-musl uses cross (Ubuntu ships no aarch64 musl
+# cross gcc; the previous musl.cc tarball timed out). x86_64 musl stays on
+# native musl-tools (healthy, no container needed). Build evidence only:
+# `cross check` never executes the target binary (no runtime claim).
+
+[target.aarch64-unknown-linux-musl]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-musl@sha256:65230be661f3171c6dc1eef3239b6430de8b4bab2683d4c41b0de3d91a29646e"

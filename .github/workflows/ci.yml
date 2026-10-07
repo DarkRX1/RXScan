@@ -106,33 +106,28 @@ jobs:
           test -x /usr/bin/musl-gcc || (echo "musl-gcc missing" && exit 1)
           musl-gcc --version
           echo "CC_x86_64_unknown_linux_musl=musl-gcc" >> "$GITHUB_ENV"
-      # AArch64 musl: Ubuntu ships no aarch64 musl cross gcc, so provision
-      # a genuine AArch64 musl cross toolchain (musl-cross-make builds via
-      # musl.cc, gcc 11.2.1-based). No host-gcc symlink: the cross driver
-      # compiles and links for aarch64-musl. Build validation only
-      # (no runtime).
-      #
-      # Supply-chain pin (audit together): the archive is verified by
-      # SHA-256 BEFORE extraction and the job fails closed on mismatch.
-      # To update the toolchain, replace the URL and digest as one
-      # reviewed change; never curl-pipe or fall back to an unverified
-      # artifact.
-      - name: Install musl cross toolchain (aarch64)
+      # AArch64 musl: Ubuntu ships no aarch64 musl cross gcc and the
+      # previous direct musl.cc tarball timed out (availability, not
+      # integrity: SHA pin verified bytes but not reachability). Use the
+      # purpose-built cross-rs container (musl 1.1.24, gcc 9.2.0) via
+      # `cross` 0.2.5 (pinned below) with the target image pinned by digest
+      # in Cross.toml. No host-gcc symlink, no curl-pipe, no unverified
+      # mirror, no credentials, no hidden fallback: pre-pull by digest
+      # fails closed when unavailable. ring/cc-rs compile inside the
+      # container against the genuine musl cross toolchain. Build
+      # validation only (no runtime, no execution on the runner).
+      - name: Install cross 0.2.5 (aarch64-musl only, pinned)
         if: matrix.target == 'aarch64-unknown-linux-musl'
-        env:
-          MUSL_CROSS_URL: https://musl.cc/aarch64-linux-musl-cross.tgz
-          MUSL_CROSS_SHA256: c909817856d6ceda86aa510894fa3527eac7989f0ef6e87b5721c58737a06c38
         run: |
           set -euo pipefail
-          echo "$MUSL_CROSS_SHA256  /tmp/aarch64-linux-musl-cross.tgz" > /tmp/musl-cross.sha256
-          curl -sSfLo /tmp/aarch64-linux-musl-cross.tgz "$MUSL_CROSS_URL"
-          sha256sum -c /tmp/musl-cross.sha256
-          tar xzf /tmp/aarch64-linux-musl-cross.tgz -C /tmp
-          CROSS=/tmp/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc
-          test -x "$CROSS" || (echo "aarch64 musl cross gcc missing" && exit 1)
-          "$CROSS" --version
-          echo "CC_aarch64_unknown_linux_musl=$CROSS" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=$CROSS" >> "$GITHUB_ENV"
+          cargo install cross --version 0.2.5 --locked
+          cross --version
+          docker --version
+      - name: Pre-pull pinned cross image (aarch64-musl only)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: |
+          set -euo pipefail
+          docker pull ghcr.io/cross-rs/aarch64-unknown-linux-musl@sha256:65230be661f3171c6dc1eef3239b6430de8b4bab2683d4c41b0de3d91a29646e
       # Android AArch64: configure the runner's real NDK (never a fake
       # symlink). Paths derive from the runner's ANDROID_NDK_HOME /
       # ANDROID_NDK_ROOT environment, verified before use; a missing NDK
@@ -159,7 +154,15 @@ jobs:
       # for all targets; runtime evidence levels live in docs/PLATFORMS.md:
       # Linux x86_64 is locally runtime-tested, all other native/cross
       # targets are configured with hosted validation pending.
-      - run: cargo check --locked --target ${{ matrix.target }}
+      # aarch64-musl runs inside its pinned container (BUILD EVIDENCE ONLY:
+      # the target binary is never executed on the runner); all other
+      # cross targets use the native cargo check above.
+      - name: Cross check (aarch64-musl build evidence only)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: cross check --locked --target aarch64-unknown-linux-musl
+      - name: Cargo check (other cross targets)
+        if: matrix.target != 'aarch64-unknown-linux-musl'
+        run: cargo check --locked --target ${{ matrix.target }}
   frontend:
     runs-on: ubuntu-latest
     steps:

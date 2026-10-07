@@ -106,16 +106,15 @@ fn ci_cross_matrix_has_no_invalid_linux_hosted_targets() {
 
 #[test]
 fn ci_cross_toolchains_are_real_not_faked() {
-    // CI #23: musl/Android jobs must provision genuine toolchains and fail
-    // loudly without them. Host-gcc masquerading (symlinking /usr/bin/gcc
-    // to a cross name) or swallowing setup errors would fake validation.
+    // CI #23/#24: musl/Android jobs must provision genuine toolchains and
+    // fail loudly without them. Host-gcc masquerading (symlinking
+    // /usr/bin/gcc to a cross name) or swallowing setup errors would fake
+    // validation. CI #24: aarch64-musl no longer depends on the flaky
+    // direct musl.cc download; it uses pinned cross-rs containers.
     let yml = std::fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).unwrap();
     for marker in [
         "musl-tools",
         "CC_x86_64_unknown_linux_musl=musl-gcc",
-        "musl.cc/aarch64-linux-musl-cross.tgz",
-        "CC_aarch64_unknown_linux_musl=",
-        "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=",
         "ANDROID_NDK_HOME",
         "aarch64-linux-android24-clang",
         "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=",
@@ -125,6 +124,24 @@ fn ci_cross_toolchains_are_real_not_faked() {
             "real toolchain configuration missing: {marker}"
         );
     }
+    // aarch64-musl via pinned cross-rs (availability fix for musl.cc
+    // timeouts): the workflow must reference the pinned tool and digest,
+    // never the direct tarball.
+    for marker in [
+        "cross --version",
+        "cross check --locked --target aarch64-unknown-linux-musl",
+        "ghcr.io/cross-rs/aarch64-unknown-linux-musl@sha256:",
+        "docker --version",
+    ] {
+        assert!(
+            yml.contains(marker),
+            "pinned cross toolchain configuration missing: {marker}"
+        );
+    }
+    assert!(
+        !yml.contains("https://musl.cc/"),
+        "fragile direct musl.cc download URL must stay removed"
+    );
     assert!(
         !yml.contains("ln -s /usr/bin/gcc"),
         "host gcc must never masquerade as a cross compiler"
@@ -132,5 +149,53 @@ fn ci_cross_toolchains_are_real_not_faked() {
     assert!(
         !yml.contains("continue-on-error"),
         "cross validation must not be optional"
+    );
+    assert!(
+        !yml.contains("|| true"),
+        "required validation must not swallow failures"
+    );
+    // Cross.toml must pin the same container image immutably (no mutable
+    // :main/:latest without a digest).
+    let cross_toml = std::fs::read_to_string(repo_root().join("Cross.toml")).unwrap();
+    assert!(
+        cross_toml.contains("ghcr.io/cross-rs/aarch64-unknown-linux-musl@sha256:"),
+        "Cross.toml must pin the aarch64-musl image by digest"
+    );
+    assert!(
+        !cross_toml.contains(":main\"") && !cross_toml.contains(":latest\""),
+        "container image must not track a mutable tag without a digest"
+    );
+}
+
+#[test]
+fn ci_aarch64_musl_stays_pinned_and_build_only() {
+    // CI #24 regression guards: the cross mechanism must stay
+    // reproducible (pinned tool + immutable image), fail closed (no
+    // retries-as-availability, no fallback, no credentials), and honest
+    // about evidence (BUILD ONLY: check, never run/test the target binary
+    // on the host runner).
+    let yml = std::fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).unwrap();
+    assert!(
+        yml.contains("cargo install cross --version 0.2.5 --locked"),
+        "cross tool must stay pinned to 0.2.5 with --locked"
+    );
+    assert!(
+        yml.contains("aarch64-unknown-linux-musl"),
+        "aarch64-musl build validation must not be dropped"
+    );
+    // Build evidence only: cross check, never cross run/test for this lane.
+    assert!(
+        yml.contains("cross check"),
+        "aarch64-musl must use cross check (build evidence)"
+    );
+    assert!(
+        !yml.contains("cross test --target aarch64-unknown-linux-musl")
+            && !yml.contains("cross run --target aarch64-unknown-linux-musl"),
+        "aarch64-musl must not claim runtime from a build-only check"
+    );
+    // No weakened validation.
+    assert!(
+        yml.contains("-D warnings"),
+        "strict Clippy -D warnings must remain"
     );
 }

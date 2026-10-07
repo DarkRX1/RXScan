@@ -187,6 +187,9 @@ pub fn parse_na(bytes: &[u8], want: Ipv6Addr) -> Option<NaInfo> {
 /// Pure /proc/net/if_inet6 parser. Intentionally portable (no syscalls):
 /// unit tests prove the enumeration logic on every platform even though
 /// only the Linux implementation reads the live interface table.
+/// `any(linux, test)` keeps portable coverage while avoiding dead_code in
+/// non-test Windows/macOS builds.
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn link_local_interfaces(text: &str) -> Vec<(u32, String)> {
     let mut out = Vec::new();
     for line in text.lines() {

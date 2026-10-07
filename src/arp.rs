@@ -195,6 +195,10 @@ pub fn parse_arp_reply(frame: &[u8], want_ip: Ipv4Addr) -> Option<ArpReply> {
 /// Pure /proc/net/route parser. Intentionally portable (no syscalls):
 /// unit tests prove the longest-prefix-match logic on every platform even
 /// though only the Linux implementation reads the live route table.
+/// `any(linux, test)` keeps portable unit-test coverage on Windows/macOS
+/// while avoiding dead_code in non-test Windows/macOS builds where no
+/// production caller exists.
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn parse_proc_route(text: &str, target: Ipv4Addr) -> Option<(String, bool)> {
     let target_u32 = u32::from(target);
     let mut best: Option<(String, bool, u32)> = None;
@@ -279,9 +283,9 @@ pub fn interface_for_target(target: Ipv4Addr) -> Result<InterfaceInfo, ArpError>
     #[cfg(not(target_os = "linux"))]
     {
         let _ = target;
-        return Err(ArpError::Unavailable(
+        Err(ArpError::Unavailable(
             "ARP unavailable: Linux-only implementation in this build".to_owned(),
-        ));
+        ))
     }
     #[cfg(target_os = "linux")]
     {
