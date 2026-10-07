@@ -648,7 +648,7 @@ fn cancellation_is_observed_promptly() {
                 thread.unpark();
             }
             unsafe fn wake_by_ref(data: *const ()) {
-                unsafe { (&*(data as *const std::thread::Thread)).unpark() };
+                unsafe { (*(data as *const std::thread::Thread)).unpark() };
             }
             unsafe fn drop_waker(data: *const ()) {
                 drop(unsafe { Box::from_raw(data as *mut std::thread::Thread) });

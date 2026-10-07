@@ -17,7 +17,9 @@
 use std::net::IpAddr;
 #[cfg(target_os = "linux")]
 use std::os::raw::{c_int, c_void};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(target_os = "linux")]
+use std::time::Instant;
 
 use crate::discovery::{DiscoveryTechnique, ProbeOutcome, ProbeRecord};
 use crate::execution::CancellationToken;

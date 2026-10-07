@@ -1,13 +1,17 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
+#[cfg(target_os = "linux")]
+use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr};
 #[cfg(target_os = "linux")]
 use std::os::raw::{c_int, c_void};
 use std::sync::{Mutex, atomic::AtomicBool};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(target_os = "linux")]
+use std::time::Instant;
 
-use crate::tcp_scanner::{
-    NativeTcpScanner, PortProbe, PortScanner, PortState, ScanConfig, ScanOutcome,
-};
+use crate::tcp_scanner::{NativeTcpScanner, PortScanner, ScanConfig, ScanOutcome};
+#[cfg(target_os = "linux")]
+use crate::tcp_scanner::{PortProbe, PortState};
 
 #[cfg(target_os = "linux")]
 const AF_INET: c_int = 2;
@@ -374,6 +378,7 @@ fn set_timeout(fd: c_int, timeout: Duration) {
     }
 }
 
+#[cfg(target_os = "linux")]
 struct Outstanding {
     seq: u32,
     deadline: Instant,

@@ -659,7 +659,7 @@ pub fn connect_tls(
         .map_err(|error| TlsFailure::HandshakeFailed(error.to_string()))?;
 
     let name: ServerName<'static> = match server_name {
-        Some(host) if !host.parse::<IpAddr>().is_ok() => ServerName::try_from(host.to_owned())
+        Some(host) if host.parse::<IpAddr>().is_err() => ServerName::try_from(host.to_owned())
             .map_err(|_| TlsFailure::HandshakeFailed(format!("invalid SNI hostname '{host}'")))?,
         _ => match ip {
             IpAddr::V4(v4) => ServerName::IpAddress(rustls::pki_types::IpAddr::V4(v4.into())),

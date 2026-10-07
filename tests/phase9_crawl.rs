@@ -276,7 +276,7 @@ fn block_on(module: &CrawlModule, context: ModuleContext) -> Result<ModuleOutput
             thread.unpark();
         }
         unsafe fn wake_by_ref(data: *const ()) {
-            unsafe { (&*(data as *const std::thread::Thread)).unpark() };
+            unsafe { (*(data as *const std::thread::Thread)).unpark() };
         }
         unsafe fn drop_waker(data: *const ()) {
             drop(unsafe { Box::from_raw(data as *mut std::thread::Thread) });
@@ -923,9 +923,11 @@ fn recursive_out_of_scope_candidate_is_recorded_but_not_admitted_or_contacted() 
 #[test]
 fn link_budget_exhaustion_emits_typed_event() {
     let fixture = HttpFixture::spawn(|_| {
-        let links = (0..150)
-            .map(|index| format!(r#"<a href="/p{index}">x</a>"#))
-            .collect::<String>();
+        let mut links = String::new();
+        for index in 0..150 {
+            use std::fmt::Write as _;
+            write!(links, r#"<a href="/p{index}">x</a>"#).unwrap();
+        }
         response("text/html", &links)
     });
     let plan = plan_for("3");

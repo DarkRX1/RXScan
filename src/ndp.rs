@@ -1,7 +1,9 @@
 use std::net::Ipv6Addr;
 #[cfg(target_os = "linux")]
 use std::os::raw::{c_int, c_void};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(target_os = "linux")]
+use std::time::Instant;
 
 use crate::execution::CancellationToken;
 
@@ -121,7 +123,7 @@ pub fn solicited_node_multicast(target: Ipv6Addr) -> Ipv6Addr {
         0,
         0x0001,
         0xFF00 | u16::from(octets[13]),
-        u16::from(octets[14]) << 8 | u16::from(octets[15]),
+        (u16::from(octets[14]) << 8) | u16::from(octets[15]),
     )
 }
 
@@ -182,6 +184,9 @@ pub fn parse_na(bytes: &[u8], want: Ipv6Addr) -> Option<NaInfo> {
     })
 }
 
+/// Pure /proc/net/if_inet6 parser. Intentionally portable (no syscalls):
+/// unit tests prove the enumeration logic on every platform even though
+/// only the Linux implementation reads the live interface table.
 pub(crate) fn link_local_interfaces(text: &str) -> Vec<(u32, String)> {
     let mut out = Vec::new();
     for line in text.lines() {
@@ -209,6 +214,11 @@ pub(crate) fn link_local_interfaces(text: &str) -> Vec<(u32, String)> {
     out
 }
 
+/// Linux-only file reader for /proc lookups. Only the Linux NDP
+/// implementation calls it; other platforms use the portable fallback
+/// below, so it is cfg'd with that implementation. The pure parser
+/// [`link_local_interfaces`] stays portable (unit-tested everywhere).
+#[cfg(target_os = "linux")]
 fn read_bounded(path: &str, cap: usize) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;
     if bytes.len() > cap {

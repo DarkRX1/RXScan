@@ -16,7 +16,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # macOS is pinned to the explicit current ARM64 label (Apple
+        # Silicon; the mutable macos-latest currently points here, but the
+        # pin keeps hosted evidence reproducible). Intel macOS is build-
+        # validated via the Apple toolchain on this same runner (see below),
+        # never runtime-claimed.
+        os: [ubuntu-latest, windows-latest, macos-26]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -37,6 +42,22 @@ jobs:
       # only), so the full suite runs natively on each OS.
       - run: cargo test --locked
       - run: cargo build --locked
+      # Apple Intel build validation (macOS runner only, Apple toolchain).
+      # The macos-26 runner is Apple Silicon, so `cargo test` above is
+      # ARM64 runtime evidence; the x86_64 check below is BUILD evidence
+      # only via the native Xcode clang/SDK (cross-compiled C deps such as
+      # ring use the Apple toolchain, never Linux cc). No Intel runtime is
+      # claimed: build validation and runtime validation stay separate.
+      - name: Apple Intel target toolchain (macOS only)
+        if: matrix.os == 'macos-26'
+        run: rustup target add x86_64-apple-darwin
+      - name: Apple Intel build check (macOS only, no runtime claim)
+        if: matrix.os == 'macos-26'
+        run: cargo check --locked --target x86_64-apple-darwin
+      # Windows MSVC is validated by this same matrix's windows-latest lane
+      # above (host target x86_64-pc-windows-msvc with the MSVC toolchain):
+      # no Linux-hosted MSVC cross job exists, because Ubuntu gcc is not
+      # MSVC and ring rejects it. See the rust-cross job below.
       # Native runtime smoke (not just compilation): binary starts,
       # machine capabilities parse, loopback fixtures via unit tests above.
       - run: cargo run --locked -- --version
@@ -47,6 +68,15 @@ jobs:
   rust-cross:
     name: cross-build (${{ matrix.target }})
     runs-on: ubuntu-latest
+    # Linux-hosted cross validation ONLY for targets with a genuine
+    # Linux-hosted toolchain configured below. Windows MSVC and Apple
+    # targets are NOT cross-built from Linux (Ubuntu gcc is not MSVC, and
+    # Linux cc with -arch/deployment-target flags is not an Apple
+    # toolchain): MSVC is validated by the windows-latest native lane above
+    # and Apple targets by the macos-26 native lane above plus the
+    # release workflow's native macOS builds. Removing those invalid
+    # entries is not reduced coverage; the same targets are validated
+    # correctly elsewhere.
     strategy:
       fail-fast: false
       matrix:
@@ -54,9 +84,6 @@ jobs:
           - x86_64-unknown-linux-musl
           - aarch64-unknown-linux-gnu
           - aarch64-unknown-linux-musl
-          - x86_64-pc-windows-msvc
-          - x86_64-apple-darwin
-          - aarch64-apple-darwin
           - aarch64-linux-android
     steps:
       - uses: actions/checkout@v4
@@ -64,9 +91,70 @@ jobs:
         with:
           toolchain: 1.85.0
           targets: ${{ matrix.target }}
-      - name: Install cross linker (linux arm64)
+      - name: Install cross linker (linux arm64 gnu)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+      # x86_64 musl: real musl C toolchain via musl-tools. musl-gcc wraps
+      # host gcc with musl libc headers/specs (genuine musl compilation);
+      # it is NOT host gcc masquerading as a cross compiler. cc-rs/ring
+      # are pointed at it via CC_x86_64_unknown_linux_musl.
+      - name: Install musl C toolchain (x86_64)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          set -euo pipefail
+          sudo apt-get update && sudo apt-get install -y musl-tools
+          test -x /usr/bin/musl-gcc || (echo "musl-gcc missing" && exit 1)
+          musl-gcc --version
+          echo "CC_x86_64_unknown_linux_musl=musl-gcc" >> "$GITHUB_ENV"
+      # AArch64 musl: Ubuntu ships no aarch64 musl cross gcc, so provision
+      # a genuine AArch64 musl cross toolchain (musl-cross-make builds via
+      # musl.cc, gcc 11.2.1-based). No host-gcc symlink: the cross driver
+      # compiles and links for aarch64-musl. Build validation only
+      # (no runtime).
+      #
+      # Supply-chain pin (audit together): the archive is verified by
+      # SHA-256 BEFORE extraction and the job fails closed on mismatch.
+      # To update the toolchain, replace the URL and digest as one
+      # reviewed change; never curl-pipe or fall back to an unverified
+      # artifact.
+      - name: Install musl cross toolchain (aarch64)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        env:
+          MUSL_CROSS_URL: https://musl.cc/aarch64-linux-musl-cross.tgz
+          MUSL_CROSS_SHA256: c909817856d6ceda86aa510894fa3527eac7989f0ef6e87b5721c58737a06c38
+        run: |
+          set -euo pipefail
+          echo "$MUSL_CROSS_SHA256  /tmp/aarch64-linux-musl-cross.tgz" > /tmp/musl-cross.sha256
+          curl -sSfLo /tmp/aarch64-linux-musl-cross.tgz "$MUSL_CROSS_URL"
+          sha256sum -c /tmp/musl-cross.sha256
+          tar xzf /tmp/aarch64-linux-musl-cross.tgz -C /tmp
+          CROSS=/tmp/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc
+          test -x "$CROSS" || (echo "aarch64 musl cross gcc missing" && exit 1)
+          "$CROSS" --version
+          echo "CC_aarch64_unknown_linux_musl=$CROSS" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=$CROSS" >> "$GITHUB_ENV"
+      # Android AArch64: configure the runner's real NDK (never a fake
+      # symlink). Paths derive from the runner's ANDROID_NDK_HOME /
+      # ANDROID_NDK_ROOT environment, verified before use; a missing NDK
+      # fails loudly instead of compiling against the wrong toolchain.
+      # API 24 (Android 7.0) is the documented floor: it is the minimum
+      # Termux runtime, so the NDK clang driver carries the `24` suffix.
+      # Build evidence only; Termux runtime remains unverified.
+      - name: Configure Android NDK (aarch64)
+        if: matrix.target == 'aarch64-linux-android'
+        run: |
+          set -euo pipefail
+          NDK="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
+          test -n "$NDK" || (echo "ANDROID_NDK_HOME/ANDROID_NDK_ROOT is unset; NDK not installed" && exit 1)
+          test -d "$NDK" || (echo "NDK dir missing: $NDK" && exit 1)
+          BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          test -d "$BIN" || (echo "NDK llvm bin missing: $BIN" && exit 1)
+          CLANG="$BIN/aarch64-linux-android24-clang"
+          test -x "$CLANG" || (echo "NDK clang driver missing: $CLANG" && ls "$BIN" | head -n 30 && exit 1)
+          "$CLANG" --version
+          echo "CC_aarch64_linux_android=$CLANG" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$CLANG" >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=$BIN/llvm-ar" >> "$GITHUB_ENV"
       # Cross-build check only (no runtime). Hosted validation is pending
       # for all targets; runtime evidence levels live in docs/PLATFORMS.md:
       # Linux x86_64 is locally runtime-tested, all other native/cross

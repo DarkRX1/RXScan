@@ -1420,7 +1420,11 @@ fn length_bucket(len: usize) -> String {
 
 fn sha256_hex(input: &[u8]) -> String {
     let digest = Sha256::digest(input);
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
 }
 
 fn mime_family(content_type: &str) -> &str {

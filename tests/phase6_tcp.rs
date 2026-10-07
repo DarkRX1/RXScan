@@ -208,7 +208,7 @@ fn block_on_module(
             thread.unpark();
         }
         unsafe fn wake_by_ref(data: *const ()) {
-            unsafe { (&*(data as *const std::thread::Thread)).unpark() };
+            unsafe { (*(data as *const std::thread::Thread)).unpark() };
         }
         unsafe fn drop_waker(data: *const ()) {
             drop(unsafe { Box::from_raw(data as *mut std::thread::Thread) });
@@ -258,7 +258,7 @@ fn closed_default_port(except: u16) -> u16 {
     automatic_ports_for_level(3)
         .into_iter()
         .filter(|port| *port >= 1024 && *port != except)
-        .find(|port| !std::net::TcpStream::connect(("127.0.0.1", *port)).is_ok())
+        .find(|port| std::net::TcpStream::connect(("127.0.0.1", *port)).is_err())
         .expect("no closed high port in the default scan set")
 }
 

@@ -1795,10 +1795,11 @@ fn project_fingerprint(project: &ProjectState) -> Result<String, ProjectError> {
         serde_json::to_writer(&mut writer, &view)?;
     }
     let digest = hasher.finalize();
-    Ok(digest[..8]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
+    let mut out = String::with_capacity(16);
+    for byte in &digest[..8] {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    Ok(out)
 }
 
 fn hash_json<T: Serialize>(value: &T) -> Result<String, ProjectError> {
@@ -1814,10 +1815,11 @@ fn hash_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     let digest = hasher.finalize();
-    digest[..8]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    let mut out = String::with_capacity(16);
+    for byte in &digest[..8] {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
 }
 
 pub fn validate_collection_len(

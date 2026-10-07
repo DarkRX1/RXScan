@@ -34,6 +34,7 @@
 
 #[cfg(target_os = "linux")]
 use std::collections::BTreeMap;
+#[cfg(target_os = "linux")]
 use std::collections::VecDeque;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};

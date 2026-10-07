@@ -2498,7 +2498,7 @@ unsafe fn wake_waker(data: *const ()) {
     thread.unpark();
 }
 unsafe fn wake_by_ref_waker(data: *const ()) {
-    unsafe { (&*(data as *const thread::Thread)).unpark() };
+    unsafe { (*(data as *const thread::Thread)).unpark() };
 }
 unsafe fn drop_waker(data: *const ()) {
     drop(unsafe { Box::from_raw(data as *mut thread::Thread) });

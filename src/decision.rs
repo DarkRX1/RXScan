@@ -1634,13 +1634,11 @@ fn fuzz_plan_task_id(
     });
     let bytes = serde_json::to_vec(&identity).expect("fuzz identity serializes");
     let digest = Sha256::digest(&bytes);
-    TaskId(format!(
-        "task_{}",
-        digest
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    ))
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    TaskId(format!("task_{hex}"))
 }
 
 impl crate::execution::DecisionEngine for FuzzDecisionEngine {

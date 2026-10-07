@@ -401,7 +401,9 @@ fn broken_pipe_exits_cleanly_without_panic() {
         &dir,
     );
     assert_eq!(code, 0);
-    // Consumer closes early: head -c 64 then exits.
+    // Consumer closes early: read a 64-byte prefix in-process, then drop
+    // the read end so the producer observes EPIPE/broken pipe. Implemented
+    // in Rust (no external `head`) so the invariant holds on every OS.
     let mut producer = Command::new(rxscan_bin())
         .args(["report", "--format", "jsonl", checkpoint.to_str().unwrap()])
         .current_dir(&dir)
@@ -409,19 +411,19 @@ fn broken_pipe_exits_cleanly_without_panic() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let consumer = Command::new("head")
-        .arg("-c")
-        .arg("64")
-        .stdin(producer.stdout.take().unwrap())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let _ = consumer.wait_with_output().unwrap();
+    {
+        let mut early_close = producer.stdout.take().unwrap();
+        let mut prefix = [0u8; 64];
+        // Best effort: the report is larger than 64 bytes; a short read
+        // still proves early close once the handle drops.
+        let _ = std::io::Read::read(&mut early_close, &mut prefix);
+        // `early_close` drops here: read end closed, producer sees broken pipe.
+    }
     let status = producer.wait().unwrap();
     let code = status.code();
     assert!(
         code == Some(0),
-        "broken pipe must exit 0, got {code:?} (SIGPIPE kills would show None)"
+        "broken pipe must exit 0, got {code:?} (Unix SIGPIPE kills would show None)"
     );
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -501,7 +503,10 @@ fn errors_name_the_input_and_next_step() {
         stderr.contains("does-not-exist-xyz.txt"),
         "missing wordlist must name the file: {stderr:?}"
     );
-    // Unwritable output: clean error, no panic.
+    // Unwritable output: clean error, no panic. The /proc path is
+    // unwritable on Unix (procfs) and nonexistent on Windows/macOS; either
+    // way the product contract is identical (exit 1, named error, no
+    // panic, no partial output), so one fixture covers all platforms.
     let (code, _, stderr) = run_cli(
         &[
             "127.0.0.1",
@@ -904,9 +909,22 @@ fn read_only_destination_fails_cleanly_without_panic() {
         );
     }
     let mut perms = std::fs::metadata(&ro).unwrap().permissions();
-    // Restore via explicit mode bits (no version-specific clippy allow).
-    use std::os::unix::fs::PermissionsExt;
-    perms.set_mode(0o755);
+    // Restore writability. The POSIX permission-bit invariant (mode 0755)
+    // is Unix-specific: only Unix has mode bits. On Windows the same
+    // product behavior (read-only flag) is restored via set_readonly(false).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o755);
+    }
+    #[cfg(windows)]
+    {
+        perms.set_readonly(false);
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        perms.set_readonly(false);
+    }
     std::fs::set_permissions(&ro, perms).unwrap();
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -1067,11 +1085,27 @@ fn walk_rs_files(dir: &Path) -> Vec<PathBuf> {
 
 // ---------- §107 invalid UTF-8 CLI input ----------
 
+/// Platform-specific invalid-`OsString` fixture. Unix `OsString` is a byte
+/// vector, so `[0xff, 0xfe, b'x']` is invalid UTF-8. Windows `OsString` is
+/// WTF-16, so an unpaired surrogate (`0xD800`) is the invalid sequence.
+/// The product invariant (invalid CLI encoding → exit 2, no panic) holds on
+/// both; only the fixture construction differs. Never a plain UTF-8 string.
+#[cfg(not(windows))]
+fn invalid_cli_arg() -> std::ffi::OsString {
+    use std::os::unix::ffi::OsStringExt;
+    std::ffi::OsString::from_vec(vec![0xff, 0xfe, b'x'])
+}
+
+#[cfg(windows)]
+fn invalid_cli_arg() -> std::ffi::OsString {
+    use std::os::windows::ffi::OsStringExt;
+    std::ffi::OsString::from_wide(&[0xD800u16])
+}
+
 #[test]
 fn non_utf8_cli_arg_fails_cleanly() {
-    use std::os::unix::ffi::OsStringExt;
     let dir = test_dir("utf8");
-    let bad = std::ffi::OsString::from_vec(vec![0xff, 0xfe, b'x']);
+    let bad = invalid_cli_arg();
     let output = Command::new(rxscan_bin())
         .arg(bad)
         .current_dir(&dir)
@@ -1467,6 +1501,10 @@ fn spawn_slow_lab(delay_ms: u64, wordlist_lines: usize, dir: &Path) -> (SlowLab,
     (SlowLab { port, hits, stop }, wordlist)
 }
 
+/// Unix-only signal delivery (`kill -INT`). There is no `kill(1)` on
+/// Windows; the Windows path of the SIGINT test below terminates via
+/// `Child::kill()` instead (see in-test cfg).
+#[cfg(unix)]
 fn send_sigint(pid: u32) {
     let status = Command::new("kill")
         .arg("-INT")
@@ -1476,8 +1514,22 @@ fn send_sigint(pid: u32) {
     assert!(status.success(), "could not signal child process");
 }
 
+/// Interruption safety: a scan killed mid-run must die promptly without
+/// panicking and without corrupting prior outputs (atomic replacement
+/// never runs, checkpoint still loads).
+///
+/// Platform semantics are deliberately different and must not be conflated:
+/// - Unix exercises real SIGINT delivery (`kill -INT`, twice) and asserts
+///   death by signal, proving handler behavior.
+/// - Windows exercises forced child termination (`Child::kill()` /
+///   TerminateProcess) plus the same integrity assertions, proving
+///   crash-safety of the output protocol, NOT handler behavior.
+///   Windows Ctrl-C (console control-event) handler behavior remains
+///   UNPROVEN: no console control-event delivery harness exists in this
+///   suite, and none is added here. A future `GenerateConsoleCtrlEvent`
+///   test would prove it.
 #[test]
-fn sigint_terminates_scan_promptly_without_panic_or_corruption() {
+fn interruption_terminates_scan_promptly_without_panic_or_corruption() {
     // A backgrounded non-interactive shell sets SIGINT/SIGQUIT to SIG_IGN,
     // which exec preserves: children of such a tree cannot test delivery.
     // Detect and skip loudly instead of failing confusingly (P20 finding:
@@ -1553,7 +1605,7 @@ fn sigint_terminates_scan_promptly_without_panic_or_corruption() {
     // Still running (slow lab guarantees a long window)?
     assert!(
         child.try_wait().unwrap().is_none(),
-        "scan finished before SIGINT; slow lab too fast"
+        "scan finished before interruption; slow lab too fast"
     );
     // Wait for proof the scan reached slow work (fixture hits), not a
     // fixed sleep: killing before the slow stage risks racing natural
@@ -1577,7 +1629,7 @@ fn sigint_terminates_scan_promptly_without_panic_or_corruption() {
     // so the signal below cannot race it.
     assert!(
         child.try_wait().unwrap().is_none(),
-        "scan finished before SIGINT; slow lab too fast"
+        "scan finished before interruption; slow lab too fast"
     );
     let kill_at = Instant::now();
     let cmdline = std::fs::read_to_string(format!("/proc/{}/cmdline", child.id()))
@@ -1618,10 +1670,27 @@ fn sigint_terminates_scan_promptly_without_panic_or_corruption() {
         "phase20 sigint: child_state={child_state} wchan={}",
         child_sched.trim()
     );
-    send_sigint(child.id());
-    // Second SIGINT during shutdown must not hang either (§6).
-    std::thread::sleep(Duration::from_millis(500));
-    send_sigint(child.id());
+    // Interruption delivery is platform-specific. Unix uses SIGINT via
+    // kill(1) so handler behavior (prompt death by signal) is proven.
+    // Windows has no SIGINT-via-kill; Child::kill() (TerminateProcess,
+    // uncatchable) is the honest equivalent: it proves crash-safety
+    // (atomic outputs untouched, no panic, prompt death) rather than
+    // handler behavior, and is documented as such.
+    #[cfg(unix)]
+    {
+        send_sigint(child.id());
+        // Second SIGINT during shutdown must not hang either (§6).
+        std::thread::sleep(Duration::from_millis(500));
+        send_sigint(child.id());
+    }
+    #[cfg(windows)]
+    {
+        child.kill().expect("terminate scan");
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        child.kill().expect("terminate scan");
+    }
     // Measure death latency from AFTER the last signal: spawning the `kill`
     // helper itself costs wall time under suite-spawn churn, which must not
     // contaminate the product measurement (typical death is ~2ms).
@@ -1636,12 +1705,22 @@ fn sigint_terminates_scan_promptly_without_panic_or_corruption() {
     let waited = match done_rx.recv_timeout(Duration::from_secs(30)) {
         Ok(output) => output.unwrap(),
         Err(_) => {
-            let _ = Command::new("kill")
-                .arg("-KILL")
-                .arg(child_pid.to_string())
-                .status();
-            eprintln!("phase20 sigint: shutdown hung >30s, SIGKILLed pid={child_pid}");
-            panic!("SIGINT shutdown hung beyond 30s watchdog");
+            // Watchdog escalation is Unix-specific (SIGKILL via kill(1)).
+            // Elsewhere the child handle is already moved into the waiter
+            // thread, so fail loudly with diagnostics instead of hanging CI.
+            #[cfg(unix)]
+            {
+                let _ = Command::new("kill")
+                    .arg("-KILL")
+                    .arg(child_pid.to_string())
+                    .status();
+                eprintln!("phase20 sigint: shutdown hung >30s, SIGKILLed pid={child_pid}");
+            }
+            #[cfg(not(unix))]
+            {
+                eprintln!("phase20 sigint: shutdown hung >30s for pid={child_pid}");
+            }
+            panic!("interruption shutdown hung beyond 30s watchdog");
         }
     };
     let shutdown_ms = kill_at.elapsed().as_millis();
@@ -1654,22 +1733,34 @@ fn sigint_terminates_scan_promptly_without_panic_or_corruption() {
         !stderr.contains("panicked"),
         "interruption must not panic: {stderr:?}"
     );
-    // Order matters for forensics: a scan that ignored SIGINT completes
-    // naturally (exit code present); a merely late death still dies by
-    // signal. Status before latency classifies the next anomaly.
+    // Order matters for forensics: a scan that ignored the interruption
+    // completes naturally (exit code present); on Unix a merely late death
+    // still dies by signal. Status before latency classifies the next
+    // anomaly. Signal death (`code().is_none()`) is a Unix-specific
+    // assertion: Windows termination via Child::kill() yields an exit code,
+    // so Windows only asserts prompt termination (recv succeeded above)
+    // plus the shared latency/integrity assertions below.
+    #[cfg(unix)]
     assert!(
         waited.status.code().is_none(),
         "interrupted scan must die by signal, got {:?}; stderr: {:?}",
         waited.status.code(),
         stderr,
     );
+    #[cfg(windows)]
+    assert!(
+        waited.status.code().is_some(),
+        "terminated scan must report an exit code, got {:?}; stderr: {:?}",
+        waited.status.code(),
+        stderr,
+    );
     assert!(
         death_ms < 15_000,
-        "process survived {death_ms}ms after 2nd SIGINT; must die promptly"
+        "process survived {death_ms}ms after interruption; must die promptly"
     );
     assert!(
         shutdown_ms < 60_000,
-        "SIGINT shutdown took {shutdown_ms}ms; must be bounded"
+        "interruption shutdown took {shutdown_ms}ms; must be bounded"
     );
     // Prior valid files untouched: atomic replacement never ran.
     assert_eq!(std::fs::read(&checkpoint).unwrap(), prior_checkpoint);
@@ -1841,6 +1932,14 @@ fn offline_chain_opens_no_new_descriptors() {
 }
 
 fn open_fd_count() -> usize {
+    // Descriptor-leak proof via /proc/self/fd is Linux-specific: no
+    // equivalent userspace FD table exists on Windows/macOS CI. Elsewhere
+    // this returns 0 (both snapshots), so the equality assertion below
+    // passes vacuously without disabling the offline behavior checks above
+    // (network_requests == 0), which remain enforced on every platform.
+    // A native handle-count equivalent (e.g. GetProcessHandleCount) is
+    // deliberately not added: handle counts include unrelated runtime
+    // handles and would weaken the precise FD invariant.
     std::fs::read_dir("/proc/self/fd")
         .map(|e| e.count())
         .unwrap_or(0)
@@ -1955,7 +2054,12 @@ fn repeated_scans_show_no_tmp_accumulation_or_slowdown() {
 #[test]
 fn binary_works_from_tmp_cwd_and_relocated_copy_with_fresh_home() {
     let dir = test_dir("env");
-    // Relocated copy (no repo paths).
+    // Relocated copy (no repo paths). Windows execution requires the
+    // `.exe` suffix, so the copy keeps a platform-appropriate file name;
+    // the invariant (runs outside the repo tree) is identical.
+    #[cfg(windows)]
+    let relocated = dir.join("rxscan-copy.exe");
+    #[cfg(not(windows))]
     let relocated = dir.join("rxscan-copy");
     std::fs::copy(rxscan_bin(), &relocated).unwrap();
     // Fresh HOME + cwd outside the repo.

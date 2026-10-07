@@ -1,7 +1,9 @@
 use std::net::Ipv4Addr;
 #[cfg(target_os = "linux")]
 use std::os::raw::{c_int, c_void};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(target_os = "linux")]
+use std::time::Instant;
 
 use crate::execution::CancellationToken;
 
@@ -190,6 +192,9 @@ pub fn parse_arp_reply(frame: &[u8], want_ip: Ipv4Addr) -> Option<ArpReply> {
     })
 }
 
+/// Pure /proc/net/route parser. Intentionally portable (no syscalls):
+/// unit tests prove the longest-prefix-match logic on every platform even
+/// though only the Linux implementation reads the live route table.
 pub(crate) fn parse_proc_route(text: &str, target: Ipv4Addr) -> Option<(String, bool)> {
     let target_u32 = u32::from(target);
     let mut best: Option<(String, bool, u32)> = None;
@@ -223,6 +228,10 @@ pub(crate) fn parse_proc_route(text: &str, target: Ipv4Addr) -> Option<(String, 
     best.map(|(iface, on_link, _)| (iface, on_link))
 }
 
+/// Linux-only file reader for /proc + /sys lookups. Only the Linux
+/// implementation calls it; other platforms use the portable fallback in
+/// [`interface_for_target`], so it is cfg'd with that implementation.
+#[cfg(target_os = "linux")]
 fn read_bounded(path: &str, cap: usize) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;
     if bytes.len() > cap {
@@ -231,6 +240,7 @@ fn read_bounded(path: &str, cap: usize) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
+#[cfg(target_os = "linux")]
 fn interface_mac(name: &str) -> Option<[u8; 6]> {
     let text = read_bounded(&format!("/sys/class/net/{name}/address"), 64)?;
     let parts: Vec<&str> = text.trim().split(':').collect();
@@ -247,6 +257,7 @@ fn interface_mac(name: &str) -> Option<[u8; 6]> {
     Some(mac)
 }
 
+#[cfg(target_os = "linux")]
 fn interface_index(name: &str) -> Option<i32> {
     read_bounded(&format!("/sys/class/net/{name}/ifindex"), 32)?
         .trim()
@@ -254,6 +265,7 @@ fn interface_index(name: &str) -> Option<i32> {
         .ok()
 }
 
+#[cfg(target_os = "linux")]
 fn local_source_for(target: Ipv4Addr) -> Option<Ipv4Addr> {
     let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
     socket.connect((target, 9)).ok()?;
