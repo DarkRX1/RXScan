@@ -990,7 +990,9 @@ fn level_speed_and_task_identity_are_semantically_stable() {
             .iter()
             .map(|kind| kind.as_str())
             .collect::<Vec<_>>(),
-        vec!["A", "AAAA", "CNAME", "MX", "NS", "TXT", "PTR", "SRV"]
+        // SOA is additive authority metadata at deep levels: informational
+        // evidence only (see tests/dns_soa_intel.rs), never an identity edge.
+        vec!["A", "AAAA", "CNAME", "MX", "NS", "TXT", "PTR", "SRV", "SOA"]
     );
     assert_eq!(
         DnsPolicy::new(5, ScanGoal::Recon, SpeedSetting::Numeric(10)).record_types(),

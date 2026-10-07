@@ -66,6 +66,10 @@ fn domain_dns_covers_all_required_records() {
         ("NS", vec!["ns1.example.test."]),
         ("TXT", vec!["v=spf1 include:example.test ~all"]),
         ("SRV", vec!["api.example.test."]),
+        (
+            "SOA",
+            vec!["ns1.example.test. hostmaster.example.test. 2026100601"],
+        ),
     ] {
         let dns = FixtureDnsFetcher::default().with_records("example.test", rtype, &values);
         let mut config = InvestigationConfig::seeded(SeedKind::Domain, "example.test");

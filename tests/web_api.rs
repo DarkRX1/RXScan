@@ -527,6 +527,26 @@ fn investigation_end_to_end_through_real_core() {
         "correlation expected"
     );
     assert!(result["observations"].as_u64().unwrap_or(0) >= 1);
+    // Same core pivot objects as the CLI: evidence-backed next steps.
+    let pivots = result["pivots"].as_array().expect("pivots array");
+    for pivot in pivots {
+        for key in [
+            "target_kind",
+            "target_value",
+            "reason",
+            "source",
+            "state",
+            "action",
+        ] {
+            assert!(
+                pivot
+                    .get(key)
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.is_empty()),
+                "web pivot missing {key}: {pivot}"
+            );
+        }
+    }
     // Planner output is real: the seed entity id is canonical.
     let sample = result["entities_sample"].as_array().expect("sample");
     assert!(

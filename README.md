@@ -289,6 +289,7 @@ DNS observation supports bounded record collection including:
 - TXT
 - PTR
 - SRV
+- SOA (authority metadata at deeper levels; informational evidence only)
 
 TLS observation records handshake and certificate evidence. It is not an
 exhaustive TLS cipher-suite scanner.
@@ -501,6 +502,9 @@ README is an index; details live in `docs/`:
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — CLI/Web/Core map and flows
 - [`docs/EVIDENCE_MODEL.md`](docs/EVIDENCE_MODEL.md) — observation, confidence, candidate vs confirmed
+- [`docs/INVESTIGATION.md`](docs/INVESTIGATION.md) — transforms, pivots, persistence
+- [`docs/AI_BOUNDARY.md`](docs/AI_BOUNDARY.md) — optional-AI boundary (documented, not a dependency)
+- [`docs/MCP_BOUNDARY.md`](docs/MCP_BOUNDARY.md) — future tool-interface boundary (documented, not implemented)
 - [`docs/PROVIDER_CONTRACT.md`](docs/PROVIDER_CONTRACT.md) — verification states and evidence rules
 - [`docs/SEARCH_CORPUS.md`](docs/SEARCH_CORPUS.md) — dynamic counts and scale design
 - [`docs/TESTING.md`](docs/TESTING.md) — exact gates, local vs hosted CI

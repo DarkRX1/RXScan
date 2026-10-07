@@ -1295,6 +1295,20 @@
     for (const c of corrs.slice(0, 20)) {
       src.appendChild(el("li", (c.entity || "?") + " ← " + (c.sources || []).slice(0, 5).join(", ")));
     }
+    // Pivots are Rust-computed evidence leads; JavaScript only renders them.
+    const pivBox = $("inv-pivots");
+    if (pivBox) {
+      clear(pivBox);
+      const pivots = r.pivots || [];
+      if (!pivots.length) pivBox.appendChild(el("li", "No suggested pivots."));
+      for (const p of pivots.slice(0, 32)) {
+        pivBox.appendChild(el("li",
+          (p.target_kind || "?") + " " + (p.target_value || "?") +
+          " — " + (p.reason || "?") +
+          " [" + (p.source || "?") + "; " + (p.state || "?") + "]" +
+          " {" + (p.action || "investigate") + "}"));
+      }
+    }
     $("inv-raw").textContent = JSON.stringify({ job: job.id, status: job.status, result: r }, null, 2);
     // Graph + timeline come from the persisted project (same store as CLI).
     try {

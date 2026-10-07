@@ -1,7 +1,8 @@
 //! Phase 13 DNS / asset intelligence.
 //!
 //! Native bounded UDP DNS queries for A/AAAA/CNAME plus lightweight MX/NS/TXT
-//! and PTR observations at higher levels. This is asset intelligence only:
+//! and PTR observations at higher levels, with SOA authority metadata where
+//! useful. This is asset intelligence only:
 //! no brute-force subdomain enumeration, no zone transfers, and no active
 //! follow-up outside the Decision Engine.
 
@@ -53,6 +54,7 @@ pub enum DnsRecordType {
     Txt,
     Ptr,
     Srv,
+    Soa,
 }
 
 impl DnsRecordType {
@@ -60,6 +62,7 @@ impl DnsRecordType {
         match self {
             Self::A => 1,
             Self::Ns => 2,
+            Self::Soa => 6,
             Self::Cname => 5,
             Self::Ptr => 12,
             Self::Mx => 15,
@@ -79,7 +82,14 @@ impl DnsRecordType {
             Self::Txt => "TXT",
             Self::Ptr => "PTR",
             Self::Srv => "SRV",
+            Self::Soa => "SOA",
         }
+    }
+
+    /// SOA (and TXT) observations are authority/informational metadata: they
+    /// are retained as evidence but never create identity relationships.
+    pub fn is_informational(self) -> bool {
+        matches!(self, Self::Txt | Self::Soa)
     }
 }
 
@@ -143,6 +153,7 @@ impl DnsPolicy {
                 DnsRecordType::Txt,
                 DnsRecordType::Ptr,
                 DnsRecordType::Srv,
+                DnsRecordType::Soa,
             ],
         }
     }
@@ -606,7 +617,9 @@ fn execute_dns(
                 if retained >= MAX_DNS_RECORDS_PER_TASK {
                     break;
                 }
-                if record.record_type == DnsRecordType::Txt {
+                if record.record_type == DnsRecordType::Txt
+                    || record.record_type == DnsRecordType::Soa
+                {
                     txt_bytes = txt_bytes.saturating_add(record.value.len());
                     if txt_bytes > MAX_TXT_TOTAL_BYTES {
                         break;
@@ -668,7 +681,7 @@ fn retain_record(
     record: &DnsRecord,
     provenance: &Provenance,
 ) -> Result<(), ModuleError> {
-    if record.record_type == DnsRecordType::Txt {
+    if record.record_type.is_informational() {
         let event = Event::new(
             EventKind::DnsRecordObserved,
             Some(host_asset.clone()),
@@ -731,7 +744,9 @@ fn retain_record(
         DnsRecordType::Ns => RelationshipKind::NameServerFor,
         DnsRecordType::Ptr => RelationshipKind::ReverseResolvesTo,
         DnsRecordType::Srv => RelationshipKind::ServiceDiscoveredBySrv,
-        DnsRecordType::Txt => unreachable!("TXT is handled as informational evidence"),
+        DnsRecordType::Txt | DnsRecordType::Soa => {
+            unreachable!("informational records are handled as evidence only")
+        }
     };
     let mut event = Event::new(
         if record.record_type == DnsRecordType::Cname {
@@ -913,6 +928,7 @@ pub(crate) fn parse_record_type(token: &str) -> Option<DnsRecordType> {
         "TXT" => Some(DnsRecordType::Txt),
         "PTR" => Some(DnsRecordType::Ptr),
         "SRV" => Some(DnsRecordType::Srv),
+        "SOA" => Some(DnsRecordType::Soa),
         _ => None,
     }
 }
@@ -1024,6 +1040,8 @@ fn record_types_from_params(params: &BTreeMap<String, String>) -> Option<Vec<Dns
                 "NS" => Some(DnsRecordType::Ns),
                 "TXT" => Some(DnsRecordType::Txt),
                 "PTR" => Some(DnsRecordType::Ptr),
+                "SRV" => Some(DnsRecordType::Srv),
+                "SOA" => Some(DnsRecordType::Soa),
                 _ => None,
             })
             .take(8)
@@ -1267,6 +1285,26 @@ pub fn parse_dns_response(
                     value: target,
                     ttl,
                     preference: Some(port),
+                })
+            }
+            // SOA (type 6): authority metadata only (primary nameserver +
+            // responsible mailbox + serial). Never an identity relationship:
+            // retained as informational evidence like TXT.
+            6 => {
+                let mut name_offset = offset;
+                let mname = read_name(packet, &mut name_offset)?;
+                let rname = read_name(packet, &mut name_offset)?;
+                if mname.is_empty() || rname.is_empty() || name_offset + 20 > end {
+                    return Err("malformed soa".to_owned());
+                }
+                let serial = u32_at(packet, name_offset)?;
+                let value = format!("{mname} {rname} {serial}");
+                Some(DnsRecord {
+                    name,
+                    record_type: DnsRecordType::Soa,
+                    value: value.chars().take(MAX_TXT_RECORD_BYTES).collect(),
+                    ttl,
+                    preference: None,
                 })
             }
             _ => None,

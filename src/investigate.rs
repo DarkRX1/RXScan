@@ -1496,7 +1496,8 @@ impl Transform for UrlToRepository {
 pub struct DomainToDns;
 
 impl DomainToDns {
-    const RECORD_TYPES: &'static [&'static str] = &["A", "AAAA", "CNAME", "MX", "NS", "TXT", "SRV"];
+    const RECORD_TYPES: &'static [&'static str] =
+        &["A", "AAAA", "CNAME", "MX", "NS", "TXT", "SRV", "SOA"];
 }
 
 impl Transform for DomainToDns {
@@ -1516,7 +1517,7 @@ impl Transform for DomainToDns {
         BudgetClass::Dns
     }
     fn describe(&self) -> &'static str {
-        "Domain -> DNS records (A/AAAA/CNAME/MX/NS/TXT/SRV; no port scanning, no subdomain brute-forcing)"
+        "Domain -> DNS records (A/AAAA/CNAME/MX/NS/TXT/SRV/SOA; no port scanning, no subdomain brute-forcing)"
     }
     fn execute(
         &self,
@@ -1697,6 +1698,25 @@ impl Transform for DomainToDns {
                         }
                         if is_dmarc_record(&domain, &value) {
                             record_attrs.insert("dmarc".to_owned(), "true".to_owned());
+                        }
+                    }
+                    // SOA authority metadata (`mname rname serial`) stays
+                    // informational: parsed into attributes, never a
+                    // hostname entity or identity relationship.
+                    if *rtype == "SOA" {
+                        let mut parts = value.split_whitespace();
+                        if let (Some(mname), Some(rname), Some(serial)) =
+                            (parts.next(), parts.next(), parts.next())
+                        {
+                            record_attrs.insert(
+                                "soa_mname".to_owned(),
+                                mname.trim_end_matches('.').to_ascii_lowercase(),
+                            );
+                            record_attrs.insert(
+                                "soa_rname".to_owned(),
+                                rname.trim_end_matches('.').to_ascii_lowercase(),
+                            );
+                            record_attrs.insert("soa_serial".to_owned(), serial.to_owned());
                         }
                     }
                     if let Some(pref) = mx_pref {
@@ -4006,7 +4026,7 @@ impl<'a> InvestigationEngine<'a> {
             .min_by(|a, b| a.depth.cmp(&b.depth).then(a.id.cmp(&b.id)))
             .cloned()
             .unwrap_or_else(|| self.seed_entity(now));
-        InvestigationReport {
+        let mut report = InvestigationReport {
             schema_version: INVESTIGATION_SCHEMA_VERSION,
             run_id: self.run_id.clone(),
             seed_kind: self.config.seed_kind,
@@ -4031,7 +4051,12 @@ impl<'a> InvestigationEngine<'a> {
             network_scopes: self.config.scopes.clone(),
             started_at: self.started_at,
             completed_at,
-        }
+            pivots: Vec::new(),
+        };
+        // Evidence-backed next steps: pure derivation from the report's
+        // own entities/relationships (no I/O, deterministic).
+        report.pivots = suggest_pivots(&report);
+        report
     }
 
     fn mark_truncated(&mut self, reason: &str) {
@@ -4437,6 +4462,223 @@ pub struct BudgetSnapshot {
     pub max_network_pivots: usize,
 }
 
+/// Maximum suggested pivots retained per investigation report. Bounded
+/// and deterministic; the complete entity graph stays available in
+/// `entities`/`relationships` and in JSON/JSONL machine output.
+pub const MAX_INVESTIGATE_PIVOTS: usize = 32;
+
+/// One evidence-backed investigation suggestion: what can be looked at
+/// next, why the collected evidence supports looking, and which contact
+/// class that next step needs.
+///
+/// Passive pivots (`action == "investigate"`) stay within public/passive
+/// sources. `network_candidate` marks IP pivots that *could* become an
+/// authorized active scan target only with explicit `--network --scope`;
+/// discovery never authorizes contact, and RXScan never active-scans a
+/// discovered address on its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InvestigatePivot {
+    /// Seed flag for the next step: `domain`, `ip`, `asn`, `email`,
+    /// `repository`, `organization`, `username`, `url`.
+    pub target_kind: String,
+    pub target_value: String,
+    /// Why this pivot exists, grounded in one observed relationship
+    /// (e.g. `observed certificate SAN`).
+    pub reason: String,
+    /// Which intelligence produced it (e.g. `certificate transparency`,
+    /// `dns:MX`, `registration (RDAP)`).
+    pub source: String,
+    /// Evidence state (e.g. `observed historical/passive evidence`).
+    /// Never `confirmed` identity: a pivot is a lead, not a finding.
+    pub state: String,
+    /// `investigate` (passive) or `scan` (explicit authorization required).
+    pub action: String,
+    /// True only for IP pivots: candidate for a future authorized scan,
+    /// never an authorized target by itself.
+    #[serde(default)]
+    pub network_candidate: bool,
+    pub confidence: u8,
+    #[serde(default)]
+    pub evidence: Vec<String>,
+}
+
+/// Derive evidence-backed pivot suggestions from a finished report.
+/// Pure core helper (no I/O, deterministic): CLI and Web share it.
+///
+/// Rules:
+/// - only seedable entity kinds (domain/hostname, IP, ASN, email,
+///   repository, organization, username, URL-bearing endpoints);
+/// - the seed itself and already-expanded entities are never pivots
+///   (an observation with that entity as input means it was looked at);
+/// - every pivot cites at least one observed inbound relationship;
+/// - IP pivots are `action == "investigate"` with
+///   `network_candidate == true`: passive first, active only with
+///   explicit operator authorization.
+pub fn suggest_pivots(report: &InvestigationReport) -> Vec<InvestigatePivot> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    fn seed_flag(kind: EntityKind) -> Option<(&'static str, bool)> {
+        match kind {
+            EntityKind::Domain | EntityKind::Hostname => Some(("domain", false)),
+            EntityKind::IpAddress => Some(("ip", true)),
+            EntityKind::Asn => Some(("asn", false)),
+            EntityKind::EmailAddress => Some(("email", false)),
+            EntityKind::Repository => Some(("repository", false)),
+            EntityKind::Organization => Some(("organization", false)),
+            EntityKind::Username => Some(("username", false)),
+            EntityKind::WebEndpoint | EntityKind::NetworkEndpoint => Some(("url", false)),
+            _ => None,
+        }
+    }
+
+    fn reason_for(relation: EdgeRelation) -> &'static str {
+        match relation {
+            EdgeRelation::ResolvesTo => "domain resolves to IP",
+            EdgeRelation::MailExchanger => "observed mail exchanger",
+            EdgeRelation::NameServerFor => "observed nameserver",
+            EdgeRelation::AliasOf => "observed DNS alias",
+            EdgeRelation::ReverseResolvesTo => "observed reverse DNS pointer",
+            EdgeRelation::HasSan => "observed certificate SAN",
+            EdgeRelation::BelongsToAsn => "IP mapped to announced prefix",
+            EdgeRelation::AnnouncesPrefix => "ASN announces prefix",
+            EdgeRelation::ReferencesDomain => "referenced domain",
+            EdgeRelation::ReferencesUrl | EdgeRelation::References => {
+                "referenced by investigation evidence"
+            }
+            EdgeRelation::OwnsRepository => "owned repository",
+            EdgeRelation::ContributedTo => "observed contributor",
+            EdgeRelation::PublishedRelease => "published release",
+            EdgeRelation::UsesPackage => "used package",
+            EdgeRelation::ObservedIn | EdgeRelation::ExposedIn => "observed in exposure data",
+            EdgeRelation::HasAccount => "observed public account",
+            EdgeRelation::UsesUsername => "username reference",
+            EdgeRelation::LinksTo => "linked resource",
+            EdgeRelation::RedirectsTo => "redirect target",
+            _ => "referenced by investigation evidence",
+        }
+    }
+
+    fn source_for(provider: &Option<String>, transform_id: &str) -> String {
+        if let Some(provider) = provider {
+            if provider.starts_with("dns:") {
+                return provider.clone();
+            }
+            return match provider.as_str() {
+                "ct" => "certificate transparency".to_owned(),
+                "rdap" => "registration (RDAP)".to_owned(),
+                "archive" => "web archive".to_owned(),
+                "repo" => "public repository".to_owned(),
+                _ => format!("public search ({provider})"),
+            };
+        }
+        match transform_id {
+            id if id.contains("ct") => "certificate transparency".to_owned(),
+            id if id.contains("rdap") => "registration (RDAP)".to_owned(),
+            id if id.contains("archive") => "web archive".to_owned(),
+            id if id.contains("repo") => "public repository".to_owned(),
+            id if id.contains("dns") => "DNS".to_owned(),
+            id => format!("investigation ({id})"),
+        }
+    }
+
+    fn state_for(provider: &Option<String>, contact: ContactClass) -> &'static str {
+        match contact {
+            ContactClass::DnsQuery => "observed DNS evidence (passive query)",
+            ContactClass::DirectNetwork => "observed network evidence (authorized contact)",
+            _ => match provider.as_deref() {
+                Some("ct") | Some("archive") => "observed historical/passive evidence",
+                _ => "observed passive evidence",
+            },
+        }
+    }
+
+    let expanded: BTreeSet<&str> = report
+        .observations
+        .iter()
+        .map(|o| o.input_entity_id.as_str())
+        .collect();
+    let mut inbound: BTreeMap<&str, Vec<&InvestigationRelationship>> = BTreeMap::new();
+    for rel in &report.relationships {
+        inbound.entry(rel.to.as_str()).or_default().push(rel);
+    }
+
+    let mut pivots: Vec<InvestigatePivot> = Vec::new();
+    let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
+    // Deterministic entity order: BTreeMap iteration is id-sorted.
+    for entity in report.entities.values() {
+        let Some((flag, network_candidate)) = seed_flag(entity.kind) else {
+            continue;
+        };
+        if entity.id == report.seed.id || expanded.contains(entity.id.as_str()) {
+            continue;
+        }
+        // Same investigated name under a different entity kind (e.g. the
+        // seed `Domain example.test` plus CT-observed `Hostname
+        // example.test`) is not a new lead.
+        if entity.canonical_value == report.seed.canonical_value {
+            continue;
+        }
+        let Some(rels) = inbound.get(entity.id.as_str()) else {
+            continue;
+        };
+        // Strongest observed inbound edge first; ties broken
+        // deterministically so reloads recompute identical pivots.
+        let mut ordered: Vec<&InvestigationRelationship> = rels.clone();
+        ordered.sort_by(|a, b| {
+            b.confidence.cmp(&a.confidence).then(
+                a.relation
+                    .to_string()
+                    .cmp(&b.relation.to_string())
+                    .then(a.from.cmp(&b.from)),
+            )
+        });
+        let rel = ordered[0];
+        let value = if flag == "url" {
+            entity
+                .attributes
+                .get("url")
+                .cloned()
+                .unwrap_or_else(|| entity.canonical_value.clone())
+        } else {
+            entity.canonical_value.clone()
+        };
+        if value.trim().is_empty() || !seen.insert((flag.to_owned(), value.clone())) {
+            continue;
+        }
+        let evidence = rel
+            .evidence
+            .first()
+            .cloned()
+            .or_else(|| rel.provenance.evidence.first().cloned())
+            .map(|e| vec![e])
+            .unwrap_or_default();
+        pivots.push(InvestigatePivot {
+            target_kind: flag.to_owned(),
+            target_value: value,
+            reason: reason_for(rel.relation).to_owned(),
+            source: source_for(&rel.provenance.provider, &rel.provenance.transform_id),
+            state: state_for(&rel.provenance.provider, rel.provenance.contact_class).to_owned(),
+            action: if network_candidate {
+                "investigate (passive); scan requires explicit --network --scope".to_owned()
+            } else {
+                "investigate".to_owned()
+            },
+            network_candidate,
+            confidence: rel.confidence.min(90),
+            evidence,
+        });
+        if pivots.len() >= MAX_INVESTIGATE_PIVOTS {
+            break;
+        }
+    }
+    pivots.sort_by(|a, b| {
+        a.target_kind
+            .cmp(&b.target_kind)
+            .then(a.target_value.cmp(&b.target_value))
+    });
+    pivots
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvestigationReport {
     pub schema_version: u32,
@@ -4457,6 +4699,12 @@ pub struct InvestigationReport {
     pub network_scopes: Vec<String>,
     pub started_at: u64,
     pub completed_at: u64,
+    /// Evidence-backed next-step suggestions computed at report build
+    /// time by [`suggest_pivots`]. Additive machine field (`serde`
+    /// default keeps older reports loadable); derivable from entities,
+    /// so project reloads recompute identically.
+    #[serde(default)]
+    pub pivots: Vec<InvestigatePivot>,
 }
 
 impl InvestigationReport {
@@ -4483,6 +4731,12 @@ impl InvestigationReport {
             .filter(|(_, from)| from.len() > 1)
             .map(|(id, from)| (id, from.into_iter().collect()))
             .collect()
+    }
+
+    /// Evidence-backed pivot suggestions derived from this report.
+    /// Pure core helper: deterministic, no I/O, shared by CLI and Web.
+    pub fn suggested_pivots(&self) -> Vec<InvestigatePivot> {
+        suggest_pivots(self)
     }
 
     /// Convert to the shared scan graph for project persistence and diff.
@@ -5197,6 +5451,42 @@ fn render_human_inner(
             out.push_str(&format!(
                 "  {} (secrets retained: no)\n",
                 safe_label(&human_entity_display(entity), 88)
+            ));
+        }
+    }
+    // Suggested pivots: evidence-backed next steps -------------------------
+    // Additive, bounded (10 default / all with --all). Passive unless the
+    // action line says otherwise; IP candidates never imply authorization.
+    if !report.pivots.is_empty() {
+        out.push('\n');
+        out.push_str(&section_heading(caps, "Pivots"));
+        let limit = if show_all {
+            report.pivots.len()
+        } else {
+            10.min(report.pivots.len())
+        };
+        for pivot in report.pivots.iter().take(limit) {
+            out.push_str(&format!(
+                "  {} {}\n",
+                paint(color, Style::Identifier, &pivot.target_kind),
+                paint(color, Style::Value, &safe_label(&pivot.target_value, 60)),
+            ));
+            out.push_str(&format!(
+                "  {} reason  {}\n",
+                if ascii { "`-" } else { "└─" },
+                safe_label(&pivot.reason, 88),
+            ));
+            out.push_str(&format!(
+                "     source  {} · {}\n",
+                safe_label(&pivot.source, 40),
+                safe_label(&pivot.state, 44),
+            ));
+            out.push_str(&format!("     action  {}\n", safe_label(&pivot.action, 88),));
+        }
+        if report.pivots.len() > limit {
+            out.push_str(&format!(
+                "  {} more in JSON output\n",
+                format_count(report.pivots.len() - limit)
             ));
         }
     }
@@ -6014,7 +6304,7 @@ impl DnsFetcher for ProductionDnsFetcher {
             // Uses the shared dns.rs client + system resolver; failures
             // are honest observations (timeout, truncated, no resolver),
             // never negative evidence.
-            "CNAME" | "MX" | "NS" | "TXT" | "SRV" | "PTR" => {
+            "CNAME" | "MX" | "NS" | "TXT" | "SRV" | "PTR" | "SOA" => {
                 let Some(rtype) = crate::dns::parse_record_type(record_type) else {
                     return Err(format!("unsupported record type {record_type}"));
                 };
@@ -6304,7 +6594,8 @@ pub fn capability_entries() -> Vec<(String, bool, String)> {
         (
             "investigation_dns_transforms".to_owned(),
             registry.get("domain_to_dns").is_some(),
-            "bounded A/AAAA/CNAME/MX/NS/TXT/SRV observations".to_owned(),
+            "bounded A/AAAA/CNAME/MX/NS/TXT/SRV/SOA observations (SOA/TXT informational only)"
+                .to_owned(),
         ),
         (
             "investigation_project_persistence".to_owned(),

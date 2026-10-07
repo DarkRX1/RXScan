@@ -117,12 +117,40 @@ depth. `explain_entity` walks the chain back to the seed, e.g.:
 ## Structured output
 
 - `--json`: full report (run metadata, seed, entities, relationships,
-  observations, accounting, budgets, truncation, `network_scans: 0`).
+  observations, accounting, budgets, truncation, `network_scans: 0`,
+  `pivots`).
 - `--jsonl`: typed records (`investigation_start`, `entity`,
   `relationship`, `observation`, `investigation_summary`), one valid JSON
   object per line, deterministic order, no ANSI, graceful broken pipe.
-- Human output is bounded (top accounts/links, correlations,
+- Human output is bounded (top accounts/links, correlations, pivots,
   truncation); use `--all` or JSON/JSONL for complete data.
+
+## Suggested pivots
+
+`report.pivots` (core `suggest_pivots`, shared by CLI, `--json`, and the
+Web `/api/v1/investigations` job result) answers "what can I investigate
+next, and why?" Every pivot cites one observed relationship:
+
+```text
+api.example.test
+  reason: observed certificate SAN
+  source: certificate transparency
+  state: observed historical/passive evidence
+  action: investigate
+```
+
+Rules:
+
+- seed and already-expanded entities are never suggested;
+- same investigated name under another entity kind is not a new lead;
+- IP pivots are `network_candidate: true` with
+  `action: investigate (passive); scan requires explicit --network --scope`
+  — discovery never authorizes contact, and no pivot is ever an
+  authorized scan by itself;
+- bounded (`MAX_INVESTIGATE_PIVOTS = 32`, 10 shown by default), sorted by
+  `(target_kind, target_value)`, deterministic across reloads;
+- a pivot is a lead, never a finding: pivot confidence caps at 90 and the
+  state is always observed evidence, never confirmed identity.
 
 ## Project persistence
 

@@ -1618,6 +1618,7 @@ fn spawn_investigation_worker(
                     "observations": observations,
                     "entities_sample": sample,
                     "correlations": correlations,
+                    "pivots": report.pivots,
                     "network_scans": report.network_scans,
                     "persisted": persisted,
                 });
