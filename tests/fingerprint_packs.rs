@@ -266,7 +266,9 @@ fn db_rejects_oversized_and_duplicate_packs() {
     }
     big.push_str("]}");
     assert!(parse_pack(&big, "big").is_err());
-    // Duplicate rule ids across packs keep the first pack's rule.
+    // Duplicate rule ids across packs are a strict production validation
+    // failure (never silent first-wins). The error identifies the ID and
+    // both sources deterministically regardless of input order.
     let first = parse_pack(
         r#"{"schema_version": 1, "fingerprints": [
             {"id": "dup", "protocol": "http", "probe": "http",
@@ -283,14 +285,58 @@ fn db_rejects_oversized_and_duplicate_packs() {
         "b",
     )
     .unwrap();
-    let db = FingerprintDb::from_packs(vec![
+    let err = FingerprintDb::try_from_packs(vec![
+        ("b.json".to_owned(), second.clone()),
+        ("a.json".to_owned(), first.clone()),
+    ])
+    .expect_err("strict packs must reject duplicates");
+    let text = err.to_string();
+    assert!(text.contains("dup"), "ID identified: {text}");
+    assert!(
+        text.contains("a.json") && text.contains("b.json"),
+        "sources: {text}"
+    );
+    let reverse = FingerprintDb::try_from_packs(vec![
+        ("a.json".to_owned(), first.clone()),
+        ("b.json".to_owned(), second.clone()),
+    ])
+    .expect_err("ordering must not matter");
+    assert_eq!(text, reverse.to_string());
+    // Production filesystem loader also rejects (not merely the helper).
+    let dir = std::env::temp_dir().join(format!("rxscan-fp-strict-{}-packs", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("a.json"),
+        r#"{"schema_version": 1, "fingerprints": [
+            {"id": "dup", "protocol": "http", "probe": "http",
+             "matcher": {"kind": "contains", "pattern": "x"},
+             "product": "First", "confidence": 80, "source": "a"}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("b.json"),
+        r#"{"schema_version": 1, "fingerprints": [
+            {"id": "dup", "protocol": "http", "probe": "http",
+             "matcher": {"kind": "contains", "pattern": "x"},
+             "product": "Second", "confidence": 80, "source": "b"}]}"#,
+    )
+    .unwrap();
+    let db = FingerprintDb::load_from_dir(&dir);
+    assert_eq!(
+        db.rule_count(),
+        0,
+        "no silent shadowing in production loader"
+    );
+    assert!(db.stats().files_rejected >= 1);
+    assert!(db.stats().rejected_files.join("\n").contains("dup"));
+    let _ = std::fs::remove_dir_all(&dir);
+    // Permissive `from_packs` remains for backwards compatibility/tests only.
+    let compat = FingerprintDb::from_packs(vec![
         ("a.json".to_owned(), first),
         ("b.json".to_owned(), second),
     ]);
-    assert_eq!(db.rule_count(), 1);
-    let hits = db.candidates_for("http", "x");
-    assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].product, "First");
+    assert_eq!(compat.rule_count(), 1);
 }
 
 #[test]

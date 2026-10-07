@@ -15,22 +15,31 @@
 //! never host state.
 
 use std::net::IpAddr;
+#[cfg(target_os = "linux")]
 use std::os::raw::{c_int, c_void};
 use std::time::{Duration, Instant};
 
 use crate::discovery::{DiscoveryTechnique, ProbeOutcome, ProbeRecord};
 use crate::execution::CancellationToken;
 
-// Linux constants (portable enough for Athena/Arch; other platforms return
+// Linux constants (Linux-only linkage; other platforms return
 // `Unavailable` cleanly instead of crashing).
+#[cfg(target_os = "linux")]
 const AF_INET: c_int = 2;
+#[cfg(target_os = "linux")]
 const AF_INET6: c_int = 10;
+#[cfg(target_os = "linux")]
 const SOCK_DGRAM: c_int = 2;
+#[cfg(target_os = "linux")]
 const IPPROTO_ICMP: c_int = 1;
+#[cfg(target_os = "linux")]
 const IPPROTO_ICMPV6: c_int = 58;
+#[cfg(target_os = "linux")]
 const SOL_SOCKET: c_int = 1;
+#[cfg(target_os = "linux")]
 const SO_RCVTIMEO: c_int = 20;
 
+#[cfg(target_os = "linux")]
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct Timeval {
@@ -39,6 +48,7 @@ struct Timeval {
 }
 
 // Minimal sockaddr structs for sendto/recvfrom. Layout matches Linux.
+#[cfg(target_os = "linux")]
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct SockaddrIn {
@@ -48,6 +58,7 @@ struct SockaddrIn {
     sin_zero: [u8; 8],
 }
 
+#[cfg(target_os = "linux")]
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct SockaddrIn6 {
@@ -58,12 +69,14 @@ struct SockaddrIn6 {
     sin6_scope_id: u32,
 }
 
+#[cfg(target_os = "linux")]
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct SockaddrStorage {
     data: [u8; 128],
 }
 
+#[cfg(target_os = "linux")]
 unsafe extern "C" {
     fn socket(domain: c_int, ty: c_int, protocol: c_int) -> c_int;
     fn close(fd: c_int) -> c_int;
@@ -93,6 +106,7 @@ unsafe extern "C" {
     fn __errno_location() -> *mut c_int;
 }
 
+#[cfg(target_os = "linux")]
 fn last_errno() -> c_int {
     unsafe { *__errno_location() }
 }
@@ -142,6 +156,7 @@ fn build_icmp_v6_echo(identifier: u16, sequence: u16) -> Vec<u8> {
     packet
 }
 
+#[cfg(target_os = "linux")]
 fn set_recv_timeout(fd: c_int, timeout: Duration) {
     let timeval = Timeval {
         tv_sec: timeout.as_secs() as i64,
@@ -158,14 +173,17 @@ fn set_recv_timeout(fd: c_int, timeout: Duration) {
     }
 }
 
+#[cfg(target_os = "linux")]
 struct OwnedFd(c_int);
 
+#[cfg(target_os = "linux")]
 impl OwnedFd {
     fn new(fd: c_int) -> Option<Self> {
         (fd >= 0).then_some(Self(fd))
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for OwnedFd {
     fn drop(&mut self) {
         unsafe {
@@ -175,6 +193,7 @@ impl Drop for OwnedFd {
 }
 
 /// Result of one ICMP echo attempt (single packet, single wait).
+#[cfg(target_os = "linux")]
 fn icmp_echo_once(ip: IpAddr, timeout: Duration, cancel: &CancellationToken) -> ProbeOutcome {
     if cancel.is_cancelled() {
         return ProbeOutcome::Cancelled;
@@ -357,6 +376,18 @@ fn icmp_echo_once(ip: IpAddr, timeout: Duration, cancel: &CancellationToken) -> 
                 }
             }
         }
+    }
+}
+
+/// Portable fallback: ping sockets are Linux-gated in this build.
+#[cfg(not(target_os = "linux"))]
+fn icmp_echo_once(ip: IpAddr, timeout: Duration, cancel: &CancellationToken) -> ProbeOutcome {
+    if cancel.is_cancelled() {
+        return ProbeOutcome::Cancelled;
+    }
+    let _ = (ip, timeout);
+    ProbeOutcome::Unavailable {
+        reason: "ICMP probe unavailable: ping sockets are Linux-gated in this build; TCP fallback remains enabled".to_owned(),
     }
 }
 

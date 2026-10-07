@@ -1,23 +1,34 @@
 use std::net::Ipv4Addr;
+#[cfg(target_os = "linux")]
 use std::os::raw::{c_int, c_void};
 use std::time::{Duration, Instant};
 
 use crate::execution::CancellationToken;
 
+#[cfg(target_os = "linux")]
 const AF_PACKET: c_int = 17;
+#[cfg(target_os = "linux")]
 const SOCK_RAW: c_int = 3;
 const ETH_P_ARP: u16 = 0x0806;
+#[cfg(target_os = "linux")]
 const POLLIN: i16 = 0x0001;
+#[cfg(target_os = "linux")]
 const SOL_SOCKET: c_int = 1;
+#[cfg(target_os = "linux")]
 const SO_RCVTIMEO: c_int = 20;
+#[cfg(target_os = "linux")]
 const EAGAIN: c_int = 11;
+#[cfg(target_os = "linux")]
 const EINTR: c_int = 4;
+#[cfg(target_os = "linux")]
 const EPERM: c_int = 1;
+#[cfg(target_os = "linux")]
 const EACCES: c_int = 13;
 
 pub const MAX_ARP_REQUESTS_PER_PROBE: u32 = 2;
 pub const MAX_ROUTE_BYTES: usize = 64 * 1024;
 
+#[cfg(target_os = "linux")]
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct SockaddrLl {
@@ -30,6 +41,7 @@ struct SockaddrLl {
     sll_addr: [u8; 8],
 }
 
+#[cfg(target_os = "linux")]
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct PollFd {
@@ -38,6 +50,7 @@ struct PollFd {
     revents: i16,
 }
 
+#[cfg(target_os = "linux")]
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct Timeval {
@@ -45,6 +58,7 @@ struct Timeval {
     tv_usec: i64,
 }
 
+#[cfg(target_os = "linux")]
 unsafe extern "C" {
     fn socket(domain: c_int, ty: c_int, protocol: c_int) -> c_int;
     fn close(fd: c_int) -> c_int;
@@ -75,16 +89,20 @@ unsafe extern "C" {
     fn __errno_location() -> *mut c_int;
 }
 
+#[cfg(target_os = "linux")]
 fn last_errno() -> c_int {
     unsafe { *__errno_location() }
 }
 
+#[cfg(target_os = "linux")]
 struct OwnedFd(c_int);
+#[cfg(target_os = "linux")]
 impl OwnedFd {
     fn new(fd: c_int) -> Option<Self> {
         (fd >= 0).then_some(Self(fd))
     }
 }
+#[cfg(target_os = "linux")]
 impl Drop for OwnedFd {
     fn drop(&mut self) {
         unsafe {
@@ -246,17 +264,28 @@ fn local_source_for(target: Ipv4Addr) -> Option<Ipv4Addr> {
 }
 
 pub fn interface_for_target(target: Ipv4Addr) -> Result<InterfaceInfo, ArpError> {
-    let route = read_bounded("/proc/net/route", MAX_ROUTE_BYTES).ok_or(ArpError::NoInterface)?;
-    let (iface, on_link) = parse_proc_route(&route, target).ok_or(ArpError::NoInterface)?;
-    if !on_link {
-        return Err(ArpError::NotOnLink);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = target;
+        return Err(ArpError::Unavailable(
+            "ARP unavailable: Linux-only implementation in this build".to_owned(),
+        ));
     }
-    Ok(InterfaceInfo {
-        mac: interface_mac(&iface).ok_or(ArpError::NoInterface)?,
-        ifindex: interface_index(&iface).ok_or(ArpError::NoInterface)?,
-        addr: local_source_for(target).ok_or(ArpError::NoInterface)?,
-        name: iface,
-    })
+    #[cfg(target_os = "linux")]
+    {
+        let route =
+            read_bounded("/proc/net/route", MAX_ROUTE_BYTES).ok_or(ArpError::NoInterface)?;
+        let (iface, on_link) = parse_proc_route(&route, target).ok_or(ArpError::NoInterface)?;
+        if !on_link {
+            return Err(ArpError::NotOnLink);
+        }
+        Ok(InterfaceInfo {
+            mac: interface_mac(&iface).ok_or(ArpError::NoInterface)?,
+            ifindex: interface_index(&iface).ok_or(ArpError::NoInterface)?,
+            addr: local_source_for(target).ok_or(ArpError::NoInterface)?,
+            name: iface,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -267,6 +296,7 @@ pub enum ArpOutcome {
     Cancelled,
 }
 
+#[cfg(target_os = "linux")]
 pub fn probe_arp(target: Ipv4Addr, timeout: Duration, cancel: &CancellationToken) -> ArpOutcome {
     if cancel.is_cancelled() {
         return ArpOutcome::Cancelled;
@@ -378,6 +408,16 @@ pub fn probe_arp(target: Ipv4Addr, timeout: Duration, cancel: &CancellationToken
         }
     }
     ArpOutcome::Timeout
+}
+
+/// Portable fallback: active ARP needs AF_PACKET, Linux-only.
+#[cfg(not(target_os = "linux"))]
+pub fn probe_arp(target: Ipv4Addr, timeout: Duration, cancel: &CancellationToken) -> ArpOutcome {
+    if cancel.is_cancelled() {
+        return ArpOutcome::Cancelled;
+    }
+    let _ = (target, timeout);
+    ArpOutcome::Unavailable("ARP unavailable: Linux-only implementation in this build".to_owned())
 }
 
 #[cfg(test)]

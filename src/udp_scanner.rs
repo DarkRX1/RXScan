@@ -32,99 +32,107 @@
 //! bounded retries (silence only, at most one retry), overall task
 //! deadline, and immediate FD cleanup.
 
-use std::collections::{BTreeMap, VecDeque};
+#[cfg(target_os = "linux")]
+use std::collections::BTreeMap;
+use std::collections::VecDeque;
 use std::net::IpAddr;
-use std::os::raw::{c_int, c_void};
 use std::time::{Duration, Instant};
 
 use crate::execution::CancellationToken;
 
-// ---- libc constants (Linux; other platforms degrade to Error) ---
-const AF_INET: c_int = 2;
-const AF_INET6: c_int = 10;
-const SOCK_DGRAM: c_int = 2;
-const IPPROTO_UDP: c_int = 17;
-const F_GETFL: c_int = 3;
-const F_SETFL: c_int = 4;
-const O_NONBLOCK: c_int = 2048;
-const EINPROGRESS: c_int = 115;
-const EINTR: c_int = 4;
-const EAGAIN: c_int = 11;
-const ECONNREFUSED: c_int = 111;
-const EHOSTUNREACH: c_int = 113;
-const ENETUNREACH: c_int = 101;
-const EMFILE: c_int = 24;
-const ENFILE: c_int = 23;
-const ENOMEM: c_int = 12;
-const POLLIN: i16 = 0x0001;
-const POLLERR: i16 = 0x0008;
-const POLLHUP: i16 = 0x0010;
-const SOL_SOCKET: c_int = 1;
-const SO_ERROR: c_int = 4;
-const MSG_NOSIGNAL: c_int = 0x4000;
+// ---- Linux raw backend (Linux-only linkage; portable fallback below) ---
+#[cfg(target_os = "linux")]
+mod linux_raw {
+    use std::os::raw::{c_int, c_void};
+    pub use std::os::raw::{c_int as CInt, c_void as CVoid};
+    pub const AF_INET: c_int = 2;
+    pub const AF_INET6: c_int = 10;
+    pub const SOCK_DGRAM: c_int = 2;
+    pub const IPPROTO_UDP: c_int = 17;
+    pub const F_GETFL: c_int = 3;
+    pub const F_SETFL: c_int = 4;
+    pub const O_NONBLOCK: c_int = 2048;
+    pub const EINPROGRESS: c_int = 115;
+    pub const EINTR: c_int = 4;
+    pub const EAGAIN: c_int = 11;
+    pub const ECONNREFUSED: c_int = 111;
+    pub const EHOSTUNREACH: c_int = 113;
+    pub const ENETUNREACH: c_int = 101;
+    pub const EMFILE: c_int = 24;
+    pub const ENFILE: c_int = 23;
+    pub const ENOMEM: c_int = 12;
+    pub const POLLIN: i16 = 0x0001;
+    pub const POLLERR: i16 = 0x0008;
+    pub const POLLHUP: i16 = 0x0010;
+    pub const SOL_SOCKET: c_int = 1;
+    pub const SO_ERROR: c_int = 4;
+    pub const MSG_NOSIGNAL: c_int = 0x4000;
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-struct SockaddrIn {
-    sin_family: u16,
-    sin_port: u16,
-    sin_addr: [u8; 4],
-    sin_zero: [u8; 8],
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-struct SockaddrIn6 {
-    sin6_family: u16,
-    sin6_port: u16,
-    sin6_flowinfo: u32,
-    sin6_addr: [u8; 16],
-    sin6_scope_id: u32,
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-struct PollFd {
-    fd: c_int,
-    events: i16,
-    revents: i16,
-}
-
-unsafe extern "C" {
-    fn socket(domain: c_int, ty: c_int, protocol: c_int) -> c_int;
-    fn close(fd: c_int) -> c_int;
-    fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int;
-    fn connect(fd: c_int, addr: *const c_void, len: u32) -> c_int;
-    fn poll(fds: *mut PollFd, nfds: u64, timeout: c_int) -> c_int;
-    fn getsockopt(
-        fd: c_int,
-        level: c_int,
-        optname: c_int,
-        optval: *mut c_void,
-        optlen: *mut u32,
-    ) -> c_int;
-    fn send(fd: c_int, buf: *const c_void, len: usize, flags: c_int) -> isize;
-    fn recv(fd: c_int, buf: *mut c_void, len: usize, flags: c_int) -> isize;
-    fn __errno_location() -> *mut c_int;
-}
-
-fn last_errno() -> c_int {
-    unsafe { *__errno_location() }
-}
-
-struct OwnedFd(c_int);
-impl OwnedFd {
-    fn new(fd: c_int) -> Option<Self> {
-        (fd >= 0).then_some(Self(fd))
+    #[repr(C)]
+    #[derive(Debug, Clone, Copy)]
+    pub struct SockaddrIn {
+        pub sin_family: u16,
+        pub sin_port: u16,
+        pub sin_addr: [u8; 4],
+        pub sin_zero: [u8; 8],
     }
-}
-impl Drop for OwnedFd {
-    fn drop(&mut self) {
-        unsafe {
-            close(self.0);
+
+    #[repr(C)]
+    #[derive(Debug, Clone, Copy)]
+    pub struct SockaddrIn6 {
+        pub sin6_family: u16,
+        pub sin6_port: u16,
+        pub sin6_flowinfo: u32,
+        pub sin6_addr: [u8; 16],
+        pub sin6_scope_id: u32,
+    }
+
+    #[repr(C)]
+    #[derive(Debug, Clone, Copy)]
+    pub struct PollFd {
+        pub fd: c_int,
+        pub events: i16,
+        pub revents: i16,
+    }
+
+    unsafe extern "C" {
+        pub fn socket(domain: c_int, ty: c_int, protocol: c_int) -> c_int;
+        pub fn close(fd: c_int) -> c_int;
+        pub fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int;
+        pub fn connect(fd: c_int, addr: *const c_void, len: u32) -> c_int;
+        pub fn poll(fds: *mut PollFd, nfds: u64, timeout: c_int) -> c_int;
+        pub fn getsockopt(
+            fd: c_int,
+            level: c_int,
+            optname: c_int,
+            optval: *mut c_void,
+            optlen: *mut u32,
+        ) -> c_int;
+        pub fn send(fd: c_int, buf: *const c_void, len: usize, flags: c_int) -> isize;
+        pub fn recv(fd: c_int, buf: *mut c_void, len: usize, flags: c_int) -> isize;
+        pub fn __errno_location() -> *mut c_int;
+    }
+
+    pub fn last_errno() -> c_int {
+        unsafe { *__errno_location() }
+    }
+
+    pub struct OwnedFd(pub c_int);
+    impl OwnedFd {
+        pub fn new(fd: c_int) -> Option<Self> {
+            (fd >= 0).then_some(Self(fd))
+        }
+    }
+    impl Drop for OwnedFd {
+        fn drop(&mut self) {
+            unsafe {
+                close(self.0);
+            }
         }
     }
 }
+#[cfg(target_os = "linux")]
+use linux_raw::*;
 
 /// Evidence-backed UDP conclusion. Silence is never Open or Closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -291,6 +299,7 @@ impl UdpScanner for NativeUdpScanner {
     }
 }
 
+#[cfg(target_os = "linux")]
 struct Pending {
     port: u16,
     #[allow(dead_code)]
@@ -300,6 +309,7 @@ struct Pending {
     attempts: u32,
 }
 
+#[cfg(target_os = "linux")]
 fn sockaddr_for(ip: &IpAddr, port: u16) -> (Vec<u8>, u32) {
     match ip {
         IpAddr::V4(v4) => {
@@ -338,7 +348,8 @@ fn sockaddr_for(ip: &IpAddr, port: u16) -> (Vec<u8>, u32) {
     }
 }
 
-fn set_nonblocking(fd: c_int) -> bool {
+#[cfg(target_os = "linux")]
+fn set_nonblocking(fd: CInt) -> bool {
     unsafe {
         let flags = fcntl(fd, F_GETFL, 0);
         if flags < 0 {
@@ -348,26 +359,28 @@ fn set_nonblocking(fd: c_int) -> bool {
     }
 }
 
-fn socket_error(fd: c_int) -> c_int {
-    let mut error: c_int = 0;
-    let mut length = size_of::<c_int>() as u32;
+#[cfg(target_os = "linux")]
+fn socket_error(fd: CInt) -> CInt {
+    let mut error: CInt = 0;
+    let mut length = size_of::<CInt>() as u32;
     unsafe {
         getsockopt(
             fd,
             SOL_SOCKET,
             SO_ERROR,
-            &mut error as *mut c_int as *mut c_void,
+            &mut error as *mut CInt as *mut CVoid,
             &mut length,
         );
     }
     error
 }
 
-fn send_datagram(fd: c_int, payload: &[u8]) -> Result<(), c_int> {
+#[cfg(target_os = "linux")]
+fn send_datagram(fd: CInt, payload: &[u8]) -> Result<(), CInt> {
     let result = unsafe {
         send(
             fd,
-            payload.as_ptr() as *const c_void,
+            payload.as_ptr() as *const CVoid,
             payload.len(),
             MSG_NOSIGNAL,
         )
@@ -379,6 +392,7 @@ fn send_datagram(fd: c_int, payload: &[u8]) -> Result<(), c_int> {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[allow(clippy::too_many_lines)]
 fn scan_ports_udp(
     ip: IpAddr,
@@ -394,7 +408,7 @@ fn scan_ports_udp(
         sorted.into_iter().map(|port| (port, 1)).collect()
     };
     let mut outcome = UdpScanOutcome::default();
-    let mut pending: BTreeMap<c_int, Pending> = BTreeMap::new();
+    let mut pending: BTreeMap<CInt, Pending> = BTreeMap::new();
     let mut backoff_until = Instant::now();
 
     let overall_deadline = config.deadline;
@@ -462,8 +476,7 @@ fn scan_ports_udp(
             // Blocking connect (instant for UDP: no handshake), then
             // non-blocking I/O. This ordering avoids EINPROGRESS entirely.
             let (addr_bytes, addr_len) = sockaddr_for(&ip, port);
-            let connected =
-                unsafe { connect(fd.0, addr_bytes.as_ptr() as *const c_void, addr_len) };
+            let connected = unsafe { connect(fd.0, addr_bytes.as_ptr() as *const CVoid, addr_len) };
             if connected != 0 {
                 let errno = last_errno();
                 if errno == EINPROGRESS || errno == EAGAIN {
@@ -603,7 +616,7 @@ fn scan_ports_udp(
             .saturating_duration_since(now)
             .min(Duration::from_millis(25))
             .as_millis()
-            .min(c_int::MAX as u128) as c_int;
+            .min(CInt::MAX as u128) as CInt;
         let mut poll_fds: Vec<PollFd> = pending
             .keys()
             .map(|fd| PollFd {
@@ -628,12 +641,12 @@ fn scan_ports_udp(
                 continue;
             }
         }
-        let ready_map: BTreeMap<c_int, i16> = poll_fds
+        let ready_map: BTreeMap<CInt, i16> = poll_fds
             .iter()
             .map(|item| (item.fd, item.revents))
             .collect();
         let now = Instant::now();
-        let mut finished: Vec<c_int> = Vec::new();
+        let mut finished: Vec<CInt> = Vec::new();
         let mut to_retry: Vec<(u16, u32)> = Vec::new();
         let mut to_requeue: Vec<(u16, u32)> = Vec::new();
         for (fd, item) in pending.iter() {
@@ -693,7 +706,7 @@ fn scan_ports_udp(
                 let received = unsafe {
                     recv(
                         *fd,
-                        buffer.as_mut_ptr() as *mut c_void,
+                        buffer.as_mut_ptr() as *mut CVoid,
                         buffer.len(),
                         MSG_NOSIGNAL,
                     )
@@ -875,7 +888,7 @@ fn scan_ports_udp(
                     let received = unsafe {
                         recv(
                             *fd,
-                            buffer.as_mut_ptr() as *mut c_void,
+                            buffer.as_mut_ptr() as *mut CVoid,
                             buffer.len(),
                             MSG_NOSIGNAL,
                         )
@@ -1042,6 +1055,290 @@ fn scan_ports_udp(
         outcome.truncated = true;
     }
     outcome.unscanned = unscanned;
+    outcome.probes.sort_by_key(|probe| probe.port);
+    outcome
+}
+
+/// Portable fallback for Windows/macOS/other: bounded worker-pool UDP
+/// probes via `std::net::UdpSocket` with read timeouts. Same evidence
+/// semantics (Open on response, Closed on ICMP-refused, OpenOrFiltered on
+/// silence, Error on local failure); no raw `poll(2)` linkage.
+///
+/// Concurrency: `min(max_in_flight, 16)` workers share one queue; one socket
+/// per port reused across retries; recv timeout clamped to the remaining
+/// global deadline; deterministic sorted output.
+#[cfg(not(target_os = "linux"))]
+fn scan_ports_udp(
+    ip: IpAddr,
+    ports: &[u16],
+    source: &dyn UdpProbeSource,
+    config: &UdpScanConfig,
+) -> UdpScanOutcome {
+    scan_ports_udp_portable(ip, ports, source, config)
+}
+
+/// Shared portable UDP logic, available on all platforms so Linux tests can
+/// prove concurrency/accounting without raw sockets.
+#[allow(dead_code)]
+fn scan_ports_udp_portable(
+    ip: IpAddr,
+    ports: &[u16],
+    source: &dyn UdpProbeSource,
+    config: &UdpScanConfig,
+) -> UdpScanOutcome {
+    use std::collections::VecDeque;
+    use std::net::{SocketAddr, UdpSocket};
+    use std::sync::Mutex;
+    let mut sorted: Vec<u16> = ports.iter().copied().filter(|port| *port > 0).collect();
+    sorted.sort_unstable();
+    sorted.dedup();
+    if sorted.is_empty() {
+        return UdpScanOutcome::default();
+    }
+    let workers = config.max_in_flight.clamp(1, 16);
+    let queue = Mutex::new(sorted.into_iter().collect::<VecDeque<u16>>());
+    let outcome = Mutex::new(UdpScanOutcome::default());
+    let bind_addr: SocketAddr = match ip {
+        IpAddr::V4(_) => "0.0.0.0:0".parse().unwrap(),
+        IpAddr::V6(_) => "[::]:0".parse().unwrap(),
+    };
+    // `source` and `config` are shared by reference; `thread::scope` keeps
+    // lifetimes bounded without `Arc`.
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    // Poison recovery: the queue holds only port numbers, so
+                    // a poisoned mutex remains structurally valid. Recover
+                    // the guard and keep draining instead of abandoning
+                    // queued work. An unexpected worker programmer panic still
+                    // propagates via `thread::scope` (no catch_unwind, no
+                    // fabricated network evidence).
+                    let port = queue.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
+                    let Some(port) = port else { return };
+                    if config.cancel.is_cancelled() {
+                        let mut out = outcome.lock().unwrap_or_else(|e| e.into_inner());
+                        out.cancelled = true;
+                        out.truncated = true;
+                        out.unscanned += 1;
+                        continue;
+                    }
+                    if config.deadline.is_some_and(|d| Instant::now() >= d) {
+                        let mut out = outcome.lock().unwrap_or_else(|e| e.into_inner());
+                        out.truncated = true;
+                        out.unscanned += 1;
+                        continue;
+                    }
+                    let target = SocketAddr::new(ip, port);
+                    let payload = source.payload(&ip, port);
+                    let started = Instant::now();
+                    // One socket per port, reused across silence retries.
+                    // Definitive closure never retries (returns below).
+                    let socket = match UdpSocket::bind(bind_addr) {
+                        Ok(s) => s,
+                        Err(error) => {
+                            let category =
+                                crate::platform::network::normalize_io_error(&error);
+                            let mut out = outcome.lock().unwrap_or_else(|e| e.into_inner());
+                            out.record(
+                                UdpProbe {
+                                    port,
+                                    state: UdpPortState::Error,
+                                    latency: started.elapsed(),
+                                    detail: format!(
+                                        "UDP socket bind failed ({category}): {error}"
+                                    ),
+                                    attempts: 1,
+                                    protocol: None,
+                                    datagrams_sent: 1,
+                                    datagrams_received: 0,
+                                },
+                                config.retain_detail,
+                            );
+                            continue;
+                        }
+                    };
+                    let mut attempts: u32 = 1;
+                    loop {
+                        if config.cancel.is_cancelled() {
+                            let mut out = outcome.lock().unwrap_or_else(|e| e.into_inner());
+                            out.cancelled = true;
+                            out.truncated = true;
+                            out.unscanned += 1;
+                            break;
+                        }
+                        if config.deadline.is_some_and(|d| Instant::now() >= d) {
+                            let mut out = outcome.lock().unwrap_or_else(|e| e.into_inner());
+                            out.truncated = true;
+                            out.unscanned += 1;
+                            break;
+                        }
+                        // Clamp to remaining global budget so a long per-port
+                        // timeout cannot overshoot the scan deadline.
+                        let mut recv_timeout =
+                            config.timeout.min(Duration::from_secs(5));
+                        if let Some(deadline) = config.deadline {
+                            let remaining =
+                                deadline.saturating_duration_since(Instant::now());
+                            if remaining.is_zero() {
+                                let mut out =
+                                    outcome.lock().unwrap_or_else(|e| e.into_inner());
+                                out.truncated = true;
+                                out.unscanned += 1;
+                                break;
+                            }
+                            recv_timeout = recv_timeout.min(remaining);
+                        }
+                        let _ = socket.set_read_timeout(Some(recv_timeout));
+                        if let Err(error) = socket.send_to(&payload, target) {
+                            let category =
+                                crate::platform::network::normalize_io_error(&error);
+                            let mut out = outcome.lock().unwrap_or_else(|e| e.into_inner());
+                            out.record(
+                                UdpProbe {
+                                    port,
+                                    state: UdpPortState::Error,
+                                    latency: started.elapsed(),
+                                    detail: format!(
+                                        "UDP send to {ip}:{port} failed ({category}): {error}"
+                                    ),
+                                    attempts,
+                                    protocol: None,
+                                    datagrams_sent: attempts,
+                                    datagrams_received: 0,
+                                },
+                                config.retain_detail,
+                            );
+                            break;
+                        }
+                        {
+                            let mut out = outcome.lock().unwrap_or_else(|e| e.into_inner());
+                            out.datagrams_sent += 1;
+                        }
+                        let mut buffer = [0u8; 2048];
+                        match socket.recv_from(&mut buffer) {
+                            Ok((count, _)) => {
+                                let protocol = source.classify(port, &buffer[..count]);
+                                let detail = match &protocol {
+                                    Some(name) => format!(
+                                        "UDP response on {ip}:{port} matched {name}"
+                                    ),
+                                    None => format!(
+                                        "UDP response on {ip}:{port} ({count} bytes, unrecognized)"
+                                    ),
+                                };
+                                let mut out =
+                                    outcome.lock().unwrap_or_else(|e| e.into_inner());
+                                out.datagrams_received += 1;
+                                out.record(
+                                    UdpProbe {
+                                        port,
+                                        state: UdpPortState::Open,
+                                        latency: started.elapsed(),
+                                        detail,
+                                        attempts,
+                                        protocol,
+                                        datagrams_sent: attempts,
+                                        datagrams_received: 1,
+                                    },
+                                    config.retain_detail,
+                                );
+                                break;
+                            }
+                            Err(error) => {
+                                use std::io::ErrorKind;
+                                match error.kind() {
+                                    ErrorKind::TimedOut | ErrorKind::WouldBlock => {
+                                        if attempts <= config.max_retries {
+                                            attempts += 1;
+                                            {
+                                                let mut out = outcome
+                                                    .lock()
+                                                    .unwrap_or_else(|e| e.into_inner());
+                                                out.retries += 1;
+                                            }
+                                            continue;
+                                        }
+                                        let mut out =
+                                            outcome.lock().unwrap_or_else(|e| e.into_inner());
+                                        out.timeouts += 1;
+                                        out.record(
+                                            UdpProbe {
+                                                port,
+                                                state: UdpPortState::OpenOrFiltered,
+                                                latency: started.elapsed(),
+                                                detail: format!(
+                                                    "UDP {ip}:{port} silent after {attempts} attempt(s); uncertain, not closed"
+                                                ),
+                                                attempts,
+                                                protocol: None,
+                                                datagrams_sent: attempts,
+                                                datagrams_received: 0,
+                                            },
+                                            config.retain_detail,
+                                        );
+                                        break;
+                                    }
+                                    _ => {
+                                        let category =
+                                            crate::platform::network::normalize_io_error(&error);
+                                        match category {
+                                            crate::execution::ErrorCategory::ConnectionRefused => {
+                                                let mut out = outcome
+                                                    .lock()
+                                                    .unwrap_or_else(|e| e.into_inner());
+                                                out.closed_errors += 1;
+                                                out.record(
+                                                    UdpProbe {
+                                                        port,
+                                                        state: UdpPortState::Closed,
+                                                        latency: started.elapsed(),
+                                                        detail: format!(
+                                                            "UDP port unreachable on {ip}:{port}; host responded"
+                                                        ),
+                                                        attempts,
+                                                        protocol: None,
+                                                        datagrams_sent: attempts,
+                                                        datagrams_received: 0,
+                                                    },
+                                                    config.retain_detail,
+                                                );
+                                            }
+                                            _ => {
+                                                let mut out = outcome
+                                                    .lock()
+                                                    .unwrap_or_else(|e| e.into_inner());
+                                                out.record(
+                                                    UdpProbe {
+                                                        port,
+                                                        state: UdpPortState::Error,
+                                                        latency: started.elapsed(),
+                                                        detail: format!(
+                                                            "UDP recv on {ip}:{port} failed ({category}): {error}"
+                                                        ),
+                                                        attempts,
+                                                        protocol: None,
+                                                        datagrams_sent: attempts,
+                                                        datagrams_received: 0,
+                                                    },
+                                                    config.retain_detail,
+                                                );
+                                            }
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    });
+    // Recover collected outcome on poison (structurally valid counters +
+    // probes); never discard completed evidence.
+    let mut outcome = outcome.into_inner().unwrap_or_else(|e| e.into_inner());
+    outcome.fd_peak = workers;
     outcome.probes.sort_by_key(|probe| probe.port);
     outcome
 }
@@ -1350,5 +1647,121 @@ mod tests {
         assert_eq!(outcome.retries, 0);
         assert!(outcome.truncated);
         assert!(outcome.unscanned >= 1);
+    }
+
+    /// Tracking source to prove portable concurrency without wall-clock
+    /// thresholds: records max concurrent payload calls.
+    struct TrackingSource {
+        active: Arc<AtomicUsize>,
+        max_active: Arc<AtomicUsize>,
+    }
+
+    impl UdpProbeSource for TrackingSource {
+        fn payload(&self, _ip: &IpAddr, _port: u16) -> Vec<u8> {
+            let cur = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(cur, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(120));
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            Vec::new()
+        }
+        fn classify(&self, _port: u16, _response: &[u8]) -> Option<String> {
+            None
+        }
+    }
+
+    #[test]
+    fn portable_progress_is_concurrent_and_ordered() {
+        // Silent holders keep ports OpenOrFiltered; payload overlap proves
+        // worker-pool concurrency (sequential would keep max==1).
+        let holders: Vec<UdpSocket> = (0..6)
+            .map(|_| UdpSocket::bind("127.0.0.1:0").unwrap())
+            .collect();
+        let ports: Vec<u16> = holders
+            .iter()
+            .map(|s| s.local_addr().unwrap().port())
+            .collect();
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let source = TrackingSource {
+            active: active.clone(),
+            max_active: max_active.clone(),
+        };
+        let config = UdpScanConfig::bounded(
+            Duration::from_millis(400),
+            16,
+            0,
+            None,
+            CancellationToken::default(),
+        );
+        let outcome =
+            scan_ports_udp_portable("127.0.0.1".parse().unwrap(), &ports, &source, &config);
+        drop(holders);
+        assert_eq!(outcome.probes.len(), 6);
+        assert!(
+            max_active.load(Ordering::SeqCst) >= 2,
+            "expected concurrent payloads, max={}",
+            max_active.load(Ordering::SeqCst)
+        );
+        let got: Vec<u16> = outcome.probes.iter().map(|p| p.port).collect();
+        let mut expected = got.clone();
+        expected.sort_unstable();
+        assert_eq!(got, expected);
+        assert!(
+            outcome
+                .probes
+                .iter()
+                .all(|p| p.state == UdpPortState::OpenOrFiltered)
+        );
+    }
+
+    #[test]
+    fn portable_deadline_clamps_and_preserves_accounting() {
+        let holders: Vec<UdpSocket> = (0..2)
+            .map(|_| UdpSocket::bind("127.0.0.1:0").unwrap())
+            .collect();
+        let ports: Vec<u16> = holders
+            .iter()
+            .map(|s| s.local_addr().unwrap().port())
+            .collect();
+        // Deadline 150ms with 500ms per-port timeout: must truncate quickly,
+        // not overshoot to 1000ms sequential.
+        let deadline = Instant::now() + Duration::from_millis(150);
+        let config = UdpScanConfig::bounded(
+            Duration::from_millis(500),
+            8,
+            1,
+            Some(deadline),
+            CancellationToken::default(),
+        );
+        let start = Instant::now();
+        let outcome =
+            scan_ports_udp_portable("127.0.0.1".parse().unwrap(), &ports, &EmptySource, &config);
+        drop(holders);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(1200),
+            "deadline not respected: {elapsed:?}"
+        );
+        assert_eq!(
+            outcome.probes.len() + outcome.unscanned,
+            2,
+            "exact accounting"
+        );
+    }
+
+    #[test]
+    fn portable_cancellation_is_prompt_and_exact() {
+        let token = CancellationToken::default();
+        token.cancel();
+        let config = UdpScanConfig::bounded(Duration::from_millis(300), 8, 1, None, token);
+        let outcome = scan_ports_udp_portable(
+            "127.0.0.1".parse().unwrap(),
+            &[4000, 4001, 4002],
+            &EmptySource,
+            &config,
+        );
+        assert!(outcome.cancelled);
+        assert_eq!(outcome.unscanned, 3);
+        assert!(outcome.probes.is_empty());
     }
 }

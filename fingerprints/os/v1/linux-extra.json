@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "id": "os-linux-alpine",
+      "family": "Linux",
+      "generation": "Alpine",
+      "features": [
+        {"source": "ssh_banner", "pattern": "Alpine", "weight": 22},
+        {"source": "http_server", "pattern": "Alpine", "weight": 14}
+      ],
+      "confidence_cap": 85,
+      "source": "seed-v3"
+    },
+    {
+      "id": "os-linux-arch",
+      "family": "Linux",
+      "generation": "Arch",
+      "features": [
+        {"source": "ssh_banner", "pattern": "Arch", "weight": 20},
+        {"source": "service_product", "pattern": "Arch", "weight": 10}
+      ],
+      "confidence_cap": 80,
+      "source": "seed-v3"
+    },
+    {
+      "id": "os-linux-fedora",
+      "family": "Linux",
+      "generation": "Fedora",
+      "features": [
+        {"source": "ssh_banner", "pattern": "Fedora", "weight": 20},
+        {"source": "http_server", "pattern": "Fedora", "weight": 14}
+      ],
+      "confidence_cap": 85,
+      "source": "seed-v3"
+    },
+    {
+      "id": "os-linux-centos",
+      "family": "Linux",
+      "generation": "CentOS",
+      "features": [
+        {"source": "ssh_banner", "pattern": "CentOS", "weight": 20},
+        {"source": "banner_token", "pattern": "CentOS", "weight": 12}
+      ],
+      "confidence_cap": 85,
+      "source": "seed-v3"
+    }
+  ]
+}

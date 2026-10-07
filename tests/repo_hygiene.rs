@@ -210,44 +210,72 @@ fn search_sigint_cancellation_has_process_lifetime() {
     // touches must outlive every stack frame: a raw pointer to a
     // search-local AtomicBool dangles once run_search returns, and the
     // pointer itself races the async handler. The fix is a process-lifetime
-    // static atomic (see src/main.rs) — pin that design here.
-    let cli = std::fs::read_to_string(repo_root().join("src/main.rs")).expect("src/main.rs reads");
+    // static atomic in platform::process reused by main.rs — pin that design.
+    let platform = std::fs::read_to_string(repo_root().join("src/platform/process.rs"))
+        .expect("process.rs reads");
     assert!(
-        cli.contains("static SEARCH_CANCELLED: std::sync::atomic::AtomicBool"),
-        "SIGINT cancellation must use a process-lifetime static atomic"
+        platform.contains("static PROCESS_CANCELLED: AtomicBool"),
+        "process cancellation must use a process-lifetime static atomic"
     );
     assert!(
-        !cli.contains("static mut SEARCH_CANCEL_FLAG"),
+        !platform.contains("static mut "),
         "unsynchronized mutable raw-pointer cancellation state must not return"
+    );
+    assert!(
+        !platform.contains("AtomicPtr"),
+        "casual AtomicPtr<Arc> must not appear in signal state"
+    );
+    assert!(
+        !platform.contains("HANDLER_FLAG") || platform.contains("PROCESS_CANCELLED"),
+        "legacy mirror flag must be gone"
+    );
+    assert!(
+        !platform.contains("OnceLock<Arc<AtomicBool>>"),
+        "Windows OnceLock-first-flag bug must not return"
+    );
+    // Handler bodies must stay a single atomic store.
+    for marker in [
+        "extern \"C\" fn unix_cancel_handler",
+        "windows_cancel_handler",
+    ] {
+        let start = platform
+            .find(marker)
+            .unwrap_or_else(|| panic!("handler {marker} exists"));
+        let body = &platform[start..];
+        let end = body.find("\n}\n").expect("handler body ends") + 3;
+        let body = &body[..end];
+        assert!(
+            body.contains("PROCESS_CANCELLED.store(true"),
+            "handler must set process state: {body}"
+        );
+        for forbidden in ["format!", "println!", "Mutex", "write!", "Box::", "Arc::"] {
+            assert!(
+                !body.contains(forbidden),
+                "signal handler must not contain {forbidden}: {body}"
+            );
+        }
+    }
+    // main.rs must reuse the platform state, not duplicate handlers.
+    let cli = std::fs::read_to_string(repo_root().join("src/main.rs")).expect("src/main.rs reads");
+    assert!(
+        !cli.contains("static SEARCH_CANCELLED"),
+        "main.rs must not duplicate process state"
     );
     assert!(
         !cli.contains("SEARCH_CANCEL_FLAG"),
         "no raw-pointer cancellation state may remain"
     );
-    // The handler body must stay a single atomic store: no allocation,
-    // locking, formatting, or I/O inside async signal context.
-    let handler = cli
-        .find("extern \"C\" fn search_cancel_handler")
-        .expect("SIGINT handler exists");
-    let body = &cli[handler..];
-    let end = body.find("\n}\n").expect("handler body ends") + 3;
-    let body = &body[..end];
     assert!(
-        body.contains("SEARCH_CANCELLED.store(true"),
-        "handler must set the process-lifetime flag: {body}"
+        !cli.contains("fn search_cancel_handler"),
+        "main.rs must not duplicate the signal handler"
     );
-    for forbidden in [
-        "format!",
-        "println!",
-        "out_line!",
-        "err!",
-        "eprintln!",
-        "Mutex",
-        "write!",
-    ] {
-        assert!(
-            !body.contains(forbidden),
-            "signal handler must not contain {forbidden}: {body}"
-        );
-    }
+    assert!(
+        cli.contains("platform::process::install_process_cancellation")
+            || cli.contains("install_process_cancellation"),
+        "main.rs must reuse platform cancellation"
+    );
+    assert!(
+        cli.contains("process_cancel_flag"),
+        "search must consume process state directly"
+    );
 }

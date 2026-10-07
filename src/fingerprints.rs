@@ -417,8 +417,9 @@ fn matcher_hits(matcher: &FingerprintMatcher, observation: &str) -> bool {
     }
 }
 
-/// Load and validate every `*.json` pack in `dir`. Malformed files are
-/// reported per-file; valid files still load (fail-one-not-all). A missing
+/// Load and validate every `*.json` pack in `dir`. Malformed packs fail
+/// fast; duplicate fingerprint IDs across packs are a validation failure
+/// (deterministic ID + both sources, never silent shadowing). A missing
 /// directory yields an empty pack (built-in logic remains authoritative).
 pub fn load_dir(dir: &Path) -> Result<Vec<(String, FingerprintPack)>, FingerprintError> {
     let entries = match std::fs::read_dir(dir) {
@@ -456,6 +457,13 @@ pub fn load_dir(dir: &Path) -> Result<Vec<(String, FingerprintPack)>, Fingerprin
             })?;
         pack.validate(&path.display().to_string())?;
         packs.push((path.display().to_string(), pack));
+    }
+    // Cross-pack duplicates fail deterministically (path-sorted sources).
+    if let Some(dup) = find_duplicate_service_id(&packs) {
+        return Err(FingerprintError::Invalid {
+            path: dup.second_source.clone(),
+            reason: dup.to_string(),
+        });
     }
     Ok(packs)
 }
@@ -556,19 +564,94 @@ impl FingerprintDb {
     pub fn rule_count(&self) -> usize {
         self.rules.len()
     }
+}
+
+/// Cross-file duplicate fingerprint ID, deterministic (path-sorted).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DuplicateServiceId {
+    pub id: String,
+    pub first_source: String,
+    pub second_source: String,
+}
+
+impl std::fmt::Display for DuplicateServiceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "duplicate fingerprint id '{}': first in {}, again in {}",
+            self.id, self.first_source, self.second_source
+        )
+    }
+}
+
+/// Detect cross-file duplicate IDs without loading. Sorted by path then
+/// rule order, so the reported pair is deterministic. `None` when all IDs
+/// are distinct. Strict production loaders reject duplicates; callers that
+/// must fail on shadowing check this first.
+pub fn find_duplicate_service_id(
+    packs: &[(String, FingerprintPack)],
+) -> Option<DuplicateServiceId> {
+    let mut sorted: Vec<(String, String)> = Vec::new();
+    let mut paths: Vec<String> = packs.iter().map(|(p, _)| p.clone()).collect();
+    paths.sort();
+    for path in &paths {
+        if let Some((_, pack)) = packs.iter().find(|(p, _)| p == path) {
+            for record in &pack.fingerprints {
+                sorted.push((record.id.clone(), path.clone()));
+            }
+        }
+    }
+    let mut seen: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for (id, path) in sorted {
+        if let Some(first) = seen.get(&id) {
+            return Some(DuplicateServiceId {
+                id,
+                first_source: first.clone(),
+                second_source: path,
+            });
+        }
+        seen.insert(id, path);
+    }
+    None
+}
+
+impl FingerprintDb {
+    /// Strict production constructor: duplicate fingerprint IDs across
+    /// packs are a validation failure. Inputs are sorted by pack path
+    /// before validation so the reported pair is deterministic regardless
+    /// of caller order. Returns `Invalid` identifying the duplicate ID,
+    /// first source, and conflicting source.
+    pub fn try_from_packs(packs: Vec<(String, FingerprintPack)>) -> Result<Self, FingerprintError> {
+        let mut sorted = packs;
+        sorted.sort_by(|a, b| a.0.cmp(&b.0));
+        if let Some(dup) = find_duplicate_service_id(&sorted) {
+            return Err(FingerprintError::Invalid {
+                path: dup.second_source.clone(),
+                reason: dup.to_string(),
+            });
+        }
+        Ok(Self::from_packs(sorted))
+    }
 
     /// Compile validated packs. Rules sort by rule id for deterministic
-    /// match order regardless of pack file order. Duplicate rule ids across
-    /// packs keep the first pack's rule (packs in path-sorted order);
-    /// duplicates never produce double candidates.
+    /// match order regardless of pack file order. Packs are consumed in
+    /// path-sorted order so first-wins is deterministic.
+    ///
+    /// Permissive internal constructor kept for backwards compatibility
+    /// and tests: duplicate IDs keep the first pack's rule and never
+    /// produce double candidates. Production strict loading MUST use
+    /// [`try_from_packs`](Self::try_from_packs) or
+    /// [`load_from_dir`](Self::load_from_dir), which reject duplicates.
     pub fn from_packs(packs: Vec<(String, FingerprintPack)>) -> Self {
+        let mut sorted = packs;
+        sorted.sort_by(|a, b| a.0.cmp(&b.0));
         let mut rules = Vec::new();
         let mut seen_ids = std::collections::BTreeSet::new();
         let mut stats = FingerprintLoadStats {
-            packs_loaded: packs.len(),
+            packs_loaded: sorted.len(),
             ..FingerprintLoadStats::default()
         };
-        for (path, pack) in packs {
+        for (path, pack) in sorted {
             if !stats.pack_paths.contains(&path) {
                 stats.pack_paths.push(path.clone());
             }
@@ -593,16 +676,37 @@ impl FingerprintDb {
         Self { rules, stats }
     }
 
-    /// Load every pack in `dir` once. Missing directory yields an empty DB
-    /// (built-ins stay authoritative). Malformed files are counted in stats
-    /// and skipped — one bad pack never aborts a scan.
+    /// Strict production loader: every pack in `dir` is loaded once.
+    /// Missing directory yields an empty DB (built-ins stay authoritative).
+    /// Malformed files are counted in stats and skipped — one bad pack never
+    /// aborts a scan. Duplicate fingerprint IDs across packs are a
+    /// validation failure: no silent first-wins shadowing. On duplicates the
+    /// loader returns an empty DB with the duplicate explicitly recorded in
+    /// `files_rejected`/`rejected_files` (deterministic ID + both sources).
     pub fn load_from_dir(dir: &Path) -> Self {
         match load_dir_strict(dir) {
-            Ok((packs, stats)) => {
-                let mut db = Self::from_packs(packs);
-                db.stats.files_rejected = stats.files_rejected;
-                db.stats.rejected_files = stats.rejected_files;
-                db
+            Ok((packs, stats)) => match Self::try_from_packs(packs) {
+                Ok(mut db) => {
+                    db.stats.files_rejected = stats.files_rejected;
+                    db.stats.rejected_files = stats.rejected_files;
+                    db
+                }
+                Err(FingerprintError::Invalid { path, reason }) => {
+                    let mut empty = Self::empty();
+                    empty.stats.files_rejected = stats.files_rejected + 1;
+                    let mut rejected = stats.rejected_files;
+                    rejected.push(format!("{path}: {reason}"));
+                    rejected.sort();
+                    empty.stats.rejected_files = rejected;
+                    empty
+                }
+                Err(_) => Self::empty(),
+            },
+            Err(FingerprintError::Invalid { path, reason }) => {
+                let mut empty = Self::empty();
+                empty.stats.files_rejected = 1;
+                empty.stats.rejected_files = vec![format!("{path}: {reason}")];
+                empty
             }
             Err(_) => Self::empty(),
         }
@@ -750,6 +854,14 @@ fn load_dir_strict(
         stats.packs_loaded += 1;
         stats.rules_accepted += pack.fingerprints.len();
         packs.push((label, pack));
+    }
+    // Cross-pack duplicates are a deterministic validation failure, never
+    // silent first-wins shadowing. Inputs are already path-sorted.
+    if let Some(dup) = find_duplicate_service_id(&packs) {
+        return Err(FingerprintError::Invalid {
+            path: dup.second_source.clone(),
+            reason: dup.to_string(),
+        });
     }
     Ok((packs, stats))
 }
@@ -1018,5 +1130,177 @@ mod tests {
         );
         // Garbage JSON never panics.
         assert!(parse_pack("{{{not json", "t").is_err());
+    }
+
+    #[test]
+    fn cross_file_duplicates_are_deterministic() {
+        let a = parse_pack(
+            r#"{"schema_version": 1, "fingerprints": [
+            {"id": "dup", "protocol": "http", "probe": "http",
+             "matcher": {"kind": "contains", "pattern": "a"},
+             "product": "a", "confidence": 80, "source": "t"}]}"#,
+            "a.json",
+        )
+        .unwrap();
+        let b = parse_pack(
+            r#"{"schema_version": 1, "fingerprints": [
+            {"id": "dup", "protocol": "http", "probe": "http",
+             "matcher": {"kind": "contains", "pattern": "b"},
+             "product": "b", "confidence": 80, "source": "t"}]}"#,
+            "b.json",
+        )
+        .unwrap();
+        let dup = find_duplicate_service_id(&[("b.json".to_owned(), b), ("a.json".to_owned(), a)])
+            .unwrap();
+        assert_eq!(dup.id, "dup");
+        assert_eq!(dup.first_source, "a.json");
+        assert_eq!(dup.second_source, "b.json");
+        // Distinct packs have no duplicates.
+        let c = parse_pack(
+            r#"{"schema_version": 1, "fingerprints": [
+            {"id": "unique", "protocol": "http", "probe": "http",
+             "matcher": {"kind": "contains", "pattern": "x"},
+             "product": "x", "confidence": 80, "source": "t"}]}"#,
+            "c.json",
+        )
+        .unwrap();
+        assert!(find_duplicate_service_id(&[("c.json".to_owned(), c)]).is_none());
+    }
+
+    fn service_pack_with_id(id: &str, pattern: &str) -> FingerprintPack {
+        parse_pack(
+            &format!(
+                r#"{{"schema_version": 1, "fingerprints": [
+                {{"id": "{id}", "protocol": "http", "probe": "http",
+                  "matcher": {{"kind": "contains", "pattern": "{pattern}"}},
+                  "product": "P", "confidence": 80, "source": "t"}}]}}"#
+            ),
+            "t",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn strict_try_from_packs_rejects_duplicates_deterministically() {
+        let a = service_pack_with_id("dup-service", "a");
+        let b = service_pack_with_id("dup-service", "b");
+        // Same-pack duplicate already rejected by parse_pack validation.
+        assert!(
+            parse_pack(
+                r#"{"schema_version": 1, "fingerprints": [
+                {"id": "dup-service", "protocol": "http", "probe": "http",
+                 "matcher": {"kind": "contains", "pattern": "a"},
+                 "product": "a", "confidence": 80, "source": "t"},
+                {"id": "dup-service", "protocol": "http", "probe": "http",
+                 "matcher": {"kind": "contains", "pattern": "b"},
+                 "product": "b", "confidence": 80, "source": "t"}]}"#,
+                "t",
+            )
+            .is_err()
+        );
+        // Across packs: strict constructor rejects regardless of input order.
+        let forward = FingerprintDb::try_from_packs(vec![
+            ("b.json".to_owned(), b.clone()),
+            ("a.json".to_owned(), a.clone()),
+        ]);
+        let err = forward.expect_err("duplicate across packs must fail");
+        let text = err.to_string();
+        assert!(text.contains("dup-service"), "error identifies ID: {text}");
+        assert!(text.contains("a.json"), "error identifies first: {text}");
+        assert!(text.contains("b.json"), "error identifies conflict: {text}");
+        let reverse = FingerprintDb::try_from_packs(vec![
+            ("a.json".to_owned(), a.clone()),
+            ("b.json".to_owned(), b.clone()),
+        ])
+        .expect_err("order must not matter");
+        assert_eq!(err.to_string(), reverse.to_string(), "deterministic");
+        // Valid distinct packs still load.
+        let ok = FingerprintDb::try_from_packs(vec![
+            ("b.json".to_owned(), service_pack_with_id("svc-b", "b")),
+            ("a.json".to_owned(), service_pack_with_id("svc-a", "a")),
+        ])
+        .expect("distinct IDs load");
+        assert_eq!(ok.rule_count(), 2);
+    }
+
+    #[test]
+    fn production_loader_rejects_duplicate_service_ids() {
+        // Real production loader (filesystem), not merely the helper.
+        let base =
+            std::env::temp_dir().join(format!("rxscan-svc-dup-{}-{}", std::process::id(), "prod"));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let write = |name: &str, id: &str, pattern: &str| {
+            std::fs::write(
+                base.join(name),
+                format!(
+                    r#"{{"schema_version": 1, "fingerprints": [
+                    {{"id": "{id}", "protocol": "http", "probe": "http",
+                      "matcher": {{"kind": "contains", "pattern": "{pattern}"}},
+                      "product": "P", "confidence": 80, "source": "t"}}]}}"#
+                ),
+            )
+            .unwrap();
+        };
+        // Duplicate across packs: empty DB + explicit validation failure.
+        write("a.json", "dup-service", "a");
+        write("b.json", "dup-service", "b");
+        let db = FingerprintDb::load_from_dir(&base);
+        assert_eq!(db.rule_count(), 0, "no silent first-wins");
+        assert!(db.stats().files_rejected >= 1);
+        let rejected = db.stats().rejected_files.join("\n");
+        assert!(rejected.contains("dup-service"), "ID recorded: {rejected}");
+        assert!(rejected.contains("a.json"), "first source: {rejected}");
+        assert!(rejected.contains("b.json"), "conflict source: {rejected}");
+        // Same-pack duplicate: single bad file rejected.
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(
+            base.join("only.json"),
+            r#"{"schema_version": 1, "fingerprints": [
+                {"id": "dup-service", "protocol": "http", "probe": "http",
+                 "matcher": {"kind": "contains", "pattern": "a"},
+                 "product": "a", "confidence": 80, "source": "t"},
+                {"id": "dup-service", "protocol": "http", "probe": "http",
+                 "matcher": {"kind": "contains", "pattern": "b"},
+                 "product": "b", "confidence": 80, "source": "t"}]}"#,
+        )
+        .unwrap();
+        let db = FingerprintDb::load_from_dir(&base);
+        assert_eq!(db.rule_count(), 0);
+        assert!(db.stats().files_rejected >= 1);
+        // Valid distinct packs still load through the same production path.
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        write("a.json", "svc-a", "alpha");
+        write("b.json", "svc-b", "beta");
+        let db = FingerprintDb::load_from_dir(&base);
+        assert_eq!(db.rule_count(), 2);
+        assert_eq!(db.stats().files_rejected, 0);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn infrastructure_generic_patterns_do_not_cross_fire() {
+        // Gated path: RDP `Cookie:` must not fire on HTTP bytes.
+        let db = FingerprintDb::load_from_dir(std::path::Path::new("fingerprints/v1"));
+        let http_hits = db.candidates_for("http", "HTTP/1.1 200 OK\r\nSet-Cookie: session=abc\r\n");
+        assert!(
+            !http_hits.iter().any(|c| c.rule_id == "rdp-cookie"),
+            "RDP Cookie: must not identify HTTP: {http_hits:?}"
+        );
+        // SMB `SMB` gated to smb protocol; HTTP containing smb substring
+        // must not adopt SMB via gated path.
+        let http_smb = db.candidates_for("http", "Server: example.test smb-share");
+        assert!(
+            !http_smb.iter().any(|c| c.rule_id == "smb-negotiate"),
+            "SMB must not fire on HTTP: {http_smb:?}"
+        );
+        // Unknown path stays suggestion-only, never confirmed product.
+        let unknown = db.candidates_for_unknown("Cookie: generic bytes");
+        for candidate in &unknown {
+            assert!(!candidate.candidate.product.is_empty());
+            assert!(!candidate.suggested_protocol.is_empty());
+        }
     }
 }

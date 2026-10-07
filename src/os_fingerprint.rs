@@ -305,6 +305,48 @@ pub struct OsDb {
     stats: OsLoadStats,
 }
 
+/// Cross-file duplicate OS rule ID, deterministic (path-sorted).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DuplicateOsId {
+    pub id: String,
+    pub first_source: String,
+    pub second_source: String,
+}
+
+impl std::fmt::Display for DuplicateOsId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "duplicate OS rule id '{}': first in {}, again in {}",
+            self.id, self.first_source, self.second_source
+        )
+    }
+}
+
+/// Detect cross-file duplicate OS IDs. Sorted by path, deterministic.
+/// Strict production loaders reject duplicates; callers that must fail on
+/// shadowing check this first.
+pub fn find_duplicate_os_id(packs: &[(String, OsPack)]) -> Option<DuplicateOsId> {
+    let mut paths: Vec<String> = packs.iter().map(|(p, _)| p.clone()).collect();
+    paths.sort();
+    let mut seen: BTreeMap<String, String> = BTreeMap::new();
+    for path in &paths {
+        if let Some((_, pack)) = packs.iter().find(|(p, _)| p == path) {
+            for rule in &pack.rules {
+                if let Some(first) = seen.get(&rule.id) {
+                    return Some(DuplicateOsId {
+                        id: rule.id.clone(),
+                        first_source: first.clone(),
+                        second_source: path.clone(),
+                    });
+                }
+                seen.insert(rule.id.clone(), path.clone());
+            }
+        }
+    }
+    None
+}
+
 impl OsDb {
     pub fn empty() -> Self {
         Self::default()
@@ -318,14 +360,38 @@ impl OsDb {
         self.rules.len()
     }
 
+    /// Strict production constructor: duplicate OS rule IDs across packs
+    /// are a validation failure. Inputs are sorted by pack path before
+    /// validation so the reported pair is deterministic regardless of
+    /// caller order. Returns `Invalid` identifying the duplicate ID, first
+    /// source, and conflicting source.
+    pub fn try_from_packs(packs: Vec<(String, OsPack)>) -> Result<Self, OsPackError> {
+        let mut sorted = packs;
+        sorted.sort_by(|a, b| a.0.cmp(&b.0));
+        if let Some(dup) = find_duplicate_os_id(&sorted) {
+            return Err(OsPackError::Invalid {
+                path: dup.second_source.clone(),
+                reason: dup.to_string(),
+            });
+        }
+        Ok(Self::from_packs(sorted))
+    }
+
+    /// Permissive internal constructor kept for backwards compatibility
+    /// and tests: duplicates keep the first pack's rule (path-sorted order
+    /// for determinism). Production strict loading MUST use
+    /// [`try_from_packs`](Self::try_from_packs) or
+    /// [`load_from_dir`](Self::load_from_dir), which reject duplicates.
     pub fn from_packs(packs: Vec<(String, OsPack)>) -> Self {
+        let mut sorted = packs;
+        sorted.sort_by(|a, b| a.0.cmp(&b.0));
         let mut rules = Vec::new();
         let mut seen = BTreeSet::new();
         let mut stats = OsLoadStats {
-            packs_loaded: packs.len(),
+            packs_loaded: sorted.len(),
             ..Default::default()
         };
-        for (path, pack) in packs {
+        for (path, pack) in sorted {
             if !stats.pack_paths.contains(&path) {
                 stats.pack_paths.push(path.clone());
             }
@@ -350,8 +416,12 @@ impl OsDb {
         Self { rules, stats }
     }
 
-    /// Load every pack in `dir` once. Missing directory yields an empty DB;
-    /// malformed files are counted and skipped.
+    /// Strict production loader: every pack in `dir` is loaded once.
+    /// Missing directory yields an empty DB; malformed files are counted
+    /// and skipped. Duplicate OS rule IDs across packs are a validation
+    /// failure: no silent first-wins shadowing. On duplicates the loader
+    /// returns an empty DB with the duplicate explicitly recorded in
+    /// `files_rejected`/`rejected_files` (deterministic ID + both sources).
     pub fn load_from_dir(dir: &Path) -> Self {
         let mut packs = Vec::new();
         let mut stats = OsLoadStats::default();
@@ -388,10 +458,33 @@ impl OsDb {
                 }
             }
         }
-        let mut db = Self::from_packs(packs);
-        db.stats.files_rejected = stats.files_rejected;
-        db.stats.rejected_files = stats.rejected_files;
-        db
+        // Cross-pack duplicates fail deterministically (path-sorted sources).
+        if let Some(dup) = find_duplicate_os_id(&packs) {
+            let mut empty = Self::empty();
+            empty.stats.files_rejected = stats.files_rejected + 1;
+            let mut rejected = stats.rejected_files;
+            rejected.push(format!("{}: {dup}", dup.second_source));
+            rejected.sort();
+            empty.stats.rejected_files = rejected;
+            return empty;
+        }
+        match Self::try_from_packs(packs) {
+            Ok(mut db) => {
+                db.stats.files_rejected = stats.files_rejected;
+                db.stats.rejected_files = stats.rejected_files;
+                db
+            }
+            Err(OsPackError::Invalid { path, reason }) => {
+                let mut empty = Self::empty();
+                empty.stats.files_rejected = stats.files_rejected + 1;
+                let mut rejected = stats.rejected_files;
+                rejected.push(format!("{path}: {reason}"));
+                rejected.sort();
+                empty.stats.rejected_files = rejected;
+                empty
+            }
+            Err(_) => Self::empty(),
+        }
     }
 
     /// Classify one host from its evidence set. Returns candidates sorted
@@ -848,6 +941,141 @@ mod tests {
         assert!(os_hints_from_banner("x", "hello world foo", None, None).is_empty());
         let huge = "Ubuntu ".repeat(10_000);
         assert!(os_hints_from_banner("x", &huge, None, None).len() <= 8);
+    }
+
+    #[test]
+    fn cross_file_duplicates_are_deterministic() {
+        let a = parse_os_pack(
+            r#"{"schema_version": 1, "rules": [
+            {"id": "dup", "family": "Linux",
+             "features": [{"source": "s", "pattern": "a", "weight": 10}],
+             "confidence_cap": 80, "source": "t"}]}"#,
+            "a.json",
+        )
+        .unwrap();
+        let b = parse_os_pack(
+            r#"{"schema_version": 1, "rules": [
+            {"id": "dup", "family": "Linux",
+             "features": [{"source": "s", "pattern": "b", "weight": 10}],
+             "confidence_cap": 80, "source": "t"}]}"#,
+            "b.json",
+        )
+        .unwrap();
+        let dup =
+            find_duplicate_os_id(&[("b.json".to_owned(), b), ("a.json".to_owned(), a)]).unwrap();
+        assert_eq!(dup.id, "dup");
+        assert_eq!(dup.first_source, "a.json");
+        assert_eq!(dup.second_source, "b.json");
+    }
+
+    fn os_pack_with_id(id: &str, pattern: &str) -> OsPack {
+        parse_os_pack(
+            &format!(
+                r#"{{"schema_version": 1, "rules": [
+                {{"id": "{id}", "family": "Linux",
+                  "features": [{{"source": "s", "pattern": "{pattern}", "weight": 10}}],
+                  "confidence_cap": 80, "source": "t"}}]}}"#
+            ),
+            "t",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn strict_try_from_packs_rejects_os_duplicates_deterministically() {
+        // Same-pack duplicate already rejected by pack validation.
+        assert!(
+            parse_os_pack(
+                r#"{"schema_version": 1, "rules": [
+                {"id": "dup-os", "family": "Linux",
+                 "features": [{"source": "s", "pattern": "a", "weight": 10}],
+                 "confidence_cap": 80, "source": "t"},
+                {"id": "dup-os", "family": "Linux",
+                 "features": [{"source": "s", "pattern": "b", "weight": 10}],
+                 "confidence_cap": 80, "source": "t"}]}"#,
+                "t",
+            )
+            .is_err()
+        );
+        let a = os_pack_with_id("dup-os", "a");
+        let b = os_pack_with_id("dup-os", "b");
+        let err = OsDb::try_from_packs(vec![
+            ("b.json".to_owned(), b.clone()),
+            ("a.json".to_owned(), a.clone()),
+        ])
+        .expect_err("duplicate across OS packs must fail");
+        let text = err.to_string();
+        assert!(text.contains("dup-os"), "error identifies ID: {text}");
+        assert!(text.contains("a.json"), "error identifies first: {text}");
+        assert!(text.contains("b.json"), "error identifies conflict: {text}");
+        let reverse = OsDb::try_from_packs(vec![
+            ("a.json".to_owned(), a.clone()),
+            ("b.json".to_owned(), b.clone()),
+        ])
+        .expect_err("order must not matter");
+        assert_eq!(err.to_string(), reverse.to_string(), "deterministic");
+        let ok = OsDb::try_from_packs(vec![
+            ("b.json".to_owned(), os_pack_with_id("os-b", "b")),
+            ("a.json".to_owned(), os_pack_with_id("os-a", "a")),
+        ])
+        .expect("distinct OS IDs load");
+        assert_eq!(ok.rule_count(), 2);
+    }
+
+    #[test]
+    fn production_loader_rejects_duplicate_os_ids() {
+        // Real production loader (filesystem), not merely the helper.
+        let base =
+            std::env::temp_dir().join(format!("rxscan-os-dup-{}-{}", std::process::id(), "prod"));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let write = |name: &str, id: &str, pattern: &str| {
+            std::fs::write(
+                base.join(name),
+                format!(
+                    r#"{{"schema_version": 1, "rules": [
+                    {{"id": "{id}", "family": "Linux",
+                      "features": [{{"source": "s", "pattern": "{pattern}", "weight": 10}}],
+                      "confidence_cap": 80, "source": "t"}}]}}"#
+                ),
+            )
+            .unwrap();
+        };
+        write("a.json", "dup-os", "a");
+        write("b.json", "dup-os", "b");
+        let db = OsDb::load_from_dir(&base);
+        assert_eq!(db.rule_count(), 0, "no silent first-wins");
+        assert!(db.stats().files_rejected >= 1);
+        let rejected = db.stats().rejected_files.join("\n");
+        assert!(rejected.contains("dup-os"), "ID recorded: {rejected}");
+        assert!(rejected.contains("a.json"), "first source: {rejected}");
+        assert!(rejected.contains("b.json"), "conflict source: {rejected}");
+        // Same-pack duplicate: single bad file rejected.
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(
+            base.join("only.json"),
+            r#"{"schema_version": 1, "rules": [
+                {"id": "dup-os", "family": "Linux",
+                 "features": [{"source": "s", "pattern": "a", "weight": 10}],
+                 "confidence_cap": 80, "source": "t"},
+                {"id": "dup-os", "family": "Linux",
+                 "features": [{"source": "s", "pattern": "b", "weight": 10}],
+                 "confidence_cap": 80, "source": "t"}]}"#,
+        )
+        .unwrap();
+        let db = OsDb::load_from_dir(&base);
+        assert_eq!(db.rule_count(), 0);
+        assert!(db.stats().files_rejected >= 1);
+        // Valid distinct packs still load through the same production path.
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        write("a.json", "os-a", "alpha");
+        write("b.json", "os-b", "beta");
+        let db = OsDb::load_from_dir(&base);
+        assert_eq!(db.rule_count(), 2);
+        assert_eq!(db.stats().files_rejected, 0);
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
 

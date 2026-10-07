@@ -1,6 +1,12 @@
 use std::net::{IpAddr, Ipv4Addr};
 
+/// Linux ARP cache path. Only consulted on Linux; other platforms use
+/// capability-gated discovery and return `None` here (one controlled
+/// explanation upstream, never repeated failures).
+#[cfg(target_os = "linux")]
 pub const ARP_CACHE_PATH: &str = "/proc/net/arp";
+#[cfg(not(target_os = "linux"))]
+pub const ARP_CACHE_PATH: &str = "";
 pub const MAX_ARP_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,7 +23,15 @@ pub struct NeighborEntry {
 }
 
 pub fn lookup_arp_cache(target: Ipv4Addr) -> Option<NeighborEntry> {
-    lookup_arp_cache_at(ARP_CACHE_PATH, target)
+    #[cfg(target_os = "linux")]
+    {
+        lookup_arp_cache_at(ARP_CACHE_PATH, target)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = target;
+        None
+    }
 }
 
 pub(crate) fn lookup_arp_cache_at(path: &str, target: Ipv4Addr) -> Option<NeighborEntry> {

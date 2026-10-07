@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr};
+#[cfg(target_os = "linux")]
 use std::os::raw::{c_int, c_void};
 use std::sync::{Mutex, atomic::AtomicBool};
 use std::time::{Duration, Instant};
@@ -8,24 +9,38 @@ use crate::tcp_scanner::{
     NativeTcpScanner, PortProbe, PortScanner, PortState, ScanConfig, ScanOutcome,
 };
 
+#[cfg(target_os = "linux")]
 const AF_INET: c_int = 2;
+#[cfg(target_os = "linux")]
 const SOCK_RAW: c_int = 3;
+#[cfg(target_os = "linux")]
 const IPPROTO_TCP: c_int = 6;
+#[cfg(target_os = "linux")]
 const IPPROTO_ICMP: c_int = 1;
+#[cfg(target_os = "linux")]
 const IP_HDRINCL: c_int = 3;
+#[cfg(target_os = "linux")]
 const IPPROTO_IP: c_int = 0;
+#[cfg(target_os = "linux")]
 const SOL_SOCKET: c_int = 1;
+#[cfg(target_os = "linux")]
 const SO_RCVTIMEO: c_int = 20;
+#[cfg(target_os = "linux")]
 const EINTR: c_int = 4;
+#[cfg(target_os = "linux")]
 const EAGAIN: c_int = 11;
+#[cfg(target_os = "linux")]
 const EPERM: c_int = 1;
+#[cfg(target_os = "linux")]
 const EACCES: c_int = 13;
+#[cfg(target_os = "linux")]
 const POLLIN: i16 = 0x0001;
 
 pub const MAX_SYN_IN_FLIGHT_HARD: usize = 128;
 pub const DEFAULT_SYN_MIN_INTERVAL: Duration = Duration::from_micros(1000);
 pub const SYN_SEQ_BASE: u32 = 0x5258_0000;
 
+#[cfg(target_os = "linux")]
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct SockaddrIn {
@@ -35,6 +50,7 @@ struct SockaddrIn {
     sin_zero: [u8; 8],
 }
 
+#[cfg(target_os = "linux")]
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct PollFd {
@@ -43,6 +59,7 @@ struct PollFd {
     revents: i16,
 }
 
+#[cfg(target_os = "linux")]
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct Timeval {
@@ -50,6 +67,7 @@ struct Timeval {
     tv_usec: i64,
 }
 
+#[cfg(target_os = "linux")]
 unsafe extern "C" {
     fn socket(domain: c_int, ty: c_int, protocol: c_int) -> c_int;
     fn close(fd: c_int) -> c_int;
@@ -80,16 +98,20 @@ unsafe extern "C" {
     fn __errno_location() -> *mut c_int;
 }
 
+#[cfg(target_os = "linux")]
 fn last_errno() -> c_int {
     unsafe { *__errno_location() }
 }
 
+#[cfg(target_os = "linux")]
 struct OwnedFd(c_int);
+#[cfg(target_os = "linux")]
 impl OwnedFd {
     fn new(fd: c_int) -> Option<Self> {
         (fd >= 0).then_some(Self(fd))
     }
 }
+#[cfg(target_os = "linux")]
 impl Drop for OwnedFd {
     fn drop(&mut self) {
         unsafe {
@@ -304,6 +326,7 @@ pub fn local_address_for(dst: Ipv4Addr) -> Option<Ipv4Addr> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn open_raw_tcp() -> Result<OwnedFd, SynError> {
     let fd = unsafe { socket(AF_INET, SOCK_RAW, IPPROTO_TCP) };
     match OwnedFd::new(fd) {
@@ -329,10 +352,12 @@ fn open_raw_tcp() -> Result<OwnedFd, SynError> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn open_raw_icmp() -> Option<OwnedFd> {
     OwnedFd::new(unsafe { socket(AF_INET, SOCK_RAW, IPPROTO_ICMP) })
 }
 
+#[cfg(target_os = "linux")]
 fn set_timeout(fd: c_int, timeout: Duration) {
     let timeval = Timeval {
         tv_sec: timeout.as_secs() as i64,
@@ -459,6 +484,7 @@ impl PortScanner for SynScanner {
     }
 }
 
+#[cfg(target_os = "linux")]
 pub fn scan_syn(
     target: Ipv4Addr,
     ports: &[u16],
@@ -806,6 +832,20 @@ pub fn scan_syn(
         icmp_listening,
         pacing_log,
     })
+}
+
+/// Portable fallback: raw SYN is Linux-IPv4 only.
+#[cfg(not(target_os = "linux"))]
+pub fn scan_syn(
+    target: Ipv4Addr,
+    ports: &[u16],
+    config: &ScanConfig,
+    min_interval: Duration,
+) -> Result<SynOutcome, SynError> {
+    let _ = (target, ports, config, min_interval);
+    Err(SynError::Unavailable(
+        "raw SYN unavailable: Linux-only implementation in this build".to_owned(),
+    ))
 }
 
 #[cfg(test)]

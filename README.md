@@ -402,7 +402,7 @@ Known limitations include:
 - public-provider coverage is finite and providers change, block, or
   rate-limit without notice — verification states are in
   `rxscan search providers` and `docs/PROVIDER_CONTRACT.md`;
-- Windows and macOS are not currently supported targets for the RXScan CLI.
+- Windows/macOS portability is under development on master (see docs/PLATFORMS.md); released v1.0.2 remains Linux-only.
 
 RXScan is a young project. It should not be treated as having the protocol
 coverage, fingerprint corpus, platform breadth, or operational history of
@@ -425,12 +425,29 @@ It does not provide automatic:
 Network scanning should only be used against systems you own or are explicitly
 authorized to assess.
 
+## Platform support
+
+Released `v1.0.2`: Linux x86_64.
+
+Current `master` (development): portable core with explicit capability
+detection across Linux, Windows native, WSL, macOS, and Android/Termux.
+Restricted environments lose only genuinely unavailable capabilities
+(raw packet, privileged enumeration) with one controlled explanation and
+passive fallback. Active OS fingerprinting is experimental (see
+`docs/PLATFORMS.md`); Termux has no published archive yet. Linux x86_64 is
+locally runtime-tested. Windows x86_64 and macOS (Intel / Apple Silicon)
+have native CI configured with hosted validation pending and runtime
+unverified — not yet Supported.
+See `docs/PLATFORMS.md` for the matrix and `docs/INSTALLATION.md`
+for the easiest install route per platform. Do not treat master-only
+portability as part of `v1.0.2`.
+
 ## Building from source
 
 Requirements:
 
 - Rust 1.85 or newer
-- Linux for the currently supported runtime
+- See docs/BUILDING.md for configured targets (Linux x86_64 locally runtime-tested; others hosted validation pending)
 
 Build:
 
@@ -508,6 +525,10 @@ README is an index; details live in `docs/`:
 - [`docs/PROVIDER_CONTRACT.md`](docs/PROVIDER_CONTRACT.md) — verification states and evidence rules
 - [`docs/SEARCH_CORPUS.md`](docs/SEARCH_CORPUS.md) — dynamic counts and scale design
 - [`docs/TESTING.md`](docs/TESTING.md) — exact gates, local vs hosted CI
+- [`docs/PLATFORMS.md`](docs/PLATFORMS.md) — platform support matrix
+- [`docs/INSTALLATION.md`](docs/INSTALLATION.md) — easiest install per platform
+- [`docs/BUILDING.md`](docs/BUILDING.md) — configured build targets and evidence levels
+- [`docs/PACKAGING.md`](docs/PACKAGING.md) — artifacts and checksums
 - [`SECURITY.md`](SECURITY.md) — reporting, boundaries, non-goals
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — contribution requirements
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — planned work (not current capabilities)

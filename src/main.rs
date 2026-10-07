@@ -761,32 +761,17 @@ fn run_search_stats(args: &[String], offset: usize) {
     }
 }
 
-/// SIGINT reaches the real search scheduler (no new dependency).
+/// SIGINT reaches the real search scheduler via the shared platform
+/// process-cancellation state (no new dependency, no second handler).
 ///
-/// Process-lifetime cancellation: the CLI runs one search per process, so
-/// the flag is a `static` that outlives every stack frame — the handler can
-/// never observe a destroyed object, and there is no raw pointer whose own
-/// access would need synchronizing. The handler only performs one atomic
-/// store on this flag; it never allocates, locks, formats, or does I/O.
-/// Completed evidence survives cancellation via the normal scheduler drain
-/// path. Uses the already-linked libc `signal` symbol directly (Linux
-/// loopback CLI only; `AtomicBool` is lock-free on all supported targets).
-static SEARCH_CANCELLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-extern "C" fn search_cancel_handler(_: i32) {
-    SEARCH_CANCELLED.store(true, std::sync::atomic::Ordering::Release);
-}
-unsafe extern "C" {
-    fn signal(signum: i32, handler: usize) -> usize;
-}
+/// Process-lifetime latch lives in `rxscan::platform::process`: the OS
+/// handler performs exactly one atomic store (never allocates, locks,
+/// formats, or does I/O) on a `'static` `AtomicBool`. Completed evidence
+/// survives via the normal scheduler drain path. Installed once per
+/// process; re-installs only reset state so a previous search never leaks
+/// into the next one.
 fn install_search_cancel() {
-    // Reset stale state first: the handler is process-global, so a previous
-    // search in this process must not leak cancellation into the next one.
-    SEARCH_CANCELLED.store(false, std::sync::atomic::Ordering::Release);
-    // SIGINT = 2.
-    unsafe {
-        let _ = signal(2, search_cancel_handler as *const () as usize);
-    }
+    rxscan::platform::process::install_process_cancellation();
 }
 
 /// Build terminal enrichment + per-category coverage from the same core
@@ -1802,7 +1787,7 @@ fn run_search(args: &[String]) {
     // Cancellation reaches the real scheduler: SIGINT sets the
     // process-lifetime atomic the core polls; completed evidence survives.
     install_search_cancel();
-    let cancelled = &SEARCH_CANCELLED;
+    let cancelled = rxscan::platform::process::process_cancel_flag();
     // Restrained TTY progress (never into pipes/machine output, never faked).
     let progress_caps = resolve_human_caps(args);
     let show_progress = progress_caps.tty && progress_caps.color && !json && !jsonl;
@@ -3801,7 +3786,7 @@ fn run_web(args: &[String]) {
     let options = rxscan::web_api::WebOptions {
         bind,
         port,
-        data_dir: data_dir.unwrap_or_else(|| std::path::PathBuf::from(".rxscan-web")),
+        data_dir: rxscan::platform::paths::resolve_web_data_dir(data_dir),
         allow_remote,
         fixture_investigation: false,
     };
@@ -3834,46 +3819,13 @@ fn run_web(args: &[String]) {
 
 /// Best-effort default-browser open for `rxscan web`.
 ///
-/// Only attempts when stdout is an interactive terminal (or the caller
-/// explicitly runs in the foreground); headless/CI sessions skip quietly.
-/// Any failure is silent: the server is already listening and usable.
+/// Delegates to the portable platform opener (macOS `open`, Windows
+/// `cmd /c start`, Linux openers, WSL powershell fallback, Termux
+/// opener). Only attempts on interactive terminals; any failure is
+/// silent since the server is already usable.
 #[allow(clippy::zombie_processes)]
 fn maybe_open_browser(base_url: &str) {
-    use std::io::IsTerminal;
-    if !std::io::stdout().is_terminal() {
-        return;
-    }
-    if std::env::var_os("NO_BROWSER").is_some() {
-        return;
-    }
-    let url = format!("{base_url}/");
-    let attempts: &[&[&str]] = if cfg!(target_os = "macos") {
-        &[&["open", &url]]
-    } else if cfg!(target_os = "windows") {
-        &[&["cmd", "/c", "start", "", &url]]
-    } else {
-        &[
-            &["xdg-open", &url],
-            &["sensible-browser", &url],
-            &["gio", "open", &url],
-        ]
-    };
-    for attempt in attempts {
-        let mut command = std::process::Command::new(attempt[0]);
-        for arg in &attempt[1..] {
-            command.arg(arg);
-        }
-        // Detached, silent: never block the server on the opener.
-        match command
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            Ok(_) => return,
-            Err(_) => continue,
-        }
-    }
+    rxscan::platform::process::open_browser(base_url);
 }
 
 /// Defensive exposure intelligence (`rxscan exposure ...`).

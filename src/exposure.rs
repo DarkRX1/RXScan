@@ -758,9 +758,11 @@ impl ExposureProvider for HttpApiProvider {
             .no_proxy()
             .build()
             .map_err(|error| ExposureError::Unavailable(error.to_string()))?;
-        // Endpoint validation: HTTPS only, no loopback/private literals.
-        // (Full SSRF pinning mirrors the search client for configured
-        // hosts; exotic endpoints are refused rather than weakened.)
+        // Endpoint validation: HTTPS only. The endpoint is operator-configured
+        // (explicit `RXSCAN_EXPOSURE_ENDPOINT`); no private/loopback denial
+        // is claimed here — the operator trusts the configured host. The
+        // identifier is sent as a query parameter only to that configured
+        // host, disclosed via `sends_identifier=true` and `--explain`.
         let mut url = url::Url::parse(&endpoint)
             .map_err(|_| ExposureError::Unavailable("invalid endpoint".to_owned()))?;
         if url.scheme() != "https" {
@@ -834,6 +836,18 @@ impl ExposureProvider for HttpApiProvider {
         Ok((out, dropped))
     }
 }
+
+// ---------------------------------------------------------------------------
+// Email context lives in the investigation transform layer, not exposure.
+//
+// `email_to_mail_infra` (DNS MX/TXT, opt-in) and `search.entity.email_to_username`
+// (local-part `UsesUsername` candidate, confidence 60, `Possible`, never a
+// verdict) already model derived email context truthfully as `References` /
+// `derived` evidence. A local transformation must never become a
+// `Breach` exposure, must never claim `DnsQuery` without a query, and must
+// never inflate `exposures_found` merely because an email parses.
+// No email ExposureProvider ships here by design.
+// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Engine: bounded, exact accounting, secret-free.
@@ -1534,5 +1548,38 @@ mod tests {
             ],
         );
         assert!(!jsonl.contains('\x1b'));
+    }
+
+    #[test]
+    fn clean_email_creates_no_breach() {
+        // Local email parsing must never become a Breach exposure.
+        // Derived context lives in investigation transforms, not exposure.
+        let providers: Vec<Box<dyn ExposureProvider>> = Vec::new();
+        let cancelled = AtomicBool::new(false);
+        let report = run_exposure(
+            "user@example.test",
+            IdentifierKind::Email,
+            &providers,
+            Duration::from_secs(5),
+            &cancelled,
+        );
+        assert!(report.exposures.is_empty());
+        assert_eq!(report.accounting.exposures_found, 0);
+        assert!(report.accounting.check_invariant().is_ok());
+    }
+
+    #[test]
+    fn exposure_capabilities_claim_no_dns_without_query() {
+        // No shipped provider may claim DnsQuery while performing no query,
+        // and no email capability may exist in exposure.
+        for (id, _, _) in capability_entries() {
+            assert_ne!(id, "exposure_email_domain_context");
+            assert_ne!(id, "exposure_email_public_reference");
+        }
+        // Investigation owns derived email context truthfully:
+        // email_to_mail_infra does DNS, email local-part is a Possible hint.
+        let mail = crate::investigate::EmailToMailInfra;
+        use crate::investigate::Transform;
+        assert_eq!(mail.contact_class(), crate::search::ContactClass::DnsQuery);
     }
 }

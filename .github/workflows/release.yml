@@ -1,0 +1,144 @@
+name: Release artifacts
+
+# Release automation (no auto-publish). Runs on version tags (v*.*.*) or
+# manual dispatch. Historical tags v1.0.0/v1.0.1/v1.0.2 are never rebuilt or
+# moved; this workflow only builds the *current* tag. Manual dispatches
+# produce `manual-*` artifacts that never masquerade as tagged releases.
+# Publishing to package managers requires explicit maintainer authorization
+# and is not performed here.
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Tag/version consistency (structured, no grep)
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME:-manual}"
+          VERSION="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          echo "tag=$TAG version=$VERSION"
+          if [[ "$TAG" == v* ]]; then
+            test "v$VERSION" = "$TAG" || (echo "tag $TAG != Cargo version v$VERSION" && exit 1)
+          else
+            echo "manual/dispatch build: artifacts will be named manual-* and are not releases"
+          fi
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.85.0
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      - run: cargo test --locked
+      - run: git diff --check
+      - run: cargo run --locked -- search lint
+
+  build:
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: rxscan-linux-x86_64.tar.gz
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact: rxscan-linux-aarch64.tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: rxscan-windows-x86_64.zip
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: rxscan-macos-x86_64.tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: rxscan-macos-aarch64.tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.85.0
+          targets: ${{ matrix.target }}
+      - run: cargo build --locked --release --target ${{ matrix.target }}
+      # Upload raw binary only; deterministic packaging happens once on
+      # Linux (see `package` job) so Windows/macOS runners never need
+      # zip/sha256sum/Bash dialects.
+      - name: Stage raw binary
+        shell: bash
+        run: |
+          mkdir -p raw/${{ matrix.target }}/release
+          if [[ "${{ matrix.target }}" == *windows* ]]; then
+            cp "target/${{ matrix.target }}/release/rxscan.exe" "raw/${{ matrix.target }}/release/"
+          else
+            cp "target/${{ matrix.target }}/release/rxscan" "raw/${{ matrix.target }}/release/"
+          fi
+          ls -l "raw/${{ matrix.target }}/release"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: raw-${{ matrix.target }}
+          path: raw/${{ matrix.target }}/release/rxscan*
+
+  package:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download raw binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: raw-*
+          path: _raw
+          merge-multiple: false
+      - name: Reconstruct target layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          for d in _raw/raw-*/; do
+            target="$(basename "$d" | sed 's/^raw-//')"
+            mkdir -p "target/$target/release"
+            cp "$d"/release/rxscan* "target/$target/release/"
+          done
+          ls -R target | head -n 50
+      - name: Package artifacts (single Bash env)
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME:-manual}"
+          if [[ "$TAG" == v* ]]; then
+            PREFIX=""
+          else
+            PREFIX="manual-"
+            echo "manual build: prefixing artifacts with manual-"
+          fi
+          mkdir -p dist
+          bash scripts/package-artifact.sh x86_64-unknown-linux-gnu "${PREFIX}rxscan-linux-x86_64.tar.gz"
+          bash scripts/package-artifact.sh aarch64-unknown-linux-gnu "${PREFIX}rxscan-linux-aarch64.tar.gz"
+          bash scripts/package-artifact.sh x86_64-pc-windows-msvc "${PREFIX}rxscan-windows-x86_64.zip"
+          bash scripts/package-artifact.sh x86_64-apple-darwin "${PREFIX}rxscan-macos-x86_64.tar.gz"
+          bash scripts/package-artifact.sh aarch64-apple-darwin "${PREFIX}rxscan-macos-aarch64.tar.gz"
+          ls -l dist
+      - name: Checksums (Linux sha256sum guaranteed here)
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum -- *) | tee dist/SHA256SUMS
+          cat dist/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rxscan-artifacts
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS

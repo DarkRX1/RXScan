@@ -13,100 +13,109 @@
 //! deadline, and immediate FD cleanup. Results return sorted by port for
 //! deterministic output.
 
-use std::collections::{BTreeMap, VecDeque};
+#[cfg(target_os = "linux")]
+use std::collections::BTreeMap;
+use std::collections::VecDeque;
 use std::net::IpAddr;
-use std::os::raw::{c_int, c_void};
 use std::time::{Duration, Instant};
 
 use crate::execution::CancellationToken;
 
-// ---- libc constants (Linux/Athena/Arch; other platforms degrade to Error) ---
-const AF_INET: c_int = 2;
-const AF_INET6: c_int = 10;
-const SOCK_STREAM: c_int = 1;
-const IPPROTO_TCP: c_int = 6;
-const F_GETFL: c_int = 3;
-const F_SETFL: c_int = 4;
-const O_NONBLOCK: c_int = 2048;
-const EINPROGRESS: c_int = 115;
-const EINTR: c_int = 4;
-const EAGAIN: c_int = 11;
-const ECONNREFUSED: c_int = 111;
-const ECONNRESET: c_int = 104;
-const ETIMEDOUT: c_int = 110;
-const EHOSTUNREACH: c_int = 113;
-const ENETUNREACH: c_int = 101;
-const EACCES: c_int = 13;
-const EPERM: c_int = 1;
-const EMFILE: c_int = 24;
-const ENFILE: c_int = 23;
-const ENOMEM: c_int = 12;
-const POLLOUT: i16 = 0x0004;
-const POLLERR: i16 = 0x0008;
-const POLLHUP: i16 = 0x0010;
-const SOL_SOCKET: c_int = 1;
-const SO_ERROR: c_int = 4;
+// ---- Linux raw constants (Linux-only; other platforms use the portable
+// ---- std fallback below and never link these symbols) ---
+#[cfg(target_os = "linux")]
+mod linux_raw {
+    use std::os::raw::{c_int, c_void};
+    pub use std::os::raw::{c_int as CInt, c_void as CVoid};
+    pub const AF_INET: c_int = 2;
+    pub const AF_INET6: c_int = 10;
+    pub const SOCK_STREAM: c_int = 1;
+    pub const IPPROTO_TCP: c_int = 6;
+    pub const F_GETFL: c_int = 3;
+    pub const F_SETFL: c_int = 4;
+    pub const O_NONBLOCK: c_int = 2048;
+    pub const EINPROGRESS: c_int = 115;
+    pub const EINTR: c_int = 4;
+    pub const EAGAIN: c_int = 11;
+    pub const ECONNREFUSED: c_int = 111;
+    pub const ECONNRESET: c_int = 104;
+    pub const ETIMEDOUT: c_int = 110;
+    pub const EHOSTUNREACH: c_int = 113;
+    pub const ENETUNREACH: c_int = 101;
+    pub const EACCES: c_int = 13;
+    pub const EPERM: c_int = 1;
+    pub const EMFILE: c_int = 24;
+    pub const ENFILE: c_int = 23;
+    pub const ENOMEM: c_int = 12;
+    pub const POLLOUT: i16 = 0x0004;
+    pub const POLLERR: i16 = 0x0008;
+    pub const POLLHUP: i16 = 0x0010;
+    pub const SOL_SOCKET: c_int = 1;
+    pub const SO_ERROR: c_int = 4;
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-struct SockaddrIn {
-    sin_family: u16,
-    sin_port: u16,
-    sin_addr: [u8; 4],
-    sin_zero: [u8; 8],
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-struct SockaddrIn6 {
-    sin6_family: u16,
-    sin6_port: u16,
-    sin6_flowinfo: u32,
-    sin6_addr: [u8; 16],
-    sin6_scope_id: u32,
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-struct PollFd {
-    fd: c_int,
-    events: i16,
-    revents: i16,
-}
-
-unsafe extern "C" {
-    fn socket(domain: c_int, ty: c_int, protocol: c_int) -> c_int;
-    fn close(fd: c_int) -> c_int;
-    fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int;
-    fn connect(fd: c_int, addr: *const c_void, len: u32) -> c_int;
-    fn poll(fds: *mut PollFd, nfds: u64, timeout: c_int) -> c_int;
-    fn getsockopt(
-        fd: c_int,
-        level: c_int,
-        optname: c_int,
-        optval: *mut c_void,
-        optlen: *mut u32,
-    ) -> c_int;
-    fn __errno_location() -> *mut c_int;
-}
-
-fn last_errno() -> c_int {
-    unsafe { *__errno_location() }
-}
-
-struct OwnedFd(c_int);
-impl OwnedFd {
-    fn new(fd: c_int) -> Option<Self> {
-        (fd >= 0).then_some(Self(fd))
+    #[repr(C)]
+    #[derive(Debug, Clone, Copy)]
+    pub struct SockaddrIn {
+        pub sin_family: u16,
+        pub sin_port: u16,
+        pub sin_addr: [u8; 4],
+        pub sin_zero: [u8; 8],
     }
-}
-impl Drop for OwnedFd {
-    fn drop(&mut self) {
-        unsafe {
-            close(self.0);
+
+    #[repr(C)]
+    #[derive(Debug, Clone, Copy)]
+    pub struct SockaddrIn6 {
+        pub sin6_family: u16,
+        pub sin6_port: u16,
+        pub sin6_flowinfo: u32,
+        pub sin6_addr: [u8; 16],
+        pub sin6_scope_id: u32,
+    }
+
+    #[repr(C)]
+    #[derive(Debug, Clone, Copy)]
+    pub struct PollFd {
+        pub fd: c_int,
+        pub events: i16,
+        pub revents: i16,
+    }
+
+    unsafe extern "C" {
+        pub fn socket(domain: c_int, ty: c_int, protocol: c_int) -> c_int;
+        pub fn close(fd: c_int) -> c_int;
+        pub fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int;
+        pub fn connect(fd: c_int, addr: *const c_void, len: u32) -> c_int;
+        pub fn poll(fds: *mut PollFd, nfds: u64, timeout: c_int) -> c_int;
+        pub fn getsockopt(
+            fd: c_int,
+            level: c_int,
+            optname: c_int,
+            optval: *mut c_void,
+            optlen: *mut u32,
+        ) -> c_int;
+        pub fn __errno_location() -> *mut c_int;
+    }
+
+    pub fn last_errno() -> c_int {
+        unsafe { *__errno_location() }
+    }
+
+    pub struct OwnedFd(pub c_int);
+    impl OwnedFd {
+        pub fn new(fd: c_int) -> Option<Self> {
+            (fd >= 0).then_some(Self(fd))
+        }
+    }
+    impl Drop for OwnedFd {
+        fn drop(&mut self) {
+            unsafe {
+                close(self.0);
+            }
         }
     }
 }
+#[cfg(target_os = "linux")]
+use linux_raw::*;
 
 /// Explicit per-port conclusion. Timeouts stay distinct from closed.
 /// `FilteredOrTimedOut` is the legacy connect-scan label for silence;
@@ -235,6 +244,7 @@ impl PortScanner for NativeTcpScanner {
     }
 }
 
+#[cfg(target_os = "linux")]
 struct Pending {
     port: u16,
     #[allow(dead_code)]
@@ -244,6 +254,7 @@ struct Pending {
     attempts: u32,
 }
 
+#[cfg(target_os = "linux")]
 fn sockaddr_for(ip: &IpAddr, port: u16) -> (Vec<u8>, u32) {
     match ip {
         IpAddr::V4(v4) => {
@@ -282,7 +293,8 @@ fn sockaddr_for(ip: &IpAddr, port: u16) -> (Vec<u8>, u32) {
     }
 }
 
-fn set_nonblocking(fd: c_int) -> bool {
+#[cfg(target_os = "linux")]
+fn set_nonblocking(fd: CInt) -> bool {
     unsafe {
         let flags = fcntl(fd, F_GETFL, 0);
         if flags < 0 {
@@ -292,21 +304,23 @@ fn set_nonblocking(fd: c_int) -> bool {
     }
 }
 
-fn socket_error(fd: c_int) -> c_int {
-    let mut error: c_int = 0;
-    let mut length = size_of::<c_int>() as u32;
+#[cfg(target_os = "linux")]
+fn socket_error(fd: CInt) -> CInt {
+    let mut error: CInt = 0;
+    let mut length = size_of::<CInt>() as u32;
     unsafe {
         getsockopt(
             fd,
             SOL_SOCKET,
             SO_ERROR,
-            &mut error as *mut c_int as *mut c_void,
+            &mut error as *mut CInt as *mut CVoid,
             &mut length,
         );
     }
     error
 }
 
+#[cfg(target_os = "linux")]
 #[allow(clippy::too_many_lines)]
 fn scan_ports_nonblocking(ip: IpAddr, ports: &[u16], config: &ScanConfig) -> ScanOutcome {
     // Normalize deterministically; port 0 never scanned.
@@ -318,7 +332,7 @@ fn scan_ports_nonblocking(ip: IpAddr, ports: &[u16], config: &ScanConfig) -> Sca
     };
     let total = queue.len();
     let mut probes: Vec<PortProbe> = Vec::with_capacity(total.min(1024));
-    let mut pending: BTreeMap<c_int, Pending> = BTreeMap::new();
+    let mut pending: BTreeMap<CInt, Pending> = BTreeMap::new();
     let mut truncated = false;
     let mut cancelled = false;
     // Phase 19: peak in-flight socket observability (O(1) counter).
@@ -395,7 +409,7 @@ fn scan_ports_nonblocking(ip: IpAddr, ports: &[u16], config: &ScanConfig) -> Sca
             let (addr_bytes, addr_len) = sockaddr_for(&ip, port);
             let started = Instant::now();
             let port_deadline = started + config.timeout;
-            let result = unsafe { connect(fd.0, addr_bytes.as_ptr() as *const c_void, addr_len) };
+            let result = unsafe { connect(fd.0, addr_bytes.as_ptr() as *const CVoid, addr_len) };
             if result == 0 {
                 let latency = started.elapsed();
                 probes.push(PortProbe {
@@ -435,7 +449,7 @@ fn scan_ports_nonblocking(ip: IpAddr, ports: &[u16], config: &ScanConfig) -> Sca
                 e if e == EINTR => {
                     // Single immediate retry for interrupted connects.
                     let retry =
-                        unsafe { connect(fd.0, addr_bytes.as_ptr() as *const c_void, addr_len) };
+                        unsafe { connect(fd.0, addr_bytes.as_ptr() as *const CVoid, addr_len) };
                     if retry == 0 {
                         probes.push(PortProbe {
                             port,
@@ -486,7 +500,7 @@ fn scan_ports_nonblocking(ip: IpAddr, ports: &[u16], config: &ScanConfig) -> Sca
             .saturating_duration_since(now)
             .min(Duration::from_millis(25))
             .as_millis()
-            .min(c_int::MAX as u128) as c_int;
+            .min(CInt::MAX as u128) as CInt;
         let mut poll_fds: Vec<PollFd> = pending
             .keys()
             .map(|fd| PollFd {
@@ -512,12 +526,12 @@ fn scan_ports_nonblocking(ip: IpAddr, ports: &[u16], config: &ScanConfig) -> Sca
             }
             // Poll failure degrades to per-port timeout handling below.
         }
-        let ready_map: BTreeMap<c_int, i16> = poll_fds
+        let ready_map: BTreeMap<CInt, i16> = poll_fds
             .iter()
             .map(|item| (item.fd, item.revents))
             .collect();
         let now = Instant::now();
-        let mut finished: Vec<c_int> = Vec::new();
+        let mut finished: Vec<CInt> = Vec::new();
         let mut to_retry: Vec<(u16, u32)> = Vec::new();
         for (fd, item) in pending.iter() {
             let revents = ready_map.get(fd).copied().unwrap_or(0);
@@ -628,10 +642,11 @@ fn scan_ports_nonblocking(ip: IpAddr, ports: &[u16], config: &ScanConfig) -> Sca
     }
 }
 
+#[cfg(target_os = "linux")]
 fn classify_immediate(
     ip: IpAddr,
     port: u16,
-    errno: c_int,
+    errno: CInt,
     started: Instant,
     attempts: u32,
 ) -> PortProbe {
@@ -677,9 +692,247 @@ fn classify_immediate(
     }
 }
 
+/// Portable fallback for Windows/macOS/other: bounded worker-pool
+/// `TcpStream::connect_timeout` per port. Same evidence semantics
+/// (Open/Closed/FilteredOrTimedOut/Error) via normalized errors; no raw
+/// `poll(2)` linkage required.
+///
+/// Concurrency: `min(config.max_concurrent, 32)` workers pull from a shared
+/// queue (no thread-per-port, bounded FD use). Results sorted for
+/// determinism; cancellation/deadline checked before each port and retry.
+#[cfg(not(target_os = "linux"))]
+fn scan_ports_nonblocking(ip: IpAddr, ports: &[u16], config: &ScanConfig) -> ScanOutcome {
+    scan_ports_portable_with_connector(ip, ports, config, &StdTcpConnector)
+}
+
+/// Injectable TCP connector for portable scans (production + tests).
+/// Available on all platforms so Linux tests can prove the portable
+/// worker-pool logic without raw sockets or external network.
+pub trait TcpConnector: Send + Sync {
+    fn connect(
+        &self,
+        addr: std::net::SocketAddr,
+        timeout: Duration,
+    ) -> std::io::Result<std::net::TcpStream>;
+}
+
+/// Production connector: std `connect_timeout` via the platform helper.
+pub struct StdTcpConnector;
+
+impl TcpConnector for StdTcpConnector {
+    fn connect(
+        &self,
+        addr: std::net::SocketAddr,
+        timeout: Duration,
+    ) -> std::io::Result<std::net::TcpStream> {
+        crate::platform::network::tcp_connect(addr, timeout)
+    }
+}
+
+#[allow(dead_code)]
+fn scan_ports_portable_with_connector(
+    ip: IpAddr,
+    ports: &[u16],
+    config: &ScanConfig,
+    connector: &dyn TcpConnector,
+) -> ScanOutcome {
+    // Allowed dead on Linux production (tested via unit tests); used on
+    // Windows/macOS/other.
+    use std::collections::VecDeque;
+    use std::net::SocketAddr;
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+    let mut sorted: Vec<u16> = ports.iter().copied().filter(|port| *port > 0).collect();
+    sorted.sort_unstable();
+    sorted.dedup();
+    if sorted.is_empty() {
+        return ScanOutcome {
+            probes: Vec::new(),
+            truncated: false,
+            cancelled: false,
+            unscanned: 0,
+            fd_peak: 0,
+        };
+    }
+    let workers = config.max_concurrent.clamp(1, 32);
+    let queue = Mutex::new(sorted.into_iter().collect::<VecDeque<u16>>());
+    let probes = Mutex::new(Vec::new());
+    let unscanned = AtomicUsize::new(0);
+    let saw_cancelled = AtomicBool::new(false);
+    let saw_truncated = AtomicBool::new(false);
+    let queue_ref = &queue;
+    let probes_ref = &probes;
+    let unscanned_ref = &unscanned;
+    let saw_cancelled_ref = &saw_cancelled;
+    let saw_truncated_ref = &saw_truncated;
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(move || {
+                loop {
+                    // Poison recovery: the queue holds only port numbers, so a
+                    // poisoned mutex remains structurally valid. Recover the
+                    // guard and keep draining instead of abandoning queued
+                    // work. An unexpected worker programmer panic still
+                    // propagates via `thread::scope` (no catch_unwind, no
+                    // fabricated network evidence).
+                    let port = queue_ref
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .pop_front();
+                    let Some(port) = port else { return };
+                    if config.cancel.is_cancelled() {
+                        saw_cancelled_ref.store(true, Ordering::Release);
+                        saw_truncated_ref.store(true, Ordering::Release);
+                        unscanned_ref.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+                    if config.deadline.is_some_and(|d| Instant::now() >= d) {
+                        saw_truncated_ref.store(true, Ordering::Release);
+                        unscanned_ref.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+                    let addr = SocketAddr::new(ip, port);
+                    // Per-attempt timeout clamped to remaining global budget.
+                    let remaining = config
+                        .deadline
+                        .map(|d| d.saturating_duration_since(Instant::now()));
+                    if remaining.is_some_and(|r| r.is_zero()) {
+                        saw_truncated_ref.store(true, Ordering::Release);
+                        unscanned_ref.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+                    let mut timeout = config.timeout;
+                    if let Some(remaining) = remaining {
+                        timeout = timeout.min(remaining);
+                    }
+                    let started = Instant::now();
+                    let mut attempts: u32 = 1;
+                    loop {
+                        if config.cancel.is_cancelled() {
+                            saw_cancelled_ref.store(true, Ordering::Release);
+                            saw_truncated_ref.store(true, Ordering::Release);
+                            unscanned_ref.fetch_add(1, Ordering::Relaxed);
+                            break;
+                        }
+                        if config.deadline.is_some_and(|d| Instant::now() >= d) {
+                            saw_truncated_ref.store(true, Ordering::Release);
+                            unscanned_ref.fetch_add(1, Ordering::Relaxed);
+                            break;
+                        }
+                        match connector.connect(addr, timeout) {
+                            Ok(stream) => {
+                                drop(stream);
+                                let mut guard = probes_ref.lock().unwrap_or_else(|e| e.into_inner());
+                                guard.push(PortProbe {
+                                    port,
+                                    state: PortState::Open,
+                                    latency: started.elapsed(),
+                                    detail: format!("TCP connect to {ip}:{port} succeeded"),
+                                    attempts,
+                                });
+                                break;
+                            }
+                            Err(error) => {
+                                let category =
+                                    crate::platform::network::normalize_io_error(&error);
+                                match category {
+                                    crate::execution::ErrorCategory::ConnectionRefused => {
+                                        let mut guard =
+                                            probes_ref.lock().unwrap_or_else(|e| e.into_inner());
+                                        guard.push(PortProbe {
+                                            port,
+                                            state: PortState::Closed,
+                                            latency: started.elapsed(),
+                                            detail: format!(
+                                                "TCP connection refused on {ip}:{port}; host responded, port closed"
+                                            ),
+                                            attempts,
+                                        });
+                                        break;
+                                    }
+                                    crate::execution::ErrorCategory::ConnectTimeout => {
+                                        if attempts <= config.max_retries {
+                                            attempts += 1;
+                                            // Re-clamp retry timeout to remaining budget.
+                                            if let Some(d) = config.deadline {
+                                                let rem =
+                                                    d.saturating_duration_since(Instant::now());
+                                                if rem.is_zero() {
+                                                    saw_truncated_ref.store(
+                                                        true,
+                                                        Ordering::Release,
+                                                    );
+                                                    unscanned_ref.fetch_add(1, Ordering::Relaxed);
+                                                    break;
+                                                }
+                                                timeout = config.timeout.min(rem);
+                                            }
+                                            continue;
+                                        }
+                                        let mut guard =
+                                            probes_ref.lock().unwrap_or_else(|e| e.into_inner());
+                                        guard.push(PortProbe {
+                                            port,
+                                            state: PortState::FilteredOrTimedOut,
+                                            latency: started.elapsed(),
+                                            detail: format!(
+                                                "TCP connect to {ip}:{port} timed out after {}ms",
+                                                timeout.as_millis()
+                                            ),
+                                            attempts,
+                                        });
+                                        break;
+                                    }
+                                    _ => {
+                                        let mut guard =
+                                            probes_ref.lock().unwrap_or_else(|e| e.into_inner());
+                                        guard.push(PortProbe {
+                                            port,
+                                            state: PortState::Error,
+                                            latency: started.elapsed(),
+                                            detail: format!(
+                                                "TCP connect to {ip}:{port} failed ({category}): {error}"
+                                            ),
+                                            attempts,
+                                        });
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    });
+    // Recover collected probes on poison (structurally valid Vec); never
+    // discard completed evidence.
+    let mut probes = probes.into_inner().unwrap_or_else(|e| e.into_inner());
+    probes.sort_by_key(|probe| probe.port);
+    let unscanned = unscanned.load(Ordering::Relaxed);
+    let cancelled = saw_cancelled.load(Ordering::Acquire);
+    let truncated = saw_truncated.load(Ordering::Acquire) || unscanned > 0;
+    // Exact accounting preserved: probes + unscanned == requested is
+    // maintained by counting deadline/cancel before-start as unscanned.
+    // Retry-denied mid-port paths also count as unscanned above.
+    ScanOutcome {
+        probes,
+        truncated,
+        cancelled,
+        unscanned,
+        fd_peak: workers,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     #[test]
     fn states_stay_distinct() {
@@ -711,5 +964,214 @@ mod tests {
             "unexpected {:?}",
             outcome.probes[0]
         );
+    }
+
+    /// Mock connector for portable worker-pool proofs (no external network).
+    struct MockConnector {
+        active: Arc<AtomicUsize>,
+        max_active: Arc<AtomicUsize>,
+        delay: Duration,
+        mode: MockMode,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum MockMode {
+        Timeout,
+        Refused,
+    }
+
+    impl TcpConnector for MockConnector {
+        fn connect(
+            &self,
+            _addr: std::net::SocketAddr,
+            _timeout: Duration,
+        ) -> std::io::Result<std::net::TcpStream> {
+            let cur = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(cur, Ordering::SeqCst);
+            std::thread::sleep(self.delay);
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            match self.mode {
+                MockMode::Timeout => Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "mock timeout",
+                )),
+                MockMode::Refused => Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionRefused,
+                    "mock refused",
+                )),
+            }
+        }
+    }
+
+    fn portable_config(timeout_ms: u64, concurrency: usize, retries: u32) -> ScanConfig {
+        ScanConfig::bounded(
+            Duration::from_millis(timeout_ms),
+            concurrency,
+            retries,
+            None,
+            CancellationToken::default(),
+        )
+    }
+
+    #[test]
+    fn portable_progress_is_concurrent_not_sequential() {
+        // 8 slow ports with 4 workers must overlap; sequential would keep
+        // max_active==1. Synchronization proof, not wall-clock threshold.
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let connector = MockConnector {
+            active: active.clone(),
+            max_active: max_active.clone(),
+            delay: Duration::from_millis(150),
+            mode: MockMode::Timeout,
+        };
+        let config = portable_config(1000, 8, 0);
+        let ip: IpAddr = "192.0.2.10".parse().unwrap();
+        let ports: Vec<u16> = (1..=8).collect();
+        let outcome = scan_ports_portable_with_connector(ip, &ports, &config, &connector);
+        assert_eq!(outcome.probes.len(), 8);
+        assert_eq!(outcome.unscanned, 0);
+        assert!(
+            max_active.load(Ordering::SeqCst) >= 2,
+            "expected concurrent progress, max_active={}",
+            max_active.load(Ordering::SeqCst)
+        );
+        // Deterministic ordering despite concurrency.
+        let sorted = outcome.probes.iter().map(|p| p.port).collect::<Vec<_>>();
+        let mut expected = sorted.clone();
+        expected.sort_unstable();
+        assert_eq!(sorted, expected);
+        // Timeouts never become Open/Closed.
+        assert!(
+            outcome
+                .probes
+                .iter()
+                .all(|p| p.state == PortState::FilteredOrTimedOut)
+        );
+    }
+
+    #[test]
+    fn portable_timeout_does_not_take_sequential_duration() {
+        // 4×300ms timeouts with 4 workers must finish well under sequential
+        // 1200ms. Generous 1000ms bound avoids flakiness while still catching
+        // sequential regression (1200ms+).
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let connector = MockConnector {
+            active,
+            max_active,
+            delay: Duration::from_millis(300),
+            mode: MockMode::Timeout,
+        };
+        let config = portable_config(300, 4, 0);
+        let ip: IpAddr = "192.0.2.10".parse().unwrap();
+        let start = Instant::now();
+        let outcome =
+            scan_ports_portable_with_connector(ip, &[1001, 1002, 1003, 1004], &config, &connector);
+        let elapsed = start.elapsed();
+        assert_eq!(outcome.probes.len(), 4);
+        assert!(
+            elapsed < Duration::from_millis(1000),
+            "portable took {elapsed:?}, expected concurrent (<1000ms for 4×300ms)"
+        );
+    }
+
+    #[test]
+    fn portable_closed_never_retries_and_timeout_retries_once() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let refused = MockConnector {
+            active: active.clone(),
+            max_active: max_active.clone(),
+            delay: Duration::from_millis(5),
+            mode: MockMode::Refused,
+        };
+        let config = portable_config(500, 4, 1);
+        let ip: IpAddr = "192.0.2.10".parse().unwrap();
+        let outcome = scan_ports_portable_with_connector(ip, &[80], &config, &refused);
+        assert_eq!(outcome.probes[0].state, PortState::Closed);
+        assert_eq!(outcome.probes[0].attempts, 1, "refused must not retry");
+
+        let timeout = MockConnector {
+            active,
+            max_active,
+            delay: Duration::from_millis(5),
+            mode: MockMode::Timeout,
+        };
+        let outcome = scan_ports_portable_with_connector(ip, &[81], &config, &timeout);
+        assert_eq!(outcome.probes[0].state, PortState::FilteredOrTimedOut);
+        assert_eq!(outcome.probes[0].attempts, 2, "timeout retries once");
+    }
+
+    #[test]
+    fn portable_cancellation_and_deadline_preserve_accounting() {
+        // Cancelled before start: all unscanned.
+        let cancel = CancellationToken::default();
+        cancel.cancel();
+        let config = ScanConfig::bounded(Duration::from_millis(300), 4, 0, None, cancel);
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let connector = MockConnector {
+            active,
+            max_active,
+            delay: Duration::from_millis(5),
+            mode: MockMode::Timeout,
+        };
+        let ip: IpAddr = "192.0.2.10".parse().unwrap();
+        let outcome = scan_ports_portable_with_connector(ip, &[80, 81, 82], &config, &connector);
+        assert!(outcome.cancelled);
+        assert_eq!(outcome.unscanned, 3);
+        assert!(outcome.probes.is_empty());
+
+        // Past deadline: all unscanned, truncated.
+        let config = ScanConfig::bounded(
+            Duration::from_millis(300),
+            4,
+            0,
+            Some(Instant::now() - Duration::from_millis(10)),
+            CancellationToken::default(),
+        );
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let connector = MockConnector {
+            active,
+            max_active,
+            delay: Duration::from_millis(5),
+            mode: MockMode::Timeout,
+        };
+        let outcome = scan_ports_portable_with_connector(ip, &[80, 81], &config, &connector);
+        assert_eq!(outcome.unscanned, 2);
+        assert!(outcome.truncated);
+        assert_eq!(outcome.probes.len() + outcome.unscanned, 2);
+    }
+
+    #[test]
+    fn portable_open_and_closed_on_loopback() {
+        // Real loopback: listener is Open, free port is Closed/Error.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let open = listener.local_addr().unwrap().port();
+        let closed = {
+            let s = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let p = s.local_addr().unwrap().port();
+            drop(s);
+            p
+        };
+        let config = portable_config(800, 8, 0);
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+        let outcome =
+            scan_ports_portable_with_connector(ip, &[open, closed], &config, &StdTcpConnector);
+        assert_eq!(outcome.probes.len(), 2);
+        let by_port: std::collections::BTreeMap<u16, PortState> =
+            outcome.probes.iter().map(|p| (p.port, p.state)).collect();
+        assert_eq!(by_port.get(&open), Some(&PortState::Open));
+        assert!(matches!(
+            by_port.get(&closed),
+            Some(PortState::Closed) | Some(PortState::Error)
+        ));
+        // IPv6 loopback where available: refused or error, never panic.
+        let config = portable_config(400, 4, 0);
+        let ip6: IpAddr = "::1".parse().unwrap();
+        let outcome = scan_ports_portable_with_connector(ip6, &[65_000], &config, &StdTcpConnector);
+        assert_eq!(outcome.probes.len() + outcome.unscanned, 1);
     }
 }

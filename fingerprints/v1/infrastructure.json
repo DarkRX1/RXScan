@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "fingerprints": [
+    {
+      "id": "redis-protocol",
+      "protocol": "redis",
+      "probe": "redis",
+      "product": "Redis",
+      "vendor": "redis",
+      "confidence": 80,
+      "source": "corpus-v3",
+      "matcher": { "kind": "contains", "pattern": "+PONG", "case_insensitive": false }
+    },
+    {
+      "id": "redis-error",
+      "protocol": "redis",
+      "probe": "redis",
+      "product": "Redis",
+      "vendor": "redis",
+      "confidence": 75,
+      "source": "corpus-v3",
+      "matcher": { "kind": "prefix", "pattern": "-ERR", "case_insensitive": false }
+    },
+    {
+      "id": "mqtt-connack",
+      "protocol": "mqtt",
+      "probe": "mqtt",
+      "product": "MQTT broker",
+      "confidence": 75,
+      "source": "corpus-v3",
+      "matcher": { "kind": "contains", "pattern": "MQTT", "case_insensitive": true }
+    },
+    {
+      "id": "mongodb-ismaster",
+      "protocol": "mongodb",
+      "probe": "mongodb",
+      "product": "MongoDB",
+      "vendor": "mongodb",
+      "confidence": 80,
+      "source": "corpus-v3",
+      "matcher": { "kind": "contains", "pattern": "ismaster", "case_insensitive": true }
+    },
+    {
+      "id": "smb-negotiate",
+      "protocol": "smb",
+      "probe": "smb",
+      "product": "SMB",
+      "confidence": 75,
+      "source": "corpus-v3",
+      "matcher": { "kind": "contains", "pattern": "SMB", "case_insensitive": false }
+    },
+    {
+      "id": "rdp-cookie",
+      "protocol": "rdp",
+      "probe": "rdp",
+      "product": "RDP",
+      "vendor": "microsoft",
+      "confidence": 75,
+      "source": "corpus-v3",
+      "matcher": { "kind": "contains", "pattern": "Cookie:", "case_insensitive": true }
+    },
+    {
+      "id": "mysql-greeting",
+      "protocol": "mysql",
+      "probe": "mysql",
+      "product": "MySQL",
+      "vendor": "oracle",
+      "confidence": 80,
+      "source": "corpus-v3",
+      "matcher": { "kind": "contains", "pattern": "mysql", "case_insensitive": true }
+    },
+    {
+      "id": "postgres-negotiation",
+      "protocol": "postgresql",
+      "probe": "postgresql",
+      "product": "PostgreSQL",
+      "confidence": 80,
+      "source": "corpus-v3",
+      "matcher": { "kind": "contains", "pattern": "postgres", "case_insensitive": true }
+    }
+  ]
+}

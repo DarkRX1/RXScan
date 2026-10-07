@@ -4,18 +4,20 @@ on:
   push:
   pull_request:
 
-# Minimal permissions: read-only checkout, no writes (Phase 20 supply-chain
-# hygiene). The release workflow (if added later) must keep its own minimal
-# scope and must never publish from CI without a version-tag gate.
+# Minimal permissions: read-only checkout, no writes. Release publishing
+# (if added) keeps its own minimal scope and never publishes without a
+# version-tag gate. Historical tags v1.0.0/v1.0.1/v1.0.2 are immutable.
 permissions:
   contents: read
 
 jobs:
-  rust:
-    # Primary supported platform is Linux x86_64 (the only platform RXScan
-    # is built, tested, and benchmarked on). No macOS/Windows support is
-    # claimed.
-    runs-on: ubuntu-latest
+  rust-matrix:
+    name: rust-deterministic (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -26,11 +28,50 @@ jobs:
       - run: cargo check --locked
       - run: cargo check --all-targets --all-features --locked
       - run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      # Full deterministic suite (matches docs/TESTING.md). No substring
+      # skips: `live`/`privileged` as substrings would hide `alive` and
+      # `unprivileged` tests. Tests requiring live network or privileges
+      # must use explicit `requires_live_network` / `requires_privileged`
+      # names or `#[ignore]` with a documented separate job; none exist
+      # today (raw/ICMP paths degrade to Unavailable, loopback fixtures
+      # only), so the full suite runs natively on each OS.
       - run: cargo test --locked
-      - run: cargo build --release --locked
+      - run: cargo build --locked
+      # Native runtime smoke (not just compilation): binary starts,
+      # machine capabilities parse, loopback fixtures via unit tests above.
+      - run: cargo run --locked -- --version
+      - run: cargo run --locked -- capabilities --json
       - run: cargo run --locked -- search lint
       - run: git diff --check
       - run: cargo package --list --allow-dirty
+  rust-cross:
+    name: cross-build (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-gnu
+          - aarch64-unknown-linux-musl
+          - x86_64-pc-windows-msvc
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
+          - aarch64-linux-android
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.85.0
+          targets: ${{ matrix.target }}
+      - name: Install cross linker (linux arm64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+      # Cross-build check only (no runtime). Hosted validation is pending
+      # for all targets; runtime evidence levels live in docs/PLATFORMS.md:
+      # Linux x86_64 is locally runtime-tested, all other native/cross
+      # targets are configured with hosted validation pending.
+      - run: cargo check --locked --target ${{ matrix.target }}
   frontend:
     runs-on: ubuntu-latest
     steps:

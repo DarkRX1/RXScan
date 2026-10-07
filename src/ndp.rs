@@ -1,24 +1,36 @@
 use std::net::Ipv6Addr;
+#[cfg(target_os = "linux")]
 use std::os::raw::{c_int, c_void};
 use std::time::{Duration, Instant};
 
 use crate::execution::CancellationToken;
 
+#[cfg(target_os = "linux")]
 const AF_INET6: c_int = 10;
+#[cfg(target_os = "linux")]
 const SOCK_RAW: c_int = 3;
+#[cfg(target_os = "linux")]
 const IPPROTO_ICMPV6: c_int = 58;
+#[cfg(target_os = "linux")]
 const POLLIN: i16 = 0x0001;
+#[cfg(target_os = "linux")]
 const SOL_SOCKET: c_int = 1;
+#[cfg(target_os = "linux")]
 const SO_RCVTIMEO: c_int = 20;
+#[cfg(target_os = "linux")]
 const EAGAIN: c_int = 11;
+#[cfg(target_os = "linux")]
 const EINTR: c_int = 4;
+#[cfg(target_os = "linux")]
 const EPERM: c_int = 1;
+#[cfg(target_os = "linux")]
 const EACCES: c_int = 13;
 
 pub const MAX_NS_PER_PROBE: u32 = 2;
 pub const MAX_IFINFO_BYTES: usize = 64 * 1024;
 pub const MAX_NDP_INTERFACES: usize = 8;
 
+#[cfg(target_os = "linux")]
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct SockaddrIn6 {
@@ -29,6 +41,7 @@ struct SockaddrIn6 {
     sin6_scope_id: u32,
 }
 
+#[cfg(target_os = "linux")]
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct PollFd {
@@ -37,6 +50,7 @@ struct PollFd {
     revents: i16,
 }
 
+#[cfg(target_os = "linux")]
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct Timeval {
@@ -44,6 +58,7 @@ struct Timeval {
     tv_usec: i64,
 }
 
+#[cfg(target_os = "linux")]
 unsafe extern "C" {
     fn socket(domain: c_int, ty: c_int, protocol: c_int) -> c_int;
     fn close(fd: c_int) -> c_int;
@@ -74,16 +89,20 @@ unsafe extern "C" {
     fn __errno_location() -> *mut c_int;
 }
 
+#[cfg(target_os = "linux")]
 fn last_errno() -> c_int {
     unsafe { *__errno_location() }
 }
 
+#[cfg(target_os = "linux")]
 struct OwnedFd(c_int);
+#[cfg(target_os = "linux")]
 impl OwnedFd {
     fn new(fd: c_int) -> Option<Self> {
         (fd >= 0).then_some(Self(fd))
     }
 }
+#[cfg(target_os = "linux")]
 impl Drop for OwnedFd {
     fn drop(&mut self) {
         unsafe {
@@ -206,6 +225,7 @@ pub enum NdpOutcome {
     Cancelled,
 }
 
+#[cfg(target_os = "linux")]
 pub fn probe_ndp(
     target: std::net::IpAddr,
     timeout: Duration,
@@ -344,6 +364,20 @@ pub fn probe_ndp(
         }
     }
     NdpOutcome::Timeout
+}
+
+/// Portable fallback: NDP requires raw ICMPv6, unavailable outside Linux.
+#[cfg(not(target_os = "linux"))]
+pub fn probe_ndp(
+    target: std::net::IpAddr,
+    timeout: Duration,
+    cancel: &CancellationToken,
+) -> NdpOutcome {
+    if cancel.is_cancelled() {
+        return NdpOutcome::Cancelled;
+    }
+    let _ = (target, timeout);
+    NdpOutcome::Unavailable("NDP unavailable: Linux-only implementation in this build".to_owned())
 }
 
 #[cfg(test)]

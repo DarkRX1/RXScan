@@ -10,6 +10,13 @@ pub struct CapabilityEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Capabilities {
     pub platform: String,
+    /// Additive platform detail (machine-compatible, defaults for old readers).
+    #[serde(default)]
+    pub os: String,
+    #[serde(default)]
+    pub arch: String,
+    #[serde(default)]
+    pub environment: String,
     pub entries: Vec<CapabilityEntry>,
 }
 
@@ -54,7 +61,11 @@ pub fn fingerprint_counts() -> (usize, usize) {
 pub fn probe() -> Capabilities {
     let raw = crate::scan_mode::probe_raw_syn();
     let linux = cfg!(target_os = "linux");
+    let platform_info = crate::platform::capabilities::detect();
     let platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    let os = std::env::consts::OS.to_owned();
+    let arch = std::env::consts::ARCH.to_owned();
+    let environment = platform_info.environment.as_str();
     let (packs, rules) = fingerprint_counts();
     let username_providers = crate::search::embedded_username_pack()
         .map(|pack| pack.providers.len())
@@ -158,8 +169,76 @@ pub fn probe() -> Capabilities {
     for (name, available, detail) in crate::exposure::capability_entries() {
         entries.push(entry(&name, available, detail));
     }
+    // Typed platform capability model (additive): exposes the same runtime
+    // truth under stable `platform/*` IDs plus environment metadata. The
+    // legacy flat IDs above stay unchanged for machine compatibility.
+    for (id, status) in &platform_info.capabilities {
+        let (available, detail) = match status {
+            crate::platform::CapabilityStatus::Available => (true, default_platform_detail(id)),
+            crate::platform::CapabilityStatus::Restricted { reason }
+            | crate::platform::CapabilityStatus::Unavailable { reason } => (false, reason.clone()),
+        };
+        entries.push(entry(&format!("platform/{id}"), available, detail));
+    }
+    // Active OS probes get one controlled explanation entry (not repeated
+    // low-level failures): passive OS evidence remains enabled. Raw
+    // capability alone does not mean functional fingerprinting; the
+    // platform reason is propagated verbatim so experimental status stays
+    // honest in both default and --explain views.
+    match platform_info.get(crate::platform::Capability::ActiveOsFingerprinting) {
+        Some(crate::platform::CapabilityStatus::Available) => {
+            entries.push(entry(
+                "active_os_probes",
+                true,
+                "bounded active OS probes available (raw capability present); passive OS evidence always enabled",
+            ));
+        }
+        Some(
+            crate::platform::CapabilityStatus::Restricted { reason }
+            | crate::platform::CapabilityStatus::Unavailable { reason },
+        ) => {
+            entries.push(entry("active_os_probes", false, reason.clone()));
+        }
+        None => {
+            entries.push(entry(
+                "active_os_probes",
+                false,
+                "Active OS probes unavailable: capability unknown in this build; fallback: passive OS evidence remains enabled",
+            ));
+        }
+    }
     entries.sort_by(|a, b| a.name.cmp(&b.name));
-    Capabilities { platform, entries }
+    Capabilities {
+        platform,
+        os,
+        arch,
+        environment,
+        entries,
+    }
+}
+
+fn default_platform_detail(id: &str) -> String {
+    match id {
+        "tcp_connect_scan" => "unprivileged TCP connect scanning".to_owned(),
+        "udp_scan" => "bounded connected-socket UDP discovery".to_owned(),
+        "raw_packet_send" => "raw packet transmission where permitted".to_owned(),
+        "raw_packet_capture" => "raw packet capture where permitted".to_owned(),
+        "interface_enumeration" => "interface discovery (best-effort)".to_owned(),
+        "route_enumeration" => "route discovery (best-effort)".to_owned(),
+        "passive_os_inference" => "passive OS evidence always enabled".to_owned(),
+        "active_os_fingerprinting" => {
+            "bounded active OS probes where raw capability exists".to_owned()
+        }
+        "tls_collection" => "handshake and certificate observation".to_owned(),
+        "ssh_collection" => "banner and host-key observation (no auth)".to_owned(),
+        "http_collection" => "HTTP/1.1 observation".to_owned(),
+        "dns_intelligence" => "DNS observations".to_owned(),
+        "public_source_search" => "public-source search and investigation".to_owned(),
+        "local_web_ui" => "loopback local GUI and typed API".to_owned(),
+        "signal_cancellation" => "portable Ctrl-C cancellation".to_owned(),
+        "project_persistence" => "SQLite project graph available".to_owned(),
+        _ => "platform capability".to_owned(),
+    }
 }
 
 pub fn render_human(capabilities: &Capabilities) -> String {
@@ -204,6 +283,23 @@ pub fn human_label(name: &str) -> String {
         "exposure_local_dataset" => "Local exposure dataset".to_owned(),
         "exposure_http_api" => "Exposure HTTP API".to_owned(),
         "exposure_secret_retention" => "Secret retention".to_owned(),
+        "active_os_probes" => "Active OS probes".to_owned(),
+        "platform/tcp_connect_scan" => "TCP connect scanning".to_owned(),
+        "platform/udp_scan" => "UDP scanning".to_owned(),
+        "platform/raw_packet_send" => "Raw packet send".to_owned(),
+        "platform/raw_packet_capture" => "Raw packet capture".to_owned(),
+        "platform/interface_enumeration" => "Interface discovery".to_owned(),
+        "platform/route_enumeration" => "Route discovery".to_owned(),
+        "platform/passive_os_inference" => "Passive OS inference".to_owned(),
+        "platform/active_os_fingerprinting" => "Active OS fingerprinting".to_owned(),
+        "platform/tls_collection" => "TLS collection".to_owned(),
+        "platform/ssh_collection" => "SSH collection".to_owned(),
+        "platform/http_collection" => "HTTP collection".to_owned(),
+        "platform/dns_intelligence" => "DNS intelligence".to_owned(),
+        "platform/public_source_search" => "Public-source search".to_owned(),
+        "platform/local_web_ui" => "Local web UI".to_owned(),
+        "platform/signal_cancellation" => "Signal cancellation".to_owned(),
+        "platform/project_persistence" => "Project persistence".to_owned(),
         _ => name
             .split('_')
             .map(|word| {
@@ -247,6 +343,23 @@ pub fn human_group(name: &str) -> &'static str {
         | "exposure_http_api"
         | "exposure_secret_retention" => "INTELLIGENCE",
         "project_db" | "search_project_db" | "investigation_project_persistence" => "PROJECT",
+        "platform/tcp_connect_scan"
+        | "platform/udp_scan"
+        | "platform/raw_packet_send"
+        | "platform/raw_packet_capture"
+        | "platform/interface_enumeration"
+        | "platform/route_enumeration"
+        | "active_os_probes"
+        | "platform/active_os_fingerprinting" => "NETWORK",
+        "platform/tls_collection"
+        | "platform/ssh_collection"
+        | "platform/http_collection"
+        | "platform/dns_intelligence" => "NETWORK",
+        "platform/passive_os_inference" => "INTELLIGENCE",
+        "platform/public_source_search" => "SEARCH",
+        "platform/local_web_ui"
+        | "platform/signal_cancellation"
+        | "platform/project_persistence" => "PROJECT",
         _ => "OTHER",
     }
 }
@@ -263,6 +376,19 @@ pub fn friendly_detail(name: &str, available: bool, detail: &str) -> String {
     match name {
         "raw_syn" | "raw_syn_ipv6" => "Requires raw-socket permission".to_owned(),
         "arp_active" | "ndp" | "raw_icmp" => "Requires raw-socket permission".to_owned(),
+        "platform/raw_packet_send" | "platform/raw_packet_capture" => {
+            "Requires raw-socket permission".to_owned()
+        }
+        "platform/active_os_fingerprinting" | "active_os_probes" => {
+            // Experimental status must stay visible in default output, not
+            // collapsed to a permission hint when raw exists but the
+            // implementation is incomplete.
+            if detail.contains("experimental") {
+                detail.to_owned()
+            } else {
+                "Requires raw-socket permission".to_owned()
+            }
+        }
         "exposure_http_api" => "Requires API configuration (optional)".to_owned(),
         "exposure_secret_retention" => "Disabled by design".to_owned(),
         "investigation_direct_network" => {
@@ -333,6 +459,35 @@ fn render_human_inner(
         9,
     ));
     out.push('\n');
+    // Additive platform detail: OS, arch, environment. Old readers ignore
+    // the extra lines; new readers understand native vs WSL vs Termux.
+    if !capabilities.os.is_empty() {
+        out.push_str(&key_value(
+            caps,
+            "OS",
+            &paint(color, Style::Identifier, &capabilities.os),
+            9,
+        ));
+        out.push('\n');
+    }
+    if !capabilities.arch.is_empty() {
+        out.push_str(&key_value(
+            caps,
+            "Arch",
+            &paint(color, Style::Identifier, &capabilities.arch),
+            9,
+        ));
+        out.push('\n');
+    }
+    if !capabilities.environment.is_empty() {
+        out.push_str(&key_value(
+            caps,
+            "Env",
+            &paint(color, Style::Identifier, &capabilities.environment),
+            9,
+        ));
+        out.push('\n');
+    }
     const GROUPS: &[&str] = &[
         "NETWORK",
         "SEARCH",
