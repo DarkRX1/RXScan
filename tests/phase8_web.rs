@@ -951,7 +951,11 @@ fn redirect_cap_bounds_long_chains() {
 #[test]
 fn out_of_scope_redirect_is_recorded_never_contacted() {
     // Canary listener on an out-of-scope address: any contact fails the test.
-    let canary = TcpListener::bind("127.0.0.2:0").expect("bind canary");
+    // Bound to IPv6 loopback: 127/8 aliases beyond 127.0.0.1 are not
+    // configured on all hosted runners (macOS bind of 127.0.0.2 fails with
+    // EADDRNOTAVAIL), while [::1] binds everywhere this suite runs and is
+    // equally out of scope for a 127.0.0.1-only plan.
+    let canary = TcpListener::bind("[::1]:0").expect("bind canary");
     let canary_port = canary.local_addr().unwrap().port();
     let canary_hits = Arc::new(AtomicUsize::new(0));
     let canary_hits_clone = canary_hits.clone();
@@ -972,16 +976,16 @@ fn out_of_scope_redirect_is_recorded_never_contacted() {
             }
         }
     });
-    // Scope covers .1 only; the fixture redirects to .2.
+    // Scope covers 127.0.0.1 only; the fixture redirects to [::1].
     let fixture = HttpFixture::spawn(move |_| {
         format!(
-            "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.2:{canary_port}/secret\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            "HTTP/1.1 302 Found\r\nLocation: http://[::1]:{canary_port}/secret\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         )
         .into_bytes()
     });
     let plan = plan_for_web();
     let guard = Arc::new(PolicyScopeGuard::new(plan.scope.clone()));
-    assert!(!guard.permits(&TaskScopeTarget::Ip("127.0.0.2".parse().unwrap())));
+    assert!(!guard.permits(&TaskScopeTarget::Ip("::1".parse().unwrap())));
     let module = WebProbeModule::new(
         rxscan::web::WebPolicy::new(5, plan.goal, plan.speed),
         guard.clone(),
