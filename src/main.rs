@@ -215,6 +215,10 @@ fn main() {
         run_exposure_cli(&args);
         return;
     }
+    if args.get(1).is_some_and(|arg| arg == "os-lab") {
+        run_os_lab(&args);
+        return;
+    }
     if args.get(1).is_some_and(|arg| arg == "web") {
         run_web(&args);
         return;
@@ -4136,5 +4140,49 @@ fn run_exposure_cli(args: &[String]) {
     } else {
         let caps = resolve_human_caps(args);
         out!("{}", exp::render_human_caps(&report, caps));
+    }
+}
+
+fn run_os_lab(args: &[String]) {
+    let mut json = false;
+    let mut fixture_path: Option<&str> = None;
+    for arg in args[2..].iter() {
+        match arg.as_str() {
+            "--json" => json = true,
+            "analyze" => {}
+            path if fixture_path.is_none() => fixture_path = Some(path),
+            _ => {
+                err!("rxscan os-lab analyze: usage: rxscan os-lab analyze [--json] <fixture.json>");
+                std::process::exit(2);
+            }
+        }
+    }
+    let fixture_path = fixture_path.expect("rxscan os-lab analyze requires a fixture path");
+    let fixture_std = std::fs::read_to_string(fixture_path).unwrap_or_else(|error| {
+        err!("rxscan os-lab analyze: cannot read fixture: {error}");
+        std::process::exit(2);
+    });
+    let fixture = rxscan::os_lab::OsLabFixture::from_json(&fixture_std).unwrap_or_else(|error| {
+        err!("rxscan os-lab analyze: invalid fixture: {error}");
+        std::process::exit(2);
+    });
+    let analysis = fixture.analyze().unwrap_or_else(|error| {
+        err!("rxscan os-lab analyze: analysis failed: {error}");
+        std::process::exit(2);
+    });
+    if json {
+        let text = serde_json::to_string_pretty(&analysis).unwrap_or_else(|error| {
+            err!("rxscan os-lab analyze: cannot serialize: {error}");
+            std::process::exit(2);
+        });
+        out_line!("{}", text);
+    } else {
+        out!(
+            "{}",
+            serde_json::to_string(&analysis).unwrap_or_else(|error| {
+                err!("rxscan os-lab analyze: cannot serialize: {error}");
+                std::process::exit(2);
+            })
+        );
     }
 }

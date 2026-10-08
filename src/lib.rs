@@ -39,6 +39,7 @@ pub mod ndp;
 pub mod neighbor;
 pub mod os_active;
 pub mod os_fingerprint;
+pub mod os_lab;
 pub mod os_packets;
 pub mod output;
 pub mod pacing;
