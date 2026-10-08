@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "fixture_id": "synthetic-repeat-v1",
+  "expected_os_family": "SyntheticOS",
+  "target": "192.0.2.10",
+  "rxscan_version": "1.0.2",
+  "provenance": "synthetic_fixture",
+  "capability": {
+    "backend": "synthetic-packet-fixture",
+    "status": "fixture-tested-only"
+  },
+  "samples": [
+    {
+      "sample_index": 1,
+      "observations": [
+        {
+          "kind": "ttl",
+          "value": "61",
+          "source": "ip_ttl",
+          "family": "v4",
+          "probe_id": "tcp-syn-80",
+          "provenance": "fixture",
+          "quality": "medium"
+        },
+        {
+          "kind": "window",
+          "value": "29200",
+          "source": "tcp_window",
+          "family": "v4",
+          "probe_id": "tcp-syn-80",
+          "provenance": "fixture",
+          "quality": "medium"
+        }
+      ]
+    },
+    {
+      "sample_index": 2,
+      "observations": [
+        {
+          "kind": "ttl",
+          "value": "61",
+          "source": "ip_ttl",
+          "family": "v4",
+          "probe_id": "tcp-syn-80",
+          "provenance": "fixture",
+          "quality": "medium"
+        },
+        {
+          "kind": "window",
+          "value": "30000",
+          "source": "tcp_window",
+          "family": "v4",
+          "probe_id": "tcp-syn-80",
+          "provenance": "fixture",
+          "quality": "medium"
+        }
+      ]
+    }
+  ]
+}
