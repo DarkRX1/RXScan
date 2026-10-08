@@ -1701,3 +1701,156 @@ fn narrow_set_cookie_header_is_representation_aware_for_persistence() {
         );
     }
 }
+
+#[test]
+fn redis_unexpected_reply_never_persists_raw_header_material() {
+    // Synthetic/reserved data only. Regression for the hosted Windows/macOS
+    // Phase20 privacy failure (`observed_secrets_are_bounded_never_raw_blobs`):
+    // `probe_redis()` against an HTTP-shaped fixture must not persist raw
+    // `Set-Cookie`/`Cookie` header or cookie-value material in event evidence.
+    // The fixture responds immediately without waiting for an HTTP request
+    // terminator, deterministically forcing the former Windows/macOS
+    // `unexpected reply` path on every platform (no scheduling reliance).
+    use std::sync::atomic::AtomicUsize;
+
+    let synthetic_cookie_value = format!("synthetic-redis-cookie-value-{}", "y".repeat(260));
+    let synthetic_cookie_value_clone = synthetic_cookie_value.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind redis fixture");
+    listener.set_nonblocking(true).expect("fixture nonblocking");
+    let port = listener.local_addr().unwrap().port();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_clone = stop.clone();
+    std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !stop_clone.load(Ordering::SeqCst) && Instant::now() < deadline {
+            let (stream, _) = match listener.accept() {
+                Ok(pair) => pair,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(2));
+                    continue;
+                }
+                Err(_) => break,
+            };
+            let synthetic = synthetic_cookie_value_clone.clone();
+            std::thread::spawn(move || {
+                // Immediate response: consume at most one short read, never
+                // wait for `\r\n\r\n`, so the Redis `PING` reliably observes
+                // HTTP bytes within its probe window on every OS.
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+                let mut discard = [0u8; 1024];
+                let _ = (&stream).read(&mut discard);
+                let body = "<html><body>synthetic redis fixture</body></html>";
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\nContent-Type: text/html\r\nSet-Cookie: session={}\r\n\r\n",
+                    body.len(),
+                    synthetic
+                );
+                debug_assert!(
+                    head.len() > 256,
+                    "fixture head must exceed the former 256-byte bounded read"
+                );
+                let _ = (&stream).write_all(head.as_bytes());
+                let _ = (&stream).write_all(body.as_bytes());
+            });
+        }
+    });
+
+    // A. Reach the unexpected-reply path against the HTTP-shaped fixture.
+    let cancel = rxscan::execution::CancellationToken::default();
+    let ctx = rxscan::probes::ProbeCtx {
+        ip: "127.0.0.1".parse().unwrap(),
+        port,
+        host_label: "127.0.0.1",
+        timeout: Duration::from_secs(3),
+        deadline: Instant::now() + Duration::from_secs(3),
+        cancel: &cancel,
+        connections: Arc::new(AtomicUsize::new(0)),
+        ssh_kex_capture: false,
+    };
+    let attempt = rxscan::probes::probe_redis(&ctx);
+    // B. Safe semantic representation only.
+    assert_eq!(
+        attempt.evidence,
+        vec!["redis: unexpected reply".to_owned()],
+        "redis unexpected path must persist only the fixed semantic note"
+    );
+    assert_eq!(attempt.protocol, "unknown");
+    // C. No raw header/value material in the returned evidence.
+    for line in &attempt.evidence {
+        let low = line.to_ascii_lowercase();
+        assert!(
+            !low.contains("set-cookie"),
+            "redis evidence must not carry Set-Cookie header"
+        );
+        assert!(
+            !low.contains("cookie:"),
+            "redis evidence must not carry Cookie header marker"
+        );
+        assert!(
+            !low.contains("session="),
+            "redis evidence must not carry cookie name/value material"
+        );
+        assert!(
+            !line.contains(&synthetic_cookie_value),
+            "redis evidence must never carry the synthetic cookie value"
+        );
+    }
+
+    // D. The same result persists through checkpoint validation.
+    let p = plan();
+    let provenance = Provenance::new("test", "14.0.0", p.stable_id(), Timestamp(1)).unwrap();
+    let asset = Asset::scoped(AssetKind::Ip, "127.0.0.1", &p.scope, provenance.clone()).unwrap();
+    let event = Event::new(
+        EventKind::ServiceProbeUnavailable,
+        Some(asset.id.clone()),
+        BoundedDetails::from_value(
+            serde_json::json!({
+                "target": "127.0.0.1",
+                "address": "127.0.0.1",
+                "port": port,
+                "probe": "redis",
+                "protocol": "unknown",
+                "confidence": 0,
+                "evidence": attempt.evidence.clone(),
+            }),
+            rxscan::model::MAX_EVENT_DETAILS_BYTES,
+        )
+        .unwrap(),
+        provenance,
+    )
+    .unwrap();
+    let mut state = state_with_tasks(vec![task(&p, TaskState::Succeeded, "rxscan.test")]);
+    state.outputs.push(PersistedModuleOutput {
+        task_id: state.tasks[0].task.id.clone(),
+        output: ModuleOutput {
+            assets: vec![asset],
+            events: vec![event.clone()],
+            ..Default::default()
+        },
+    });
+    assert!(
+        state.validate().is_ok(),
+        "sanitized redis unexpected evidence must validate"
+    );
+
+    // E. Serialized persisted material carries no raw cookie/header bytes.
+    let serialized = serde_json::to_string(&event.details.data).unwrap();
+    let low = serialized.to_ascii_lowercase();
+    assert!(
+        !low.contains("set-cookie"),
+        "serialized event must not contain Set-Cookie header"
+    );
+    assert!(
+        !low.contains("cookie:"),
+        "serialized event must not contain Cookie header marker"
+    );
+    assert!(
+        !low.contains("session="),
+        "serialized event must not contain cookie name/value material"
+    );
+    assert!(
+        !serialized.contains(&synthetic_cookie_value),
+        "serialized event must never contain the synthetic cookie value"
+    );
+    stop.store(true, Ordering::SeqCst);
+}

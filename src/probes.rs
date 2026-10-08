@@ -1178,7 +1178,10 @@ pub fn probe_redis(ctx: &ProbeCtx) -> ProbeAttempt {
     } else if line.is_empty() {
         attempt.evidence = vec!["redis: empty reply to PING".to_owned()];
     } else {
-        attempt.evidence = vec![format!("redis: unexpected reply {line:?}")];
+        // Privacy boundary: never persist raw reply bytes. An unrecognized
+        // reply may be an HTTP header block (e.g. `Set-Cookie:`) or other
+        // remote-controlled material; only a fixed semantic note is kept.
+        attempt.evidence = vec!["redis: unexpected reply".to_owned()];
     }
     attempt
 }
