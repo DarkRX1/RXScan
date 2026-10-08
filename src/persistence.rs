@@ -614,10 +614,9 @@ fn validate_details_for_persistence(value: &serde_json::Value) -> Result<(), Per
 
 fn contains_forbidden_persisted_marker(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
-    [
+    if [
         "authorization:",
         "cookie:",
-        "set-cookie",
         "password=",
         "csrf",
         "raw_http_body_marker",
@@ -626,6 +625,64 @@ fn contains_forbidden_persisted_marker(value: &str) -> bool {
     ]
     .iter()
     .any(|marker| lower.contains(marker))
+    {
+        return true;
+    }
+    contains_raw_set_cookie_header(value)
+}
+
+/// Representation-aware check for raw `Set-Cookie` header material.
+///
+/// Rejects the header-line form (`Set-Cookie:` with colon, ASCII
+/// case-insensitive, optional whitespace before the colon) and the exact
+/// structured JSON key (`"set-cookie"` with optional whitespace before the
+/// colon). Innocent substrings such as `asset-cookie` (no colon, no JSON-key
+/// framing) stay allowed, unlike the previous broad `set-cookie` substring.
+/// `Cookie:` rejection, structured `"cookies":` rejection, and bare
+/// `cookies` key rejection are handled separately and unchanged.
+fn contains_raw_set_cookie_header(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    // Raw header form: `set-cookie` + optional whitespace + `:` with a word
+    // boundary before `set-cookie` so larger tokens like `asset-cookie:`
+    // do not false-positive on this predicate alone.
+    let needle = "set-cookie";
+    let mut start = 0usize;
+    while let Some(pos) = lower[start..].find(needle) {
+        let mut idx = start + pos + needle.len();
+        while bytes.get(idx).is_some_and(|b| b.is_ascii_whitespace()) {
+            idx += 1;
+        }
+        if bytes.get(idx) == Some(&b':') {
+            let before = if start + pos == 0 {
+                None
+            } else {
+                bytes.get(start + pos - 1).copied()
+            };
+            let boundary = match before {
+                None => true,
+                Some(b) => !(b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
+            };
+            if boundary {
+                return true;
+            }
+        }
+        start += pos + needle.len();
+    }
+    // Structured JSON key form: `"set-cookie"` + optional whitespace + `:`.
+    let key_needle = "\"set-cookie\"";
+    let mut kstart = 0usize;
+    while let Some(pos) = lower[kstart..].find(key_needle) {
+        let mut idx = kstart + pos + key_needle.len();
+        while bytes.get(idx).is_some_and(|b| b.is_ascii_whitespace()) {
+            idx += 1;
+        }
+        if bytes.get(idx) == Some(&b':') {
+            return true;
+        }
+        kstart += pos + key_needle.len();
+    }
+    false
 }
 
 /// Narrow exact-match predicate for a bare structured map key.

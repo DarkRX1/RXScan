@@ -1,0 +1,7 @@
+# RXScan golden checkpoint fixtures are canonical LF JSON.
+# The byte-stability test (`golden_checkpoint_loads_and_resaves_byte_stable`)
+# compares checked-out bytes against a canonical re-save byte-for-byte, so
+# Windows CRLF checkout normalization must not alter these files.
+# `save_checkpoint` writes LF (`serde_json::to_writer_pretty`), matching Git blobs.
+tests/fixtures/*.rxscan text eol=lf
+tests/fixtures/*.rxproj text eol=lf

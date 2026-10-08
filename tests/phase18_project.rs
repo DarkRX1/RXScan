@@ -2684,3 +2684,104 @@ fn bare_cookies_entity_attribute_is_rejected_for_project_validation() {
         );
     }
 }
+
+#[test]
+fn narrow_set_cookie_header_is_representation_aware_for_project_import() {
+    // Synthetic/reserved data only. Mirrors the persistence narrow policy so
+    // project-import and checkpoint privacy policies do not drift.
+    // Covers: raw Set-Cookie/Cookie rejected, structured `cookies` rejected,
+    // `cookie_names`/`cookies_enabled`/prose/innocent substrings accepted.
+    // 1. Raw Set-Cookie header/value material is rejected for project import.
+    for raw in [
+        "Set-Cookie: session=synthetic-cookie-value-1",
+        "set-cookie: session=synthetic-cookie-value-2",
+        "SET-COOKIE: session=synthetic-cookie-value-3",
+    ] {
+        let hostile = serde_json::json!({"note": raw});
+        let scan = cookie_evidence_scan(hostile, "narrow-set-cookie-raw");
+        let mut project = ProjectState::new(None);
+        assert!(
+            project.add_scan(&scan, None, None).is_err(),
+            "project import must reject raw Set-Cookie: {raw:?}"
+        );
+    }
+    // Exact structured Set-Cookie header keys are rejected.
+    for structured in [
+        serde_json::json!({"set-cookie": "session=synthetic-cookie-value"}),
+        serde_json::json!({"Set-Cookie" : "session=synthetic-cookie-value"}),
+    ] {
+        let scan = cookie_evidence_scan(structured, "narrow-set-cookie-key");
+        let mut project = ProjectState::new(None);
+        assert!(
+            project.add_scan(&scan, None, None).is_err(),
+            "project import must reject structured Set-Cookie key"
+        );
+    }
+    // 2. Raw Cookie header/value material is rejected.
+    for raw in [
+        "Cookie: session=synthetic-cookie-value-1",
+        "cookie: session=synthetic-cookie-value-2",
+    ] {
+        let hostile = serde_json::json!({"note": raw});
+        let scan = cookie_evidence_scan(hostile, "narrow-cookie-raw");
+        let mut project = ProjectState::new(None);
+        assert!(
+            project.add_scan(&scan, None, None).is_err(),
+            "project import must reject raw Cookie: {raw:?}"
+        );
+    }
+    // 3. Structured value-bearing `cookies` stays rejected (already covered
+    // by existing tests; re-asserted here for the narrow-policy matrix).
+    let hostile = serde_json::json!({
+        "cookies": [{"name": "session", "value": "synthetic-cookie-value"}]
+    });
+    let scan = cookie_evidence_scan(hostile, "narrow-cookies-struct");
+    let mut project = ProjectState::new(None);
+    assert!(
+        project.add_scan(&scan, None, None).is_err(),
+        "project import must reject structured cookies"
+    );
+    // 5. `cookie_names` is accepted.
+    let safe = serde_json::json!({"cookie_names": ["session"]});
+    let scan = cookie_evidence_scan(safe, "narrow-cookie-names");
+    let mut project = ProjectState::new(None);
+    assert!(
+        project.add_scan(&scan, None, None).is_ok(),
+        "project import must accept cookie_names"
+    );
+    // 6. `cookies_enabled` is accepted.
+    let safe = serde_json::json!({"cookies_enabled": true});
+    let scan = cookie_evidence_scan(safe, "narrow-cookies-enabled");
+    let mut project = ProjectState::new(None);
+    assert!(
+        project.add_scan(&scan, None, None).is_ok(),
+        "project import must accept cookies_enabled"
+    );
+    // 7. Harmless prose is accepted.
+    for prose in [
+        "observed cookies in passing prose are fine",
+        "the set-cookie header was noted in prose without values",
+    ] {
+        let safe = serde_json::json!({"note": prose});
+        let scan = cookie_evidence_scan(safe, "narrow-prose");
+        let mut project = ProjectState::new(None);
+        assert!(
+            project.add_scan(&scan, None, None).is_ok(),
+            "project import must accept prose: {prose:?}"
+        );
+    }
+    // 8. Innocent larger tokens containing `set-cookie` do not false-positive.
+    for innocent in [
+        "asset-cookie",
+        "asset-cookie token is innocent",
+        "my-set-cookie-token is innocent",
+    ] {
+        let safe = serde_json::json!({"note": innocent, "server": innocent});
+        let scan = cookie_evidence_scan(safe, "narrow-innocent");
+        let mut project = ProjectState::new(None);
+        assert!(
+            project.add_scan(&scan, None, None).is_ok(),
+            "project import must accept innocent substring: {innocent:?}"
+        );
+    }
+}

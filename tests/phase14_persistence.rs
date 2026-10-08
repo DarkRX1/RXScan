@@ -1576,3 +1576,128 @@ fn bare_cookies_map_key_is_rejected_and_safe_keys_accepted_for_persistence() {
         );
     }
 }
+
+#[test]
+fn narrow_set_cookie_header_is_representation_aware_for_persistence() {
+    // Synthetic/reserved data only. Proves the narrow `Set-Cookie` policy:
+    // raw header/value material stays rejected, exact structured keys stay
+    // rejected, while innocent substrings, safe names-only shapes, and prose
+    // stay accepted. Mirrors the project-import test so policies do not drift.
+    fn evidence_state(details: serde_json::Value) -> PersistedScanState {
+        let p = plan();
+        let provenance = Provenance::new("test", "14.0.0", p.stable_id(), Timestamp(1)).unwrap();
+        let asset = Asset::scoped(
+            AssetKind::Url,
+            "http://127.0.0.1/",
+            &p.scope,
+            provenance.clone(),
+        )
+        .unwrap();
+        let evidence = rxscan::model::Evidence::new(
+            "test",
+            asset.id.clone(),
+            BoundedDetails::from_value(details, 4096).unwrap(),
+            rxscan::model::Confidence::new(80).unwrap(),
+            provenance,
+        )
+        .unwrap();
+        let mut state = state_with_tasks(vec![task(&p, TaskState::Succeeded, "rxscan.test")]);
+        state.outputs.push(PersistedModuleOutput {
+            task_id: state.tasks[0].task.id.clone(),
+            output: ModuleOutput {
+                assets: vec![asset],
+                evidence: vec![evidence],
+                ..Default::default()
+            },
+        });
+        state
+    }
+
+    // 1. Actual raw Set-Cookie header/value material is rejected (any ASCII case).
+    for raw in [
+        "Set-Cookie: session=synthetic-cookie-value-1",
+        "set-cookie: session=synthetic-cookie-value-2",
+        "SET-COOKIE: session=synthetic-cookie-value-3",
+        "Set-Cookie : session=synthetic-cookie-value-4",
+    ] {
+        let hostile = serde_json::json!({"note": raw});
+        assert!(
+            evidence_state(hostile).validate().is_err(),
+            "raw Set-Cookie material must be rejected: {raw:?}"
+        );
+    }
+    // Exact structured Set-Cookie header keys are rejected (whitespace-tolerant).
+    for structured in [
+        serde_json::json!({"set-cookie": "session=synthetic-cookie-value"}),
+        serde_json::json!({"Set-Cookie" : "session=synthetic-cookie-value"}),
+    ] {
+        assert!(
+            evidence_state(structured).validate().is_err(),
+            "structured Set-Cookie key must be rejected"
+        );
+    }
+    // 2. Actual raw Cookie header/value material is rejected.
+    for raw in [
+        "Cookie: session=synthetic-cookie-value-1",
+        "cookie: session=synthetic-cookie-value-2",
+    ] {
+        let hostile = serde_json::json!({"note": raw});
+        assert!(
+            evidence_state(hostile).validate().is_err(),
+            "raw Cookie material must be rejected: {raw:?}"
+        );
+    }
+    // 3. Structured value-bearing `cookies` is rejected.
+    let hostile = serde_json::json!({
+        "cookies": [{"name": "session", "value": "synthetic-cookie-value"}]
+    });
+    assert!(
+        evidence_state(hostile).validate().is_err(),
+        "structured cookies collection must be rejected"
+    );
+    // 5. `cookie_names` is accepted (names only, no values).
+    let safe = serde_json::json!({"cookie_names": ["session"]});
+    assert!(
+        evidence_state(safe).validate().is_ok(),
+        "cookie_names must be accepted"
+    );
+    // Synthetic cookie VALUE never crosses via names-only shape.
+    let safe_names = serde_json::json!({"cookie_names": ["session"]});
+    let serialized = serde_json::to_string(&safe_names).unwrap();
+    assert!(
+        !serialized.contains("synthetic-cookie-value"),
+        "names-only shape must not carry the synthetic value"
+    );
+    // 6. `cookies_enabled` is accepted.
+    let safe = serde_json::json!({"cookies_enabled": true});
+    assert!(
+        evidence_state(safe).validate().is_ok(),
+        "cookies_enabled must be accepted"
+    );
+    // 7. Harmless prose is accepted (including prose naming the header without raw material).
+    for prose in [
+        "observed cookies in passing prose are fine",
+        "the set-cookie header was noted in prose without values",
+    ] {
+        let safe = serde_json::json!({"note": prose});
+        // Prose without a colon+value must not trip the raw-header predicate.
+        // The second case names the header but carries no `:` value material;
+        // it stays accepted by design (raw form requires `set-cookie:`).
+        assert!(
+            evidence_state(safe).validate().is_ok(),
+            "harmless prose must be accepted: {prose:?}"
+        );
+    }
+    // 8. Innocent larger tokens containing `set-cookie` do not false-positive.
+    for innocent in [
+        "asset-cookie",
+        "asset-cookie token is innocent",
+        "my-set-cookie-token is innocent",
+    ] {
+        let safe = serde_json::json!({"note": innocent, "server": innocent});
+        assert!(
+            evidence_state(safe).validate().is_ok(),
+            "innocent substring must not false-positive: {innocent:?}"
+        );
+    }
+}
