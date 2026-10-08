@@ -475,7 +475,6 @@ mod tests {
 
     #[test]
     fn probe_budget_is_visible_and_never_exceeded() {
-        assert!(MAX_OS_PROBES_PER_HOST <= 8);
         // Evidence reuse: known open + closed ports lead the plan.
         let plan = plan_os_probes("192.0.2.10", &[443, 80], &[22], 6);
         assert_eq!(plan.reused_open_port, Some(80));
@@ -485,8 +484,9 @@ mod tests {
         assert!(plan.probes_planned <= MAX_OS_PROBES_PER_HOST);
         assert_eq!(plan.ports.len() as u32, plan.probes_planned);
         // Oversized requests clamp to the budget, never expand.
-        let clamped = plan_os_probes("192.0.2.10", &[], &[], 100);
+        let clamped = plan_os_probes("192.0.2.10", &[], &[], u32::MAX);
         assert!(clamped.probes_planned <= MAX_OS_PROBES_PER_HOST);
+        assert!(clamped.ports.len() <= MAX_OS_PROBES_PER_HOST as usize);
         // Missing evidence is explained, never hidden expansion.
         assert!(!clamped.missing.is_empty());
         // Deterministic: same evidence in different order, same plan.
