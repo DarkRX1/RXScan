@@ -113,6 +113,71 @@ struct RetryModule {
     attempts: Arc<AtomicUsize>,
     kind: TaskKind,
 }
+
+/// Deterministic concurrency proof: both tasks must be in-flight at once to
+/// pass the rendezvous. No sleep-overlap luck: entry is signalled via atomics
+/// and the countdown release is deterministic. The wait carries a timeout so
+/// a sequential scheduler (or a lost worker) fails the peak assertion instead
+/// of hanging the suite.
+struct RendezvousModule {
+    active: Arc<AtomicUsize>,
+    maximum: Arc<AtomicUsize>,
+    /// Arrival counter paired with a release Condvar.
+    rendezvous: Arc<(Mutex<usize>, std::sync::Condvar)>,
+}
+impl Module for RendezvousModule {
+    fn kind(&self) -> TaskKind {
+        TaskKind::HostDiscovery
+    }
+    fn execute(&self, _context: ModuleContext) -> ModuleFuture {
+        let active = self.active.clone();
+        let maximum = self.maximum.clone();
+        let rendezvous = self.rendezvous.clone();
+        Box::pin(async move {
+            let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+            maximum.fetch_max(current, Ordering::SeqCst);
+            // Both tasks rendezvous here: with budget 2 the scheduler
+            // dispatches both workers, both arrive, both proceed. A lone
+            // arrival times out and proceeds so the test fails on the peak
+            // assertion instead of deadlocking.
+            let (lock, cvar) = rendezvous.as_ref();
+            let mut arrived = lock.lock().unwrap();
+            *arrived += 1;
+            if *arrived >= 2 {
+                cvar.notify_all();
+            } else {
+                let (guard, _timeout) = cvar
+                    .wait_timeout_while(arrived, Duration::from_secs(5), |count| *count < 2)
+                    .unwrap();
+                drop(guard);
+            }
+            active.fetch_sub(1, Ordering::SeqCst);
+            Ok(ModuleOutput::default())
+        })
+    }
+}
+
+/// Task constructor for the rendezvous proof: mirrors [`task`] but with a
+/// generous timeout so the deterministic barrier never races the
+/// scheduler's per-task timeout (the shared helper uses 100ms, far too
+/// tight for a rendezvous under parallel-test load).
+fn rendezvous_task(plan: &ScanPlan, asset: &str, guard: &dyn ScopeGuard) -> Task {
+    Task::new(
+        TaskKind::HostDiscovery,
+        None,
+        Vec::new(),
+        Some(AssetId(asset.to_owned())),
+        plan.stable_id(),
+        50,
+        Duration::from_secs(10),
+        RetryPolicy::default(),
+        "host",
+        provenance(plan, "host"),
+        TaskScopeTarget::Host("example.test".to_owned()),
+        guard,
+    )
+    .unwrap()
+}
 impl Module for RetryModule {
     fn kind(&self) -> TaskKind {
         self.kind.clone()
@@ -360,9 +425,15 @@ fn timeout_and_queued_cancellation_are_terminal() {
 
 #[test]
 fn concurrency_budget_scope_and_stale_scope_are_enforced() {
+    // Deterministic rendezvous replaces the old 20ms-sleep overlap
+    // assumption (hosted macOS proved scheduler timing can serialize two
+    // short sleeps into peak 1). Budget stays 2, expected peak stays
+    // exactly 2, production executor untouched.
     let plan = plan();
     let active = Arc::new(AtomicUsize::new(0));
     let maximum = Arc::new(AtomicUsize::new(0));
+    let rendezvous: Arc<(Mutex<usize>, std::sync::Condvar)> =
+        Arc::new((Mutex::new(0), std::sync::Condvar::new()));
     let mut scheduler = make_scheduler(
         &plan,
         Arc::new(VecEventSink::default()),
@@ -373,19 +444,17 @@ fn concurrency_budget_scope_and_stale_scope_are_enforced() {
         },
         SpeedSetting::Numeric(100),
     );
-    scheduler.register_module(Arc::new(ImmediateModule {
-        kind: TaskKind::HostDiscovery,
-        order: None,
-        active: Some(active),
-        maximum: Some(maximum.clone()),
-        delay: Duration::from_millis(20),
+    scheduler.register_module(Arc::new(RendezvousModule {
+        active: active.clone(),
+        maximum: maximum.clone(),
+        rendezvous,
     }));
     let guard = PolicyScopeGuard::new(plan.scope.clone());
     scheduler
-        .add_task(task(&plan, TaskKind::HostDiscovery, "one", "host", &guard))
+        .add_task(rendezvous_task(&plan, "one", &guard))
         .unwrap();
     scheduler
-        .add_task(task(&plan, TaskKind::HostDiscovery, "two", "host", &guard))
+        .add_task(rendezvous_task(&plan, "two", &guard))
         .unwrap();
     assert_eq!(scheduler.run().unwrap().completed.len(), 2);
     assert_eq!(maximum.load(Ordering::SeqCst), 2);

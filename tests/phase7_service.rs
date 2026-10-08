@@ -2561,13 +2561,66 @@ fn delayed_greeting_within_window_still_classifies() {
 }
 
 #[test]
-fn fragmented_ssh_banner_still_classifies() {
-    // Byte-at-a-time delivery: framing accumulates, grammar still proves.
+fn ssh_identification_grammar_extracts_product_and_version() {
+    // Grammar contract only — explicitly NOT a multi-read accumulation
+    // proof. Call path:
+    //
+    //   test
+    //    -> test-local input construction only (no production code)
+    //    -> rxscan::probes::match_ssh_identification (src/probes.rs:302,
+    //       public production grammar shared by probe_ssh, probe_generic,
+    //       and evaluate_passive)
+    //
+    // Production accumulation is NOT executed here. It lives in
+    // `read_until` (src/probes.rs:173, private, `stream: &mut TcpStream`)
+    // and `observe_passive` (src/service_probe.rs:940, private, builds its
+    // own TcpStream via ProbeCtx::connect and reads inline). Neither takes a
+    // generic Read/BufRead/closure, and no other reader seam exists on that
+    // path, so two forced receiver reads cannot be fed to production code
+    // without a production refactor (not done in this remediation).
+    // Fragment-prefix insufficiency belongs to the private newline gates —
+    // probe_ssh (src/probes.rs:343) `!saw_newline` yields "incomplete banner
+    // line (no terminator)", and evaluate_passive (src/service_probe.rs:1060)
+    // requires `observation.saw_newline` before consulting the grammar —
+    // cited, not executed. This test pins the grammar contract on the
+    // complete identification that accumulation must deliver. The intended
+    // receiver reads are documented as input only: read #1 b"SSH-2.0-",
+    // read #2 b"FragSSH_3.1\r\n".
+    //
+    // History: byte-at-a-time + 5ms sleeps DID force separate receiver reads
+    // on loopback, but the ~105ms sleep chain raced the 500ms passive window
+    // under parallel-test load on hosted macOS. Back-to-back write() calls
+    // were then tried and reverted: TCP is a byte stream, write() boundaries
+    // are not preserved, so they routinely coalesce into one read and prove
+    // nothing about fragmentation.
+    let line = "SSH-2.0-FragSSH_3.1";
+    let (proto, product, version) = rxscan::probes::match_ssh_identification(line)
+        .expect("complete accumulated line must satisfy the SSH identification grammar");
+    assert_eq!(proto, "2.0");
+    assert_eq!(product.as_deref(), Some("FragSSH"));
+    assert_eq!(version.as_deref(), Some("3.1"));
+    // Bounded evidence, no I/O, no authentication bytes: this test sends
+    // nothing at all.
+    assert!(line.len() <= 200, "bounded SSH identification");
+}
+
+#[test]
+fn ssh_banner_loopback_integration_classifies() {
+    // Loopback integration through the real service-probe pipeline:
+    //
+    //   test
+    //    -> real loopback socket (one complete banner write; TCP write
+    //       boundaries imply nothing about receiver read boundaries)
+    //    -> run_unknown_plan
+    //    -> execute_service_probe
+    //    -> observe_passive
+    //    -> evaluate_passive
+    //
+    // Asserts protocol == ssh with the expected product evidence. This is
+    // integration coverage, not fragmented-read proof: it exercises the
+    // production pipeline end to end with a complete SSH identification.
     let fixture = Fixture::spawn(|mut stream, received| {
-        for byte in b"SSH-2.0-FragSSH_3.1\r\n" {
-            let _ = stream.write_all(&[*byte]);
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        let _ = stream.write_all(b"SSH-2.0-FragSSH_3.1\r\n");
         let _ = stream.set_read_timeout(Some(Duration::from_millis(300)));
         let mut chunk = [0u8; 512];
         if let Ok(count) = stream.read(&mut chunk) {

@@ -270,14 +270,24 @@ fn read_jsonl_payloads(path: &std::path::Path) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// Serializes the full-default-scan tests in this binary.
+/// Serializes every real-socket scan test in this binary.
 ///
-/// Each binds real loopback listeners on default-set ports while a sibling
-/// thread scans all 100 default ports: without serialization the scans
-/// cross-find each other's fixtures (extra opens) and a "closed" pick can
-/// flip open mid-scan. Ephemeral `:0` listeners elsewhere cannot collide
-/// (OS ephemeral range sits above the default set), so only the three
-/// full-default tests share this lock.
+/// Windows hosted runs proved (CI run 37789176076, two identical attempts)
+/// that the full 65,535-port loopback scan overlapping small closed-port /
+/// default-recon scans flips refused connects into timeouts under loopback
+/// pressure (closed 0, attempts 2, missing port_closed/port_scan_completed,
+/// IPv6 state mismatch). Each test creates independent tokens and schedulers
+/// (no shared cancellation flag), so the coupling is OS socket/CPU pressure,
+/// not shared state.
+///
+/// ONE shared lock covers all real-socket scans here (full-default,
+/// all-ports, single-port, IPv6, retry, concurrency, and ephemeral-fixture
+/// end-to-end runs). Fake-scanner/unit tests never touch sockets and stay
+/// parallel. Separate locks would still permit the all-ports scan to overlap
+/// the closed-port/default-recon tests, so a single lock is mandatory.
+/// Ephemeral `:0` fixtures cannot collide on port numbers (OS ephemeral
+/// range sits above the default set); this lock exists for pressure, not
+/// just cross-contamination.
 static DEFAULT_SCAN_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
 fn hold_default_scan_lock() -> std::sync::MutexGuard<'static, ()> {
     // Poison recovery is safe here: the mutex guards no mutable state, it
@@ -296,6 +306,7 @@ fn hold_default_scan_lock() -> std::sync::MutexGuard<'static, ()> {
 
 #[test]
 fn single_open_port_via_local_listener() {
+    let _lock = hold_default_scan_lock();
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
     let port = listener.local_addr().unwrap().port();
     let plan = compile(&["127.0.0.1", "--ports", &port.to_string(), "--level", "3"]);
@@ -328,6 +339,7 @@ fn single_open_port_via_local_listener() {
 #[test]
 fn single_closed_port_is_not_open() {
     // High loopback port: refused fast, never reported open.
+    let _lock = hold_default_scan_lock();
     let plan = compile(&["127.0.0.1", "--ports", "65000", "--level", "3"]);
     let guard = Arc::new(PolicyScopeGuard::new(plan.scope.clone()));
     let policy = TcpScanPolicy::new(3, plan.goal, plan.tcp_ports.clone(), plan.speed);
@@ -409,6 +421,7 @@ fn timeout_state_is_distinct_from_closed() {
 
 #[test]
 fn explicit_port_list_scans_each_once_in_order() {
+    let _lock = hold_default_scan_lock();
     let listener_a = TcpListener::bind("127.0.0.1:0").unwrap();
     let port_a = listener_a.local_addr().unwrap().port();
     let listener_b = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -542,6 +555,7 @@ fn common_profile_is_versioned_centralized_and_sorted() {
 
 #[test]
 fn ipv4_scan_works() {
+    let _lock = hold_default_scan_lock();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let config = ScanConfig::bounded(
@@ -559,6 +573,7 @@ fn ipv4_scan_works() {
 
 #[test]
 fn ipv6_scan_works() {
+    let _lock = hold_default_scan_lock();
     let listener = TcpListener::bind("[::1]:0").expect("bind ::1");
     let port = listener.local_addr().unwrap().port();
     let config = ScanConfig::bounded(
@@ -585,6 +600,7 @@ fn ipv6_scan_works() {
 fn concurrency_is_bounded_and_descriptors_recycled() {
     // 1000 closed loopback ports through a 32-wide window: every port
     // accounted exactly once, no FD-exhaustion error storm.
+    let _lock = hold_default_scan_lock();
     let ports: Vec<u16> = (50_000..51_000).collect();
     let config = ScanConfig::bounded(
         Duration::from_millis(800),
@@ -715,6 +731,7 @@ fn timeouts_are_bounded_and_do_not_hang_completion() {
 #[test]
 fn retries_are_bounded_and_selective() {
     // Refused never retried; filtered retried at most once; cancel never.
+    let _lock = hold_default_scan_lock();
     let config_no_retry = ScanConfig::bounded(
         Duration::from_millis(500),
         16,
@@ -1353,6 +1370,7 @@ fn port_asset_ids_are_stable_and_collision_free() {
 
 #[test]
 fn jsonl_open_port_output_has_required_fields() {
+    let _lock = hold_default_scan_lock();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let stamp = SystemTime::now()
@@ -1461,6 +1479,7 @@ fn results_are_deterministically_ordered() {
 fn service_handoff_boundary_holds_no_fingerprinting() {
     // Phase 6 reports openness only: no service/version claims in findings,
     // evidence, or events.
+    let _lock = hold_default_scan_lock();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let plan = compile(&["127.0.0.1", "--ports", &port.to_string(), "--level", "3"]);
@@ -1501,6 +1520,7 @@ fn service_handoff_boundary_holds_no_fingerprinting() {
 
 #[test]
 fn ipv6_target_with_explicit_scope_scans_permitted_only() {
+    let _lock = hold_default_scan_lock();
     let plan = compile(&["::1", "--ports", "80", "--level", "3"]);
     let guard = Arc::new(PolicyScopeGuard::new(plan.scope.clone()));
     let policy = TcpScanPolicy::new(3, plan.goal, plan.tcp_ports.clone(), plan.speed);
@@ -1795,6 +1815,7 @@ fn speed_changes_pressure_never_scan_semantics() {
     // Self-contained: fixtures live on ephemeral ports outside the default
     // set, so sibling default-scan tests can neither find nor steal them.
     use rxscan::plan::NamedSpeed;
+    let _lock = hold_default_scan_lock();
     let mut ports = Vec::new();
     for _ in 0..2 {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral fixture");
@@ -1900,6 +1921,7 @@ fn all_ports_loopback_proves_full_ledger_and_bounds() {
     // tasks), and bounded FD pressure (fd_peak <= 128 window).
     // Environment listeners may add extra opens; assertions only require
     // the fixture plus internal consistency.
+    let _lock = hold_default_scan_lock();
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral fixture");
     let port = listener.local_addr().unwrap().port();
     listener.set_nonblocking(true).unwrap();
