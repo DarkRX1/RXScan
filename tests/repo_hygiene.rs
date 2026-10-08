@@ -212,7 +212,10 @@ fn search_sigint_cancellation_has_process_lifetime() {
     // pointer itself races the async handler. The fix is a process-lifetime
     // static atomic in platform::process reused by main.rs — pin that design.
     let platform = std::fs::read_to_string(repo_root().join("src/platform/process.rs"))
-        .expect("process.rs reads");
+        .expect("process.rs reads")
+        // Windows checkouts may carry CRLF (no eol attribute pins these
+        // sources); normalize so brace-boundary parsing is portable.
+        .replace("\r\n", "\n");
     assert!(
         platform.contains("static PROCESS_CANCELLED: AtomicBool"),
         "process cancellation must use a process-lifetime static atomic"
@@ -256,7 +259,9 @@ fn search_sigint_cancellation_has_process_lifetime() {
         }
     }
     // main.rs must reuse the platform state, not duplicate handlers.
-    let cli = std::fs::read_to_string(repo_root().join("src/main.rs")).expect("src/main.rs reads");
+    let cli = std::fs::read_to_string(repo_root().join("src/main.rs"))
+        .expect("src/main.rs reads")
+        .replace("\r\n", "\n");
     assert!(
         !cli.contains("static SEARCH_CANCELLED"),
         "main.rs must not duplicate process state"
