@@ -4157,11 +4157,22 @@ fn run_os_lab(args: &[String]) {
             }
         }
     }
-    let fixture_path = fixture_path.expect("rxscan os-lab analyze requires a fixture path");
-    let fixture_std = std::fs::read_to_string(fixture_path).unwrap_or_else(|error| {
-        err!("rxscan os-lab analyze: cannot read fixture: {error}");
+    let fixture_path = match fixture_path {
+        Some(path) => path,
+        None => {
+            err!("rxscan os-lab analyze: usage: rxscan os-lab analyze [--json] <fixture.json>");
+            std::process::exit(2);
+        }
+    };
+    let fixture_std = if std::path::Path::new(fixture_path).exists() {
+        std::fs::read_to_string(fixture_path).unwrap_or_else(|error| {
+            err!("rxscan os-lab analyze: cannot read fixture: {error}");
+            std::process::exit(2);
+        })
+    } else {
+        err!("rxscan os-lab analyze: usage: rxscan os-lab analyze [--json] <fixture.json>");
         std::process::exit(2);
-    });
+    };
     let fixture = rxscan::os_lab::OsLabFixture::from_json(&fixture_std).unwrap_or_else(|error| {
         err!("rxscan os-lab analyze: invalid fixture: {error}");
         std::process::exit(2);
