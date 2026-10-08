@@ -1227,13 +1227,15 @@ struct Lab {
     stop_open: Arc<AtomicBool>,
 }
 
-fn lab_page(canary_port: u16) -> String {
+fn lab_page(canary_addr: std::net::SocketAddr) -> String {
+    // `SocketAddr` display already brackets IPv6 (`[::1]:port`), so the
+    // canary URL is correct for either loopback family without string hacks.
     format!(
         "<html><head><title>Lab Home</title></head><body>\
         <a href=\"/a\">a</a><a href=\"/b\">b</a><a href=\"/a#frag\">adup</a>\
         <a href=\"/redirect\">r</a><a href=\"/admin\">admin</a>\
         <a href=\"/search?q=hello\">s</a>\
-        <a href=\"http://127.0.0.2:{canary_port}/evil\">canary</a>\
+        <a href=\"http://{canary_addr}/evil\">canary</a>\
         </body></html>"
     )
 }
@@ -1246,8 +1248,18 @@ fn spawn_lab() -> Lab {
     let http_port = http.local_addr().unwrap().port();
     let open = bind("127.0.0.1");
     let open_port = open.local_addr().unwrap().port();
-    let canary = bind("127.0.0.2");
-    let canary_port = canary.local_addr().unwrap().port();
+    // Portable out-of-scope canary: prefer IPv6 loopback (a different
+    // address identity than the scoped IPv4 127.0.0.1 target), falling back
+    // to the secondary IPv4 loopback where IPv6 is unavailable. Both are
+    // deterministic local fixtures (no external interfaces, LAN, DNS, or
+    // remote services). Fail loudly if neither binds; never silently
+    // disable the scope assertion.
+    let canary = std::net::TcpListener::bind("[::1]:0")
+        .or_else(|_| TcpListener::bind("127.0.0.2:0"))
+        .expect(
+            "bind portable out-of-scope canary listener (IPv6 loopback or secondary IPv4 loopback)",
+        );
+    let canary_addr = canary.local_addr().expect("canary local address");
     let canary_hits = Arc::new(AtomicUsize::new(0));
     let seen_auth = Arc::new(AtomicUsize::new(0));
     let seen_post = Arc::new(AtomicUsize::new(0));
@@ -1295,7 +1307,7 @@ fn spawn_lab() -> Lab {
             }
         });
     }
-    // HTTP lab server (canary port captured by value: u16 is Copy).
+    // HTTP lab server (canary address captured by value: SocketAddr is Copy).
     {
         let stop = stop.clone();
         let seen_auth = seen_auth.clone();
@@ -1359,7 +1371,7 @@ fn spawn_lab() -> Lab {
                             b"<html><head><title>Beta</title></head><body>beta</body></html>";
                         format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\nContent-Type: text/html\r\n\r\n", body.len()).into_bytes().into_iter().chain(body.iter().copied()).collect()
                     } else if path == "/" {
-                        let body = lab_page(canary_port);
+                        let body = lab_page(canary_addr);
                         format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\nContent-Type: text/html\r\n\r\n", body.len()).into_bytes().into_iter().chain(body.bytes()).collect()
                     } else {
                         let body =
@@ -1551,26 +1563,31 @@ fn send_sigint(pid: u32) {
 ///   test would prove it.
 #[test]
 fn interruption_terminates_scan_promptly_without_panic_or_corruption() {
-    // A backgrounded non-interactive shell sets SIGINT/SIGQUIT to SIG_IGN,
-    // which exec preserves: children of such a tree cannot test delivery.
-    // Detect and skip loudly instead of failing confusingly (P20 finding:
-    // backgrounded `nohup sh scripts/release-check.sh &` runs poisoned the
-    // whole subtree and produced ~16s "survivals" of an otherwise promptly
-    // dying binary).
-    let inherited = std::fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|text| {
-            text.lines().find_map(|line| {
-                line.strip_prefix("SigIgn:").and_then(|rest| {
-                    u64::from_str_radix(rest.trim(), 16)
-                        .ok()
-                        .map(|mask| mask & 0x2 != 0)
+    // Linux-specific diagnostic: a backgrounded non-interactive shell sets
+    // SIGINT/SIGQUIT to SIG_IGN, which exec preserves, so children of such
+    // a tree cannot test delivery. Detect and skip loudly instead of failing
+    // confusingly (P20 finding: backgrounded `nohup sh scripts/release-check.sh &`
+    // runs poisoned the whole subtree and produced ~16s "survivals" of an
+    // otherwise promptly dying binary). `/proc/self/status` exists only on
+    // Linux; on other platforms this check is skipped entirely (no pretended
+    // /proc, no fabricated signal-mask evidence).
+    #[cfg(target_os = "linux")]
+    {
+        let inherited = std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|text| {
+                text.lines().find_map(|line| {
+                    line.strip_prefix("SigIgn:").and_then(|rest| {
+                        u64::from_str_radix(rest.trim(), 16)
+                            .ok()
+                            .map(|mask| mask & 0x2 != 0)
+                    })
                 })
-            })
-        });
-    if inherited.unwrap_or(false) {
-        eprintln!("SIGINT already ignored in this tree; skipping delivery test");
-        return;
+            });
+        if inherited.unwrap_or(false) {
+            eprintln!("SIGINT already ignored in this tree; skipping delivery test");
+            return;
+        }
     }
     let dir = test_dir("sigint");
     // Establish prior valid outputs at the same paths the scan will use:
@@ -1622,15 +1639,12 @@ fn interruption_terminates_scan_promptly_without_panic_or_corruption() {
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
-    std::thread::sleep(Duration::from_secs(2));
-    // Still running (slow lab guarantees a long window)?
-    assert!(
-        child.try_wait().unwrap().is_none(),
-        "scan finished before interruption; slow lab too fast"
-    );
-    // Wait for proof the scan reached slow work (fixture hits), not a
-    // fixed sleep: killing before the slow stage risks racing natural
-    // completion (a zombie accepts the signal yet reports exit 0).
+    // Semantic synchronization: wait for proof the scan reached controlled
+    // slow work (fixture hits >= 5) with a bounded deadline and child
+    // liveness checks. No fixed precondition sleep: the hits counter proves
+    // the process actually reached slow work before interruption is sent.
+    // Killing before the slow stage risks racing natural completion (a
+    // zombie accepts the signal yet reports exit 0).
     let deadline = Instant::now() + Duration::from_secs(90);
     loop {
         if slow.hits.load(Ordering::SeqCst) >= 5 {
@@ -1653,44 +1667,57 @@ fn interruption_terminates_scan_promptly_without_panic_or_corruption() {
         "scan finished before interruption; slow lab too fast"
     );
     let kill_at = Instant::now();
-    let cmdline = std::fs::read_to_string(format!("/proc/{}/cmdline", child.id()))
-        .unwrap_or_else(|_| "<gone>".to_owned())
-        .replace('\0', " ");
-    // Forensics: SigBlk bit 1 (0x2) means SIGINT is blocked and would be
-    // inherited across exec, making kills silently ineffective.
-    let self_mask = std::fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|text| {
-            text.lines()
-                .find(|line| line.starts_with("SigBlk:"))
-                .map(|line| line.to_owned())
-        })
-        .unwrap_or_default();
-    let child_mask = std::fs::read_to_string(format!("/proc/{}/status", child.id()))
-        .ok()
-        .and_then(|text| {
-            text.lines()
-                .find(|line| line.starts_with("SigBlk:"))
-                .map(|line| line.to_owned())
-        })
-        .unwrap_or_default();
-    eprintln!("phase20 sigint: pid={} cmdline={cmdline:?}", child.id());
-    eprintln!("phase20 sigint: self_mask={self_mask} child_mask={child_mask}");
-    // Scheduler-state forensics: a D-state (uninterruptible) process cannot
-    // act on signals until the kernel wait ends; wchan names the wait.
-    let child_sched = std::fs::read_to_string(format!("/proc/{}/wchan", child.id()))
-        .unwrap_or_else(|_| "<gone>".to_owned());
-    let child_stat =
-        std::fs::read_to_string(format!("/proc/{}/stat", child.id())).unwrap_or_default();
-    let child_state = child_stat
-        .rfind(')')
-        .and_then(|end| child_stat[end..].split_whitespace().nth(1))
-        .unwrap_or("?")
-        .to_owned();
-    eprintln!(
-        "phase20 sigint: child_state={child_state} wchan={}",
-        child_sched.trim()
-    );
+    // Linux-only forensics via /proc: signal masks, cmdline, scheduler
+    // state. On non-Linux platforms no /proc is pretended and no
+    // signal-mask evidence is fabricated.
+    #[cfg(target_os = "linux")]
+    {
+        let cmdline = std::fs::read_to_string(format!("/proc/{}/cmdline", child.id()))
+            .unwrap_or_else(|_| "<gone>".to_owned())
+            .replace('\0', " ");
+        // Forensics: SigBlk bit 1 (0x2) means SIGINT is blocked and would be
+        // inherited across exec, making kills silently ineffective.
+        let self_mask = std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|text| {
+                text.lines()
+                    .find(|line| line.starts_with("SigBlk:"))
+                    .map(|line| line.to_owned())
+            })
+            .unwrap_or_default();
+        let child_mask = std::fs::read_to_string(format!("/proc/{}/status", child.id()))
+            .ok()
+            .and_then(|text| {
+                text.lines()
+                    .find(|line| line.starts_with("SigBlk:"))
+                    .map(|line| line.to_owned())
+            })
+            .unwrap_or_default();
+        eprintln!("phase20 sigint: pid={} cmdline={cmdline:?}", child.id());
+        eprintln!("phase20 sigint: self_mask={self_mask} child_mask={child_mask}");
+        // Scheduler-state forensics: a D-state (uninterruptible) process cannot
+        // act on signals until the kernel wait ends; wchan names the wait.
+        let child_sched = std::fs::read_to_string(format!("/proc/{}/wchan", child.id()))
+            .unwrap_or_else(|_| "<gone>".to_owned());
+        let child_stat =
+            std::fs::read_to_string(format!("/proc/{}/stat", child.id())).unwrap_or_default();
+        let child_state = child_stat
+            .rfind(')')
+            .and_then(|end| child_stat[end..].split_whitespace().nth(1))
+            .unwrap_or("?")
+            .to_owned();
+        eprintln!(
+            "phase20 sigint: child_state={child_state} wchan={}",
+            child_sched.trim()
+        );
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        eprintln!(
+            "phase20 sigint: pid={} (non-Linux: no /proc forensics)",
+            child.id()
+        );
+    }
     // Interruption delivery is platform-specific. Unix uses SIGINT via
     // kill(1) so handler behavior (prompt death by signal) is proven.
     // Windows has no SIGINT-via-kill; Child::kill() (TerminateProcess,

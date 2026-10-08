@@ -2388,3 +2388,299 @@ fn storage_and_save_caps_are_documented_and_streaming() {
     assert!(!source.contains("tokio::"));
     assert!(!source.contains("rayon::"));
 }
+
+// ---------------------------------------------------------------------------
+// Shared cookie-policy fixtures (test-only compaction).
+// One minimal scan-state builder covers task-param / asset-attribute /
+// finding-metadata injection; a tiny evidence helper covers the
+// evidence-details shape. Table-driven cases below preserve the exact
+// bare-key / structured / safe / prose coverage without rebuilding
+// PersistedScanState three times.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+enum CookieSite {
+    TaskParam,
+    AssetAttr,
+    FindingMeta,
+}
+
+fn cookie_site_label(site: CookieSite) -> &'static str {
+    match site {
+        CookieSite::TaskParam => "task",
+        CookieSite::AssetAttr => "asset",
+        CookieSite::FindingMeta => "finding",
+    }
+}
+
+fn cookie_scan(
+    site: CookieSite,
+    key: &str,
+    value: serde_json::Value,
+    variant: &str,
+) -> PersistedScanState {
+    let p = plan();
+    let prov = provenance(&p);
+    let ip = Asset::scoped(AssetKind::Ip, "127.0.0.1", &p.scope, prov.clone()).unwrap();
+    let port = match site {
+        CookieSite::AssetAttr => {
+            let s = value
+                .as_str()
+                .expect("asset attr cookie value must be a JSON string");
+            Asset::child(AssetKind::Port, &ip.id, "443", prov.clone())
+                .unwrap()
+                .with_attributes(BTreeMap::from([(key.to_owned(), s.to_owned())]))
+        }
+        _ => Asset::child(AssetKind::Port, &ip.id, "443", prov.clone()).unwrap(),
+    };
+    let mut t = task(&p, TaskKind::HostDiscovery, TaskState::Succeeded, variant);
+    if let CookieSite::TaskParam = site {
+        let s = value
+            .as_str()
+            .expect("task param cookie value must be a JSON string");
+        t.params.insert(key.to_owned(), s.to_owned());
+        t.id = t.canonical_identity();
+    }
+    let task_id = t.id.clone();
+    let findings = match site {
+        CookieSite::FindingMeta => {
+            let mut finding = Finding::new(
+                "finding",
+                Severity::Info,
+                Confidence::new(80).unwrap(),
+                port.id.clone(),
+                prov.clone(),
+            )
+            .unwrap();
+            finding.metadata.insert(key.to_owned(), value);
+            vec![finding]
+        }
+        _ => Vec::new(),
+    };
+    PersistedScanState {
+        schema_version: CHECKPOINT_SCHEMA_VERSION,
+        scan_id: p.stable_id(),
+        saved_at: Timestamp(2),
+        plan: p,
+        tasks: vec![PersistedTask { task: t }],
+        outputs: vec![PersistedModuleOutput {
+            task_id,
+            output: rxscan::execution::ModuleOutput {
+                assets: vec![ip, port],
+                events: vec![],
+                evidence: vec![],
+                findings,
+            },
+        }],
+        registries: PersistedRegistries::default(),
+    }
+}
+
+fn cookie_evidence_scan(details: serde_json::Value, variant: &str) -> PersistedScanState {
+    let p = plan();
+    let prov = provenance(&p);
+    let ip = Asset::scoped(AssetKind::Ip, "127.0.0.1", &p.scope, prov.clone()).unwrap();
+    let evidence = Evidence::new(
+        "phase18.test",
+        ip.id.clone(),
+        BoundedDetails::from_value(details, 4096).unwrap(),
+        Confidence::new(80).unwrap(),
+        prov.clone(),
+    )
+    .unwrap();
+    let t = task(&p, TaskKind::HostDiscovery, TaskState::Succeeded, variant);
+    let task_id = t.id.clone();
+    PersistedScanState {
+        schema_version: CHECKPOINT_SCHEMA_VERSION,
+        scan_id: p.stable_id(),
+        saved_at: Timestamp(2),
+        plan: p,
+        tasks: vec![PersistedTask { task: t }],
+        outputs: vec![PersistedModuleOutput {
+            task_id,
+            output: rxscan::execution::ModuleOutput {
+                assets: vec![ip],
+                evidence: vec![evidence],
+                events: vec![],
+                findings: vec![],
+            },
+        }],
+        registries: PersistedRegistries::default(),
+    }
+}
+
+#[test]
+fn structured_cookie_collection_is_rejected_for_project_import() {
+    // Synthetic fixture material only. Must be rejected even though it
+    // contains neither "Cookie:" nor a raw Set-Cookie header.
+    let hostile = serde_json::json!({
+        "cookies": [
+            {
+                "name": "session",
+                "value": "synthetic-cookie-value"
+            }
+        ]
+    });
+    assert!(!serde_json::to_string(&hostile).unwrap().contains("Cookie:"));
+    assert!(
+        !serde_json::to_string(&hostile)
+            .unwrap()
+            .to_ascii_lowercase()
+            .contains("set-cookie")
+    );
+    let hostile_scan = cookie_evidence_scan(hostile, "cookie-struct");
+    let mut project = ProjectState::new(None);
+    assert!(
+        project.add_scan(&hostile_scan, None, None).is_err(),
+        "structured cookies collection must be rejected for project import"
+    );
+}
+
+#[test]
+fn safe_cookie_name_metadata_is_accepted_for_project_import() {
+    let safe = serde_json::json!({
+        "cookie_names": ["session"],
+        "note": "observed cookies in passing prose are fine"
+    });
+    let safe_scan = cookie_evidence_scan(safe, "cookie-safe");
+    let mut project = ProjectState::new(None);
+    assert!(
+        project.add_scan(&safe_scan, None, None).is_ok(),
+        "safe cookie_names metadata must be accepted for project import"
+    );
+}
+
+#[test]
+fn bare_cookies_map_key_is_rejected_and_safe_keys_accepted_for_project_import() {
+    // Defense-in-depth: a bare map key exactly `cookies` (any ASCII case)
+    // must be rejected at the project-import boundary, while
+    // `cookie_names`, `cookies_enabled`, and prose mentioning cookies stay
+    // accepted. Synthetic fixture material only.
+    const SITES: [CookieSite; 3] = [
+        CookieSite::TaskParam,
+        CookieSite::AssetAttr,
+        CookieSite::FindingMeta,
+    ];
+    let hostile_value = serde_json::json!([
+        {"name": "session", "value": "synthetic-cookie-value"}
+    ]);
+    // Note: task `variant` values must avoid the substring `set-cookie`
+    // (which appears inside `asset-cookie`), otherwise the pre-existing
+    // forbidden-marker check rejects the task param before the asset/finding
+    // key under test is reached. Use neutral variant names.
+    for (index, key) in ["cookies", "CoOkIeS", "COOKIES"].into_iter().enumerate() {
+        for site in SITES {
+            let label = cookie_site_label(site);
+            let value = match site {
+                CookieSite::FindingMeta => hostile_value.clone(),
+                _ => serde_json::json!("safe-value"),
+            };
+            let scan = cookie_scan(site, key, value, &format!("hostile-{label}-{index}"));
+            let mut project = ProjectState::new(None);
+            assert!(
+                project.add_scan(&scan, None, None).is_err(),
+                "project import {label} key {key:?} must be rejected"
+            );
+        }
+    }
+    // Nested legacy shape inside a finding value stays rejected via the
+    // serialized-JSON helper even when the outer key is safe.
+    {
+        let nested = serde_json::json!({
+            "cookies": [{"name": "session", "value": "synthetic-cookie-value"}]
+        });
+        let scan = cookie_scan(CookieSite::FindingMeta, "nested", nested, "nested");
+        let mut project = ProjectState::new(None);
+        assert!(
+            project.add_scan(&scan, None, None).is_err(),
+            "nested serialized cookies collection must stay rejected for project import"
+        );
+    }
+    // Safe keys accepted at the project-import boundary.
+    for (index, key) in ["cookie_names", "cookies_enabled"].into_iter().enumerate() {
+        for site in SITES {
+            let label = cookie_site_label(site);
+            let value = match site {
+                CookieSite::FindingMeta => serde_json::json!(["session"]),
+                _ => serde_json::json!("session"),
+            };
+            let scan = cookie_scan(site, key, value, &format!("safe-{label}-{index}"));
+            let mut project = ProjectState::new(None);
+            assert!(
+                project.add_scan(&scan, None, None).is_ok(),
+                "project import {label} key {key:?} must be accepted"
+            );
+        }
+    }
+    // Prose mentioning the English word stays accepted.
+    {
+        let prose = "observed cookies in passing prose are fine";
+        for site in SITES {
+            let label = cookie_site_label(site);
+            let scan = cookie_scan(
+                site,
+                "note",
+                serde_json::json!(prose),
+                &format!("prose-{label}"),
+            );
+            let mut project = ProjectState::new(None);
+            assert!(
+                project.add_scan(&scan, None, None).is_ok(),
+                "project import {label} prose must be accepted"
+            );
+        }
+    }
+}
+
+#[test]
+fn bare_cookies_entity_attribute_is_rejected_for_project_validation() {
+    // Project entity attributes are string maps too: exact `cookies`
+    // (any ASCII case) must fail `ProjectState::validate`, while
+    // `cookie_names`, `cookies_enabled`, and prose stay valid.
+    let mut project = ProjectState::new(None);
+    project
+        .add_scan(&state("127.0.0.1", None, false), None, None)
+        .unwrap();
+    let entity_id = project.entities.keys().next().unwrap().clone();
+    for key in ["cookies", "CoOkIeS"] {
+        let mut hostile = project.clone();
+        hostile
+            .entities
+            .get_mut(&entity_id)
+            .unwrap()
+            .attributes
+            .insert(key.to_owned(), "safe-value".to_owned());
+        assert!(
+            hostile.validate().is_err(),
+            "project entity attribute key {key:?} must be rejected"
+        );
+    }
+    for key in ["cookie_names", "cookies_enabled"] {
+        let mut safe = project.clone();
+        safe.entities
+            .get_mut(&entity_id)
+            .unwrap()
+            .attributes
+            .insert(key.to_owned(), "session".to_owned());
+        assert!(
+            safe.validate().is_ok(),
+            "project entity attribute key {key:?} must be accepted"
+        );
+    }
+    {
+        let mut prose_ok = project.clone();
+        prose_ok
+            .entities
+            .get_mut(&entity_id)
+            .unwrap()
+            .attributes
+            .insert(
+                "note".to_owned(),
+                "observed cookies in passing prose are fine".to_owned(),
+            );
+        assert!(
+            prose_ok.validate().is_ok(),
+            "project entity attribute prose must be accepted"
+        );
+    }
+}

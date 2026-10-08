@@ -377,6 +377,17 @@ fn execute_web_probe(
             retryable: false,
         })?;
         let technologies = web_technologies_for(observation);
+        // Privacy boundary: persisted evidence carries bounded cookie NAMES
+        // only. Transient HTTP observation may contain bounded values in
+        // memory, while persistence stores names only; values (session
+        // identifiers / auth material) must never cross into persisted
+        // evidence. `Set-Cookie` header values are likewise never persisted
+        // (the HTTP parser already excludes them from retained headers).
+        let cookie_names: Vec<String> = observation
+            .cookies
+            .iter()
+            .map(|cookie| cookie.name.clone())
+            .collect();
         let details = BoundedDetails::from_value(
             serde_json::json!({
                 "target": target_label,
@@ -389,7 +400,7 @@ fn execute_web_probe(
                 "server": observation.server,
                 "content_type": observation.content_type,
                 "location": observation.location,
-                "cookies": observation.cookies,
+                "cookie_names": cookie_names,
                 "title": observation.title,
                 "body_bytes": observation.body_bytes,
                 "body_truncated": observation.body_truncated,

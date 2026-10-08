@@ -31,7 +31,11 @@ fn seed_packs_load_and_match() {
     );
     let http = packs
         .iter()
-        .find(|(path, _)| path.ends_with("/http.json") || path == "http.json")
+        .find(|(path, _)| {
+            std::path::Path::new(path)
+                .file_name()
+                .is_some_and(|name| name == "http.json")
+        })
         .expect("core http seed pack")
         .1
         .clone();

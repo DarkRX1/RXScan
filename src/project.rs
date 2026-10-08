@@ -430,6 +430,9 @@ impl ProjectState {
                 }
                 if contains_forbidden_project_marker(key)
                     || contains_forbidden_project_marker(value)
+                    || contains_structured_cookie_collection(key)
+                    || contains_structured_cookie_collection(value)
+                    || is_value_bearing_cookie_key(key)
                 {
                     return Err(ProjectError::Invalid(
                         "entity attribute contains forbidden marker".to_owned(),
@@ -1863,10 +1866,46 @@ fn contains_forbidden_project_marker(value: &str) -> bool {
     .any(|marker| lower.contains(marker))
 }
 
+/// Narrow exact-match predicate for a bare structured map key.
+///
+/// Recognizes exactly `cookies` (ASCII case-insensitive). It deliberately
+/// does NOT match `cookie_names`, `cookies_enabled`, or prose mentioning
+/// the English word "cookies", so safe names-only shapes stay importable.
+fn is_value_bearing_cookie_key(key: &str) -> bool {
+    key.eq_ignore_ascii_case("cookies")
+}
+
+/// Defense-in-depth for the legacy value-bearing cookie evidence shape.
+///
+/// Matches the serialized JSON key `"cookies":` (whitespace-tolerant)
+/// rather than the English word "cookies", so prose mentioning cookies
+/// stays allowed while structured collections are rejected. The safe
+/// metadata key `"cookie_names"` never matches because its closing quote
+/// does not follow `cookies`.
+fn contains_structured_cookie_collection(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    let needle = "\"cookies\"";
+    let bytes = lower.as_bytes();
+    let mut start = 0usize;
+    while let Some(pos) = lower[start..].find(needle) {
+        let mut idx = start + pos + needle.len();
+        while bytes.get(idx).is_some_and(|b| b.is_ascii_whitespace()) {
+            idx += 1;
+        }
+        if bytes.get(idx) == Some(&b':') {
+            return true;
+        }
+        start += pos + needle.len();
+    }
+    false
+}
+
 fn reject_forbidden_checkpoint_content(state: &PersistedScanState) -> Result<(), ProjectError> {
     for output in &state.outputs {
         for asset in &output.output.assets {
-            if contains_forbidden_project_marker(&asset.identity) {
+            if contains_forbidden_project_marker(&asset.identity)
+                || contains_structured_cookie_collection(&asset.identity)
+            {
                 return Err(ProjectError::Invalid(
                     "checkpoint asset identity contains forbidden marker".to_owned(),
                 ));
@@ -1874,6 +1913,9 @@ fn reject_forbidden_checkpoint_content(state: &PersistedScanState) -> Result<(),
             for (key, value) in &asset.attributes {
                 if contains_forbidden_project_marker(key)
                     || contains_forbidden_project_marker(value)
+                    || contains_structured_cookie_collection(key)
+                    || contains_structured_cookie_collection(value)
+                    || is_value_bearing_cookie_key(key)
                 {
                     return Err(ProjectError::Invalid(
                         "checkpoint asset attribute contains forbidden marker".to_owned(),
@@ -1881,11 +1923,54 @@ fn reject_forbidden_checkpoint_content(state: &PersistedScanState) -> Result<(),
                 }
             }
         }
+        for event in &output.output.events {
+            let serialized = serde_json::to_string(&event.details.data)
+                .map_err(|error| ProjectError::Invalid(error.to_string()))?;
+            if contains_forbidden_project_marker(&serialized)
+                || contains_structured_cookie_collection(&serialized)
+            {
+                return Err(ProjectError::Invalid(
+                    "checkpoint event contains forbidden marker".to_owned(),
+                ));
+            }
+        }
+        for evidence in &output.output.evidence {
+            let serialized = serde_json::to_string(&evidence.details.data)
+                .map_err(|error| ProjectError::Invalid(error.to_string()))?;
+            if contains_forbidden_project_marker(&serialized)
+                || contains_structured_cookie_collection(&serialized)
+            {
+                return Err(ProjectError::Invalid(
+                    "checkpoint evidence contains forbidden marker".to_owned(),
+                ));
+            }
+        }
         for finding in &output.output.findings {
-            if contains_forbidden_project_marker(&finding.title) {
+            if contains_forbidden_project_marker(&finding.title)
+                || contains_structured_cookie_collection(&finding.title)
+            {
                 return Err(ProjectError::Invalid(
                     "checkpoint finding contains forbidden marker".to_owned(),
                 ));
+            }
+            for (key, value) in &finding.metadata {
+                if is_value_bearing_cookie_key(key)
+                    || contains_forbidden_project_marker(key)
+                    || contains_structured_cookie_collection(key)
+                {
+                    return Err(ProjectError::Invalid(
+                        "checkpoint finding contains forbidden marker".to_owned(),
+                    ));
+                }
+                let serialized = serde_json::to_string(value)
+                    .map_err(|error| ProjectError::Invalid(error.to_string()))?;
+                if contains_forbidden_project_marker(&serialized)
+                    || contains_structured_cookie_collection(&serialized)
+                {
+                    return Err(ProjectError::Invalid(
+                        "checkpoint finding contains forbidden marker".to_owned(),
+                    ));
+                }
             }
         }
     }

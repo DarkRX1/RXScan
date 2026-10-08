@@ -1342,3 +1342,237 @@ fn advertised_collection_limits_accept_exact_limit_and_reject_one_over() {
         );
     }
 }
+
+#[test]
+fn structured_cookie_collection_is_rejected_for_persistence() {
+    // Synthetic fixture material only. The legacy value-bearing shape must
+    // be rejected even though it contains neither "Cookie:" nor a raw
+    // Set-Cookie header string.
+    let plan = plan();
+    let provenance = Provenance::new("test", "14.0.0", plan.stable_id(), Timestamp(1)).unwrap();
+    let asset = Asset::scoped(
+        AssetKind::Url,
+        "http://127.0.0.1/",
+        &plan.scope,
+        provenance.clone(),
+    )
+    .unwrap();
+    let hostile = serde_json::json!({
+        "cookies": [
+            {
+                "name": "session",
+                "value": "synthetic-cookie-value"
+            }
+        ]
+    });
+    assert!(!serde_json::to_string(&hostile).unwrap().contains("Cookie:"));
+    assert!(
+        !serde_json::to_string(&hostile)
+            .unwrap()
+            .to_ascii_lowercase()
+            .contains("set-cookie")
+    );
+    let evidence = rxscan::model::Evidence::new(
+        "test",
+        asset.id.clone(),
+        BoundedDetails::from_value(hostile, 4096).unwrap(),
+        rxscan::model::Confidence::new(80).unwrap(),
+        provenance,
+    )
+    .unwrap();
+    let mut state = state_with_tasks(vec![task(&plan, TaskState::Succeeded, "rxscan.test")]);
+    state.outputs.push(PersistedModuleOutput {
+        task_id: state.tasks[0].task.id.clone(),
+        output: ModuleOutput {
+            assets: vec![asset],
+            evidence: vec![evidence],
+            ..Default::default()
+        },
+    });
+    assert!(
+        state.validate().is_err(),
+        "structured cookies collection must be rejected"
+    );
+}
+
+#[test]
+fn safe_cookie_name_metadata_is_accepted_for_persistence() {
+    // The narrow `cookie_names` metadata shape carries names only and must
+    // persist. Prose mentioning the English word "cookies" without the JSON
+    // key must also stay allowed.
+    let plan = plan();
+    let provenance = Provenance::new("test", "14.0.0", plan.stable_id(), Timestamp(1)).unwrap();
+    let asset = Asset::scoped(
+        AssetKind::Url,
+        "http://127.0.0.1/",
+        &plan.scope,
+        provenance.clone(),
+    )
+    .unwrap();
+    let safe = serde_json::json!({
+        "cookie_names": ["session"],
+        "note": "observed cookies in passing prose are fine"
+    });
+    let evidence = rxscan::model::Evidence::new(
+        "test",
+        asset.id.clone(),
+        BoundedDetails::from_value(safe, 4096).unwrap(),
+        rxscan::model::Confidence::new(80).unwrap(),
+        provenance,
+    )
+    .unwrap();
+    let mut state = state_with_tasks(vec![task(&plan, TaskState::Succeeded, "rxscan.test")]);
+    state.outputs.push(PersistedModuleOutput {
+        task_id: state.tasks[0].task.id.clone(),
+        output: ModuleOutput {
+            assets: vec![asset],
+            evidence: vec![evidence],
+            ..Default::default()
+        },
+    });
+    assert!(
+        state.validate().is_ok(),
+        "safe cookie_names metadata must be accepted"
+    );
+}
+
+#[test]
+fn bare_cookies_map_key_is_rejected_and_safe_keys_accepted_for_persistence() {
+    // Defense-in-depth: a bare map key exactly `cookies` (any ASCII case)
+    // must be rejected where that structure is persistable, while
+    // `cookie_names`, `cookies_enabled`, and prose mentioning cookies stay
+    // accepted. Synthetic fixture material only.
+    fn state_with_task_param(p: &ScanPlan, key: &str, value: &str) -> PersistedScanState {
+        let mut t = task(p, TaskState::Pending, &format!("param-{key}"));
+        t.params.insert(key.to_owned(), value.to_owned());
+        t.id = t.canonical_identity();
+        state_with_tasks(vec![t])
+    }
+
+    fn state_with_asset_attr(p: &ScanPlan, key: &str, value: &str) -> PersistedScanState {
+        let provenance = Provenance::new("test", "14.0.0", p.stable_id(), Timestamp(1)).unwrap();
+        let asset = Asset::scoped(AssetKind::Url, "http://127.0.0.1/", &p.scope, provenance)
+            .unwrap()
+            .with_attributes(BTreeMap::from([(key.to_owned(), value.to_owned())]));
+        let mut state = state_with_tasks(vec![task(p, TaskState::Succeeded, "rxscan.test")]);
+        state.outputs.push(PersistedModuleOutput {
+            task_id: state.tasks[0].task.id.clone(),
+            output: ModuleOutput {
+                assets: vec![asset],
+                ..Default::default()
+            },
+        });
+        state
+    }
+
+    fn state_with_finding_metadata(
+        p: &ScanPlan,
+        key: &str,
+        value: serde_json::Value,
+    ) -> PersistedScanState {
+        let provenance = Provenance::new("test", "14.0.0", p.stable_id(), Timestamp(1)).unwrap();
+        let asset = Asset::scoped(
+            AssetKind::Url,
+            "http://127.0.0.1/",
+            &p.scope,
+            provenance.clone(),
+        )
+        .unwrap();
+        let mut finding = rxscan::model::Finding::new(
+            "finding",
+            rxscan::model::Severity::Info,
+            rxscan::model::Confidence::new(80).unwrap(),
+            asset.id.clone(),
+            provenance,
+        )
+        .unwrap();
+        finding.metadata.insert(key.to_owned(), value);
+        let mut state = state_with_tasks(vec![task(p, TaskState::Succeeded, "rxscan.test")]);
+        state.outputs.push(PersistedModuleOutput {
+            task_id: state.tasks[0].task.id.clone(),
+            output: ModuleOutput {
+                assets: vec![asset],
+                findings: vec![finding],
+                ..Default::default()
+            },
+        });
+        state
+    }
+
+    let hostile_value = serde_json::json!([
+        {"name": "session", "value": "synthetic-cookie-value"}
+    ]);
+    // Task params: bare key rejected (exact + mixed case).
+    for key in ["cookies", "CoOkIeS", "COOKIES"] {
+        let p = plan();
+        assert!(
+            state_with_task_param(&p, key, "safe-value")
+                .validate()
+                .is_err(),
+            "task param key {key:?} must be rejected"
+        );
+        assert!(
+            state_with_asset_attr(&p, key, "safe-value")
+                .validate()
+                .is_err(),
+            "asset attribute key {key:?} must be rejected"
+        );
+        assert!(
+            state_with_finding_metadata(&p, key, hostile_value.clone())
+                .validate()
+                .is_err(),
+            "finding metadata key {key:?} must be rejected"
+        );
+    }
+    // Nested legacy shape inside a finding value stays rejected via the
+    // serialized-JSON helper even when the outer key is safe.
+    {
+        let p = plan();
+        let nested = serde_json::json!({
+            "cookies": [{"name": "session", "value": "synthetic-cookie-value"}]
+        });
+        assert!(
+            state_with_finding_metadata(&p, "nested", nested)
+                .validate()
+                .is_err(),
+            "nested serialized cookies collection must stay rejected"
+        );
+    }
+    // Safe keys accepted in every persistable map.
+    for key in ["cookie_names", "cookies_enabled"] {
+        let p = plan();
+        assert!(
+            state_with_task_param(&p, key, "session").validate().is_ok(),
+            "task param key {key:?} must be accepted"
+        );
+        assert!(
+            state_with_asset_attr(&p, key, "session").validate().is_ok(),
+            "asset attribute key {key:?} must be accepted"
+        );
+        assert!(
+            state_with_finding_metadata(&p, key, serde_json::json!(["session"]))
+                .validate()
+                .is_ok(),
+            "finding metadata key {key:?} must be accepted"
+        );
+    }
+    // Prose mentioning the English word stays accepted.
+    {
+        let p = plan();
+        let prose = "observed cookies in passing prose are fine";
+        assert!(
+            state_with_task_param(&p, "note", prose).validate().is_ok(),
+            "task param prose must be accepted"
+        );
+        assert!(
+            state_with_asset_attr(&p, "note", prose).validate().is_ok(),
+            "asset attribute prose must be accepted"
+        );
+        assert!(
+            state_with_finding_metadata(&p, "note", serde_json::json!(prose))
+                .validate()
+                .is_ok(),
+            "finding metadata prose must be accepted"
+        );
+    }
+}

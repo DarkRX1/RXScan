@@ -471,9 +471,81 @@ fn cookies_are_bounded_observations() {
     )
     .unwrap();
     let observation = observation_in(&output);
-    let cookies = observation["cookies"].as_array().unwrap();
-    assert_eq!(cookies.len(), rxscan::web::MAX_COOKIES);
-    assert_eq!(cookies[0]["name"], "c0");
+    // Persisted evidence carries bounded cookie NAMES only; values never
+    // cross the persistence boundary.
+    assert!(
+        observation.get("cookies").is_none(),
+        "persisted evidence must not contain value-bearing cookies object"
+    );
+    let names = observation["cookie_names"].as_array().unwrap();
+    assert_eq!(names.len(), rxscan::web::MAX_COOKIES);
+    assert_eq!(names[0], "c0");
+}
+
+#[test]
+fn persisted_web_evidence_never_contains_cookie_values() {
+    // Synthetic fixture material only: a distinctive value proves the
+    // transient parser observed it while persisted evidence must not.
+    let synthetic_value = "synthetic-cookie-value-rxscan-privacy-7f3a9c";
+    let response_value = synthetic_value.to_owned();
+    let fixture = HttpFixture::spawn(move |_| {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\nContent-Type: text/html\r\nSet-Cookie: phpsessid={response_value}; Path=/\r\n\r\n"
+        )
+        .into_bytes()
+    });
+    // Transient parser legitimately observes the bounded value in memory.
+    let raw = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nSet-Cookie: phpsessid={synthetic_value}; Path=/\r\n\r\n"
+    );
+    let transient = rxscan::web::parse_response(raw.as_bytes(), 0).expect("parses");
+    assert!(
+        transient
+            .cookies
+            .iter()
+            .any(|cookie| cookie.name == "phpsessid" && cookie.value == synthetic_value),
+        "transient observation must hold the synthetic value"
+    );
+    let plan = plan_for_web();
+    let guard = Arc::new(PolicyScopeGuard::new(plan.scope.clone()));
+    let module = WebProbeModule::new(fast_policy(&plan), guard.clone());
+    let url = format!("http://127.0.0.1:{}/", fixture.port);
+    let task = web_task_for_url(&plan, &url, 8000, guard.as_ref());
+    let output = block_on_web(
+        &module,
+        ModuleContext::new(task, CancellationToken::default()),
+    )
+    .unwrap();
+    let observation = observation_in(&output);
+    let serialized = serde_json::to_string(&observation).unwrap();
+    assert!(
+        !serialized.contains(synthetic_value),
+        "persisted evidence must not contain the synthetic cookie value"
+    );
+    assert!(
+        observation.get("cookies").is_none(),
+        "persisted evidence must not contain a structured cookies object"
+    );
+    // Cookie name may persist as bounded metadata.
+    let names = observation
+        .get("cookie_names")
+        .and_then(|value| value.as_array())
+        .expect("cookie_names metadata");
+    assert!(
+        names.iter().any(|name| name.as_str() == Some("phpsessid")),
+        "cookie name metadata preserved, got {names:?}"
+    );
+    // Technology inference from cookie names still works (phpsessid => PHP).
+    let technologies = observation
+        .get("technologies")
+        .and_then(|value| value.as_array())
+        .expect("technologies metadata");
+    assert!(
+        technologies
+            .iter()
+            .any(|tech| tech.get("name").and_then(|n| n.as_str()) == Some("PHP")),
+        "cookie-name technology inference preserved, got {technologies:?}"
+    );
 }
 
 #[test]
