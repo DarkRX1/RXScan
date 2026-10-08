@@ -2,13 +2,13 @@
   "project_schema_version": 1,
   "project_id": "project_671bc366926bc369",
   "revision": 1,
-  "fingerprint": "36183dff7cae3830",
+  "fingerprint": "50bf102b53e24e11",
   "scans": {
-    "scan_36ad966454bea328": {
-      "scan_id": "plan_c4d7089e5de142f3",
-      "plan_id": "plan_c4d7089e5de142f3",
+    "scan_9703090c941bf74d": {
+      "scan_id": "plan_3774f1f43ae0732b",
+      "plan_id": "plan_3774f1f43ae0732b",
       "import_sequence": 1,
-      "semantic_fingerprint": "ca5876ef400d5629",
+      "semantic_fingerprint": "2ac61d50aafc7af1",
       "checkpoint_schema_version": 1,
       "entity_count": 1,
       "relationship_count": 0,
@@ -21,22 +21,22 @@
       "kind": "ip",
       "identity": "127.0.0.1",
       "attributes": {},
-      "first_scan_id": "plan_c4d7089e5de142f3",
-      "last_scan_id": "plan_c4d7089e5de142f3",
+      "first_scan_id": "plan_3774f1f43ae0732b",
+      "last_scan_id": "plan_3774f1f43ae0732b",
       "observation_count": 1,
       "external": false,
       "observations": [
-        "obs_0f1b1c2de11e2bc1"
+        "obs_8419f6b93ebfa494"
       ]
     }
   },
   "relationships": {},
   "observations": {
-    "obs_0f1b1c2de11e2bc1": {
-      "id": "obs_0f1b1c2de11e2bc1",
-      "scan_id": "plan_c4d7089e5de142f3",
+    "obs_8419f6b93ebfa494": {
+      "id": "obs_8419f6b93ebfa494",
+      "scan_id": "plan_3774f1f43ae0732b",
       "entity_id": "entity_ip_ffd74263f16bcde6",
-      "fingerprint": "628c794aa691b034"
+      "fingerprint": "1f8d24822a4230a2"
     }
   },
   "findings": {},

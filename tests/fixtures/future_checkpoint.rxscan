@@ -13,7 +13,7 @@
             "provenance": {
               "module_name": "phase20.test",
               "module_version": "20.0.0",
-              "scan_plan_id": "plan_c4d7089e5de142f3",
+              "scan_plan_id": "plan_3774f1f43ae0732b",
               "timestamp": 0
             },
             "schema_version": 1
@@ -23,7 +23,7 @@
         "evidence": [],
         "findings": []
       },
-      "task_id": "task_653763e6b16d6e125de65568646b6ef298c585830abd92b64e437a89ca10ce8c"
+      "task_id": "task_dcd415275799db15a3a4b11fa7da582d7e3851743d1192253bd449838d930076"
     }
   ],
   "plan": {
@@ -42,29 +42,37 @@
     "discovery_ports": null,
     "explain_requested": false,
     "goal": "recon",
-    "level": 2,
+    "level": 3,
     "modules": [
       "target_normalization",
       "scope_guard",
       "plan_compilation",
-      "host_discovery"
+      "host_discovery",
+      "tcp_discovery"
     ],
+    "os_requested": false,
     "profile": null,
     "reasons": [
       "Every input is normalized into TargetSpec before planning.",
       "Scope is deny-by-default: seed targets and explicit --scope rules are the only permitted expansion.",
-      "Goal Recon, level 2, and speed Balanced remain independent policy controls.",
+      "Workflow recon (level 3) and speed Balanced remain independent policy controls.",
       "Target normalization, Scope Guard, and plan compilation always run.",
-      "Level 2 with goal Recon selects: {\"custom\":\"rxscan.control.validate\"}, \"host_discovery\".",
-      "No port selection supplied; port tasks use a conservative common-set intent without expanding ports.",
-      "Speed policy: speed Balanced -> concurrency 2, retry_limit 2, default_timeout_ms 15000, deterministic baseline (non-adaptive in Phase 4; auto == balanced).",
+      "Level 3 with workflow recon selects: {\"custom\":\"rxscan.control.validate\"}, \"host_discovery\", \"port_discovery\".",
+      "No port selection supplied; TCP discovery uses the conservative level-derived common-port policy.",
+      "Speed policy: speed Balanced -> concurrency 2, retry_limit 2, default_timeout_ms 15000, deterministic baseline (non-adaptive; auto == balanced).",
       "Budgets: max_tasks 1000, max_retries 1000, max_concurrency 4 (effective 2), max_execution_time_ms 60000, max_evidence_bytes 67108864, max_hosts 256.",
-      "Host discovery policy: discovery lightweight level 2: icmp on (x1, 1000ms), tcp on (80,443, 1000ms).",
-      "TCP port policy: tcp level-automatic level 2 (Recon): 22,80,443,8080,8443 [v1], timeout 800ms, concurrency 64, retries 1.",
-      "Service probe policy: service level 2 (Recon): planner ≤6 probes/port, probe budget 2000ms.",
-      "Web probe policy: web level 2 (Recon): method HEAD, redirects ≤0, connect 800ms, response 2000ms.",
-      "Content discovery policy: content discovery level 2 (Recon): builtin 4, user-file false, request cap 8, candidate cap 16, body cap 65536."
+      "Host discovery policy: discovery lightweight level 3: icmp on (x2, 1000ms), tcp on (22,80,443, 1000ms), arp cache.",
+      "TCP port policy: tcp level-automatic level 3 (Recon): 100 ports (21..27018 …) [v1], timeout 800ms, concurrency 64, retries 1, mode requested=auto effective=connect.",
+      "Service probe policy: service level 3 (recon): planner ≤6 probes/port, probe budget 2000ms, passive window 1000ms, speculative redis/postgres 800ms; unknown-port actives by level: L1 none, L2 http, L3 +redis, L4 +tls, L5 +postgres,smtp(220-gated); known ports append pivots at L4(+http)/L5(+redis,+tls).",
+      "Web probe policy: web level 3 (Recon): method GET, redirects ≤2, connect 800ms, response 2000ms.",
+      "Service fingerprinting: observed product/version strings derive vendor/CPE/version-family with calibrated confidence (exact version caps at 90 without corroboration, never above 95; port priors add zero); unknown services keep bounded correlation artifacts, never identity claims. External fingerprint packs under fingerprints/v1/*.json validate before load (malformed packs rejected, never crash); built-in evidence remains authoritative.",
+      "Network intelligence (post-scan, passive, offline): OS candidates from fingerprints/os/v1 packs over banner/service evidence (passive-only; no active OS probes emitted; lone app hints capped at 65, multi-class required above 70, ceiling 90); device-role candidates from fingerprints/device/v1 packs (two signal kinds required, weak single-kind capped at 55, ceiling 90; vendor/model scored separately); SSH identity via banner parse + bounded Curve25519 KEX capture (no authentication; host keys become sshkey:sha256 entities for reuse/rotation tracking); TLS posture from handshake + certificate facts (deprecated protocol / expiry / mismatch / self-signed / short key / weak signature only when evidenced; no cipher enumeration by default); software inventory from service entities; offline vulnerability correlation from RXSCAN_VULN_DIR datasets (potential matches only, never verdicts; unknown versions indeterminate). Detail streams as os_candidate/device_candidate/ssh_host_key/tls_posture/software_identity/vulnerability_candidate/attention_event JSONL; project mode persists + diffs + assesses deterministically.",
+      "Content discovery policy: content discovery level 3 (Recon): builtin 8, user-file false, request cap 32, candidate cap 64, body cap 65536.",
+      "TCP scan mode: requested auto, resolved connect (auto selected connect: raw SYN unavailable: CAP_NET_RAW not available).",
+      "Adaptive pacing: feedback-driven concurrency/timeout/ retry-delay suggestions stay within configured budgets; the scheduler remains authoritative and every adjustment is deterministic and explainable."
     ],
+    "scan_mode": "connect",
+    "scan_mode_requested": "auto",
     "scope": {
       "allowed": [
         {
@@ -77,10 +85,9 @@
       "exclusions": []
     },
     "skipped": [
-      "TcpDiscovery not selected by level 2 + goal Recon (no explicit request).",
-      "UdpDiscovery not selected by level 2 + goal Recon (no explicit request).",
-      "Phase 4 executes only control/host/port scaffold tasks; deeper network intents run as Skipped (module unavailable) without fake results.",
-      "Phase 12 runs real bounded host discovery, native TCP connect port scanning, native service probing, bounded HTTP/1.1 web observations, bounded crawling, baseline intelligence, managed content discovery, and safe contextual GET query fuzzing where observed evidence permits; ARP/ND, UDP, POST/form fuzzing, path-variable fuzzing, JavaScript execution, cipher enumeration, DNS execution, vulnerability checks, and the fingerprint engine remain deferred."
+      "UdpDiscovery not selected by level 3 + workflow recon (no explicit request).",
+      "Unsupported selected intents are skipped only when no real module is registered; skipped work is reported without fake discoveries.",
+      "Current execution includes bounded host discovery (ICMP echo, TCP reachability, local ARP cache, interface/link-scope awareness), TCP port scanning with capability-gated syn/auto mode selection (raw SYN on capable Linux IPv4 hosts, connect otherwise; requested/effective/fallback always recorded), service probing (SSH/HTTP/TLS/FTP/SMTP/Redis/MySQL/PostgreSQL/SMB/RDP/MongoDB/MQTT/generic, no auth), DNS observations (A/AAAA/CNAME/MX/NS/TXT/PTR/SRV), HTTP/1.1 web observations with technology normalization, crawling, baseline checks, managed content discovery, inert contextual GET query fuzzing where evidence permits, plus passive post-scan intelligence (OS/device correlation, SSH identity, TLS posture, software inventory, offline vulnerability candidates, attention/change summaries in project mode) and per-entity project explain. Not implemented: raw SYN on IPv6 or non-Linux platforms, active OS-fingerprint probes, exhaustive cipher enumeration, SNMP authenticated polling, UPnP device-description fetching (SSDP stays classification-only; LOCATION never fetched), network-distance estimation beyond honest absence, password attacks / exploitation / destructive validation, JavaScript execution / browser automation, POST workflows, distributed scanning."
     ],
     "speed": "balanced",
     "targets": [
@@ -107,7 +114,7 @@
     "origin_baselines": []
   },
   "saved_at": 2,
-  "scan_id": "plan_c4d7089e5de142f3",
+  "scan_id": "plan_3774f1f43ae0732b",
   "schema_version": 999,
   "tasks": [
     {
@@ -122,7 +129,7 @@
         "created_at": 0,
         "deadline": 2000,
         "dependencies": [],
-        "id": "task_653763e6b16d6e125de65568646b6ef298c585830abd92b64e437a89ca10ce8c",
+        "id": "task_dcd415275799db15a3a4b11fa7da582d7e3851743d1192253bd449838d930076",
         "kind": "host_discovery",
         "module_name": "phase20.test",
         "params": {
@@ -133,7 +140,7 @@
         "provenance": {
           "module_name": "phase20.test",
           "module_version": "20.0.0",
-          "scan_plan_id": "plan_c4d7089e5de142f3",
+          "scan_plan_id": "plan_3774f1f43ae0732b",
           "timestamp": 0
         },
         "retry_count": 0,
@@ -141,7 +148,7 @@
           "base_delay_ms": 0,
           "max_attempts": 1
         },
-        "scan_plan_id": "plan_c4d7089e5de142f3",
+        "scan_plan_id": "plan_3774f1f43ae0732b",
         "scope_target": {
           "target_type": "ip",
           "value": "127.0.0.1"
