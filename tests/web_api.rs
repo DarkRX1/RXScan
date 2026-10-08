@@ -133,7 +133,13 @@ fn request(
         stream.write_all(body).expect("write body");
     }
     let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).expect("read response");
+    if let Err(error) = stream.read_to_end(&mut raw) {
+        let response_started = raw.windows(4).any(|window| window == b"\r\n\r\n");
+        assert!(
+            error.kind() == std::io::ErrorKind::ConnectionReset && response_started,
+            "read response: {error}"
+        );
+    }
     let split = raw
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
