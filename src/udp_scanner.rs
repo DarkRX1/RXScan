@@ -1085,6 +1085,8 @@ fn scan_ports_udp(
 /// * Silence exhausted ⇒ `Filtered` (terminal `OpenOrFiltered`).
 /// * Explicit normalized `ConnectionRefused` ⇒ `Closed` (positive closure
 ///   evidence), never retry.
+/// * Receive-context truncation (`WSAEMSGSIZE` on `recv_from`
+///   only) ⇒ `TruncatedOpen` (positive response evidence, never retry).
 /// * Any other local failure ⇒ `Error`, never retry.
 ///
 /// Apple/BSD kernels do not guarantee ICMP port-unreachable delivery on
@@ -1092,27 +1094,49 @@ fn scan_ports_udp(
 /// without closure evidence must stay `OpenOrFiltered` — never inferred
 /// `Closed` merely because the test selected an unused local port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PortableRecvDecision {
+pub enum PortableRecvDecision {
     /// Retryable silence: resend identical payload.
     Retry,
     /// Silence exhausted: terminal `OpenOrFiltered`.
     Filtered,
     /// Positive closure evidence: terminal `Closed`, never retry.
     Closed,
+    /// Truncated response evidence: terminal `Open`, never retry.
+    ///
+    /// Receive context only: Winsock reports a datagram larger than the
+    /// supplied receive buffer as `WSAEMSGSIZE (10040)` via `recv_from`
+    /// `Err`, while Unix returns truncated `Ok`. Both prove a datagram
+    /// arrived. Never parse bytes Rust did not return; never invent length.
+    TruncatedOpen,
     /// Local failure: terminal `Error`, never retry.
     Error,
 }
+
+/// Receive-context raw OS code proving a datagram arrived but did not fit
+/// the supplied receive buffer. Checked ONLY in
+/// [`decide_portable_recv_failure`] (portable `recv_from` failures); never
+/// added to generic network normalization, where a message-too-large error
+/// during `send` has different semantics. Windows-only: raw errno values are
+/// platform-specific, and Linux oversized receive is already handled through
+/// `Ok(truncated_count)`.
+const WSAEMSGSIZE_RAW: i32 = 10040;
 
 /// Pure classifier for portable `recv_from` failures. Production
 /// [`scan_ports_udp_portable`] branches on this; unit tests prove the
 /// mapping with synthetic `io::Error`s so no test depends on a kernel
 /// surfacing ICMP.
-fn decide_portable_recv_failure(
+pub fn decide_portable_recv_failure(
     error: &std::io::Error,
     attempts: u32,
     max_retries: u32,
 ) -> PortableRecvDecision {
     use std::io::ErrorKind;
+    // Receive-context truncation first: on Windows `recv_from` surfaces an
+    // oversized datagram as `Err(WSAEMSGSIZE)` with no `Ok(n)` bytes, while
+    // Unix returns truncated `Ok`. The Windows error proves responsiveness.
+    if error.raw_os_error() == Some(WSAEMSGSIZE_RAW) {
+        return PortableRecvDecision::TruncatedOpen;
+    }
     match error.kind() {
         ErrorKind::TimedOut | ErrorKind::WouldBlock => {
             if attempts <= max_retries {
@@ -1350,6 +1374,37 @@ fn scan_ports_udp_portable(
                                                 protocol: None,
                                                 datagrams_sent: attempts,
                                                 datagrams_received: 0,
+                                            },
+                                            config.retain_detail,
+                                        );
+                                        break;
+                                    }
+                                    PortableRecvDecision::TruncatedOpen => {
+                                        // Receive-context truncation proves a
+                                        // datagram arrived: Windows
+                                        // `recv_from` reports
+                                        // `WSAEMSGSIZE (10040)` as `Err`
+                                        // with no `Ok(n)` bytes, while Unix
+                                        // returns truncated `Ok`. Rust did
+                                        // not return response bytes here, so
+                                        // never parse the buffer, never
+                                        // invent length/content/protocol.
+                                        let mut out = outcome
+                                            .lock()
+                                            .unwrap_or_else(|e| e.into_inner());
+                                        out.datagrams_received += 1;
+                                        out.record(
+                                            UdpProbe {
+                                                port,
+                                                state: UdpPortState::Open,
+                                                latency: started.elapsed(),
+                                                detail: format!(
+                                                    "UDP response on {ip}:{port} truncated by receive buffer; responsiveness proven, length unknown"
+                                                ),
+                                                attempts,
+                                                protocol: None,
+                                                datagrams_sent: attempts,
+                                                datagrams_received: 1,
                                             },
                                             config.retain_detail,
                                         );
@@ -1683,6 +1738,75 @@ mod tests {
             decide_portable_recv_failure(&local, 1, 1),
             PortableRecvDecision::Error
         );
+    }
+
+    /// Deterministic: receive-context truncation maps to `TruncatedOpen`.
+    /// Synthetic `WSAEMSGSIZE (10040)` stands in for the Windows-surfaced
+    /// oversized-datagram signal on `recv_from` only. It proves a datagram
+    /// arrived, so production records `Open` with
+    /// `datagrams_received == 1`, never retry/Closed/Filtered/Error, and
+    /// never invents length/content/protocol.
+    #[test]
+    fn wsaemsgsize_receive_means_truncated_open() {
+        use std::io::Error;
+        const CODE: i32 = 10040;
+        for (attempts, max_retries) in [(1, 0), (1, 1), (2, 1)] {
+            let error = Error::from_raw_os_error(CODE);
+            assert_eq!(
+                decide_portable_recv_failure(&error, attempts, max_retries),
+                PortableRecvDecision::TruncatedOpen,
+                "receive-context raw {CODE} must be truncated-open (attempts={attempts})"
+            );
+            assert_ne!(
+                decide_portable_recv_failure(&error, attempts, max_retries),
+                PortableRecvDecision::Retry,
+                "truncation evidence must never admit a retry (raw {CODE})"
+            );
+            assert_ne!(
+                decide_portable_recv_failure(&error, attempts, max_retries),
+                PortableRecvDecision::Closed,
+                "truncation is responsiveness, not closure (raw {CODE})"
+            );
+            assert_ne!(
+                decide_portable_recv_failure(&error, attempts, max_retries),
+                PortableRecvDecision::Filtered,
+                "truncation is responsiveness, not silence (raw {CODE})"
+            );
+            assert_ne!(
+                decide_portable_recv_failure(&error, attempts, max_retries),
+                PortableRecvDecision::Error,
+                "truncation is responsiveness, not local failure (raw {CODE})"
+            );
+        }
+        // Accounting the production `TruncatedOpen` arm performs: terminal
+        // `Open`, exactly one receipt, no retry, no invented bytes/protocol.
+        let mut outcome = UdpScanOutcome::default();
+        outcome.datagrams_received += 1;
+        outcome.record(
+            UdpProbe {
+                port: 9999,
+                state: UdpPortState::Open,
+                latency: Duration::ZERO,
+                detail:
+                    "UDP response on 127.0.0.1:9999 truncated by receive buffer; responsiveness proven, length unknown"
+                        .to_owned(),
+                attempts: 1,
+                protocol: None,
+                datagrams_sent: 1,
+                datagrams_received: 1,
+            },
+            true,
+        );
+        assert_eq!(outcome.open_count, 1);
+        assert_eq!(outcome.closed_count, 0);
+        assert_eq!(outcome.filtered_count, 0);
+        assert_eq!(outcome.error_count, 0);
+        assert_eq!(outcome.datagrams_received, 1);
+        assert_eq!(outcome.retries, 0);
+        assert_eq!(outcome.probes.len(), 1);
+        assert_eq!(outcome.probes[0].state, UdpPortState::Open);
+        assert_eq!(outcome.probes[0].datagrams_received, 1);
+        assert_eq!(outcome.probes[0].protocol, None);
     }
 
     /// Release-gate regression: a valid response never retries, even with

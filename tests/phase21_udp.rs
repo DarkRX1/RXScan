@@ -31,7 +31,8 @@ use rxscan::{
     udp_discovery::{UdpDiscoveryModule, UdpScanPolicy},
     udp_probes::{Wave1UdpProbes, classify_dns, dns_query},
     udp_scanner::{
-        NativeUdpScanner, UdpPortState, UdpProbeSource, UdpScanConfig, UdpScanOutcome, UdpScanner,
+        NativeUdpScanner, PortableRecvDecision, UdpPortState, UdpProbe, UdpProbeSource,
+        UdpScanConfig, UdpScanOutcome, UdpScanner, decide_portable_recv_failure,
     },
 };
 
@@ -198,7 +199,11 @@ fn udp_retry_and_pressure_policy() {
 // ---------- scanner states ----------
 
 #[test]
-fn closed_loopback_is_closed_v4() {
+fn closed_loopback_reports_closed_or_filtered_v4() {
+    // Portable contract: Darwin/BSD need not deliver attributable ICMP
+    // refusal to the unconnected portable socket, so a known-unused port may
+    // honestly surface as Closed (refusal) or OpenOrFiltered (silence).
+    // Never infer Closed without refusal evidence; never return Open/Error.
     let outcome = NativeUdpScanner.scan(
         "127.0.0.1".parse().unwrap(),
         &[closed_udp_port()],
@@ -206,13 +211,36 @@ fn closed_loopback_is_closed_v4() {
         &scan_config(500, 0),
     );
     assert_eq!(outcome.probes.len(), 1);
-    assert_eq!(outcome.probes[0].state, UdpPortState::Closed);
+    let probe = &outcome.probes[0];
+    assert!(
+        matches!(
+            probe.state,
+            UdpPortState::Closed | UdpPortState::OpenOrFiltered
+        ),
+        "unused loopback port must be Closed or OpenOrFiltered, got {:?}",
+        probe.state
+    );
+    match probe.state {
+        UdpPortState::Closed => {
+            assert_eq!(probe.attempts, 1);
+            assert_eq!(outcome.retries, 0);
+            assert_eq!(outcome.closed_errors, 1);
+            assert_eq!(outcome.timeouts, 0);
+        }
+        UdpPortState::OpenOrFiltered => {
+            assert_eq!(probe.attempts, 1);
+            assert_eq!(outcome.retries, 0);
+            assert_eq!(outcome.timeouts, 1);
+            assert_eq!(outcome.closed_errors, 0);
+        }
+        _ => unreachable!("guarded above"),
+    }
     assert!(!outcome.cancelled);
     assert_eq!(outcome.unscanned, 0);
 }
 
 #[test]
-fn closed_loopback_is_closed_v6() {
+fn closed_loopback_reports_closed_or_filtered_v6() {
     let socket = match UdpSocket::bind("[::1]:0") {
         Ok(socket) => socket,
         Err(error) => {
@@ -230,11 +258,29 @@ fn closed_loopback_is_closed_v6() {
         &scan_config(500, 0),
     );
     assert_eq!(outcome.probes.len(), 1);
-    assert_eq!(
-        outcome.probes[0].state,
-        UdpPortState::Closed,
-        "IPv6 loopback must report attributable close evidence"
+    let probe = &outcome.probes[0];
+    assert!(
+        matches!(
+            probe.state,
+            UdpPortState::Closed | UdpPortState::OpenOrFiltered
+        ),
+        "IPv6 loopback must be Closed (refusal) or OpenOrFiltered (silence), got {:?}",
+        probe.state
     );
+    match probe.state {
+        UdpPortState::Closed => {
+            assert_eq!(probe.attempts, 1);
+            assert_eq!(outcome.retries, 0);
+            assert_eq!(outcome.closed_errors, 1);
+        }
+        UdpPortState::OpenOrFiltered => {
+            assert_eq!(probe.attempts, 1);
+            assert_eq!(outcome.retries, 0);
+            assert_eq!(outcome.timeouts, 1);
+            assert_eq!(outcome.closed_errors, 0);
+        }
+        _ => unreachable!("guarded above"),
+    }
 }
 
 #[test]
@@ -269,16 +315,36 @@ fn silent_bound_port_is_open_or_filtered_never_open_or_closed() {
 
 #[test]
 fn closed_ports_never_retry_but_silence_does() {
-    // Closed with retries allowed: exactly one attempt (refusal is final).
-    let outcome = NativeUdpScanner.scan(
-        "127.0.0.1".parse().unwrap(),
-        &[closed_udp_port()],
-        &Wave1UdpProbes,
-        &scan_config(300, 1),
+    // Policy proof independent of host ICMP delivery: attributable refusal
+    // maps to terminal Closed (never Retry), while silence retries within
+    // budget then filters. No real unbound socket is used for the Closed
+    // half because Darwin/BSD need not deliver refusal evidence.
+    use std::io::{Error, ErrorKind};
+    let refused = Error::new(ErrorKind::ConnectionRefused, "synthetic port unreachable");
+    for attempts in [1, 2] {
+        assert_eq!(
+            decide_portable_recv_failure(&refused, attempts, 1),
+            PortableRecvDecision::Closed,
+            "attributable refusal must be Closed (attempts={attempts})"
+        );
+        assert_ne!(
+            decide_portable_recv_failure(&refused, attempts, 1),
+            PortableRecvDecision::Retry,
+            "Closed evidence must never admit a retry (attempts={attempts})"
+        );
+    }
+    // Contrast: silence retries once within budget, then filters.
+    let silence = Error::new(ErrorKind::TimedOut, "synthetic silence");
+    assert_eq!(
+        decide_portable_recv_failure(&silence, 1, 1),
+        PortableRecvDecision::Retry
     );
-    assert_eq!(outcome.probes[0].attempts, 1);
-    assert_eq!(outcome.retries, 0);
-    // Silent with one retry: two identical sends, still uncertain.
+    assert_eq!(
+        decide_portable_recv_failure(&silence, 2, 1),
+        PortableRecvDecision::Filtered
+    );
+    // Silent bound port (OS-independent silence) with one retry: two
+    // identical sends, still uncertain, never Closed.
     let (_socket, port) = bind_udp();
     let outcome = NativeUdpScanner.scan(
         "127.0.0.1".parse().unwrap(),
@@ -294,7 +360,10 @@ fn closed_ports_never_retry_but_silence_does() {
 
 #[test]
 fn window_bounds_sockets_and_cancellation_is_prompt() {
-    // Closed ports through a width-4 window: all accounted, peak ≤ 4.
+    // Unused loopback ports through a width-4 window: all accounted, peak ≤ 4.
+    // Classification is kernel-dependent (Closed on refusal evidence,
+    // OpenOrFiltered on silence); the window/cancellation invariants must
+    // hold for either honest outcome.
     let mut ports: Vec<u16> = (0..48).map(|_| closed_udp_port()).collect();
     ports.sort_unstable();
     ports.dedup();
@@ -321,7 +390,17 @@ fn window_bounds_sockets_and_cancellation_is_prompt() {
         outcome
             .probes
             .iter()
-            .all(|p| p.state == UdpPortState::Closed)
+            .all(|p| matches!(p.state, UdpPortState::Closed | UdpPortState::OpenOrFiltered)),
+        "unused ports must be Closed or OpenOrFiltered, never Open/Error"
+    );
+    assert!(
+        outcome.probes.iter().all(|p| p.attempts == 1),
+        "no retries with budget 0 for either Closed or silence"
+    );
+    assert_eq!(outcome.retries, 0);
+    assert_eq!(
+        outcome.closed_count + outcome.filtered_count,
+        ports.len() as u64
     );
     // Pre-cancelled: nothing attempted, everything unscanned.
     let token = CancellationToken::default();
@@ -497,37 +576,79 @@ fn module_reports_open_with_protocol_and_ledger() {
 
 #[test]
 fn module_accounting_invariant_holds() {
-    // Mixed open/closed/filtered: requested == attempted + unscanned and
-    // attempted == open + closed + filtered + errors.
-    let echo = UdpSocket::bind("127.0.0.1:0").unwrap();
-    let echo_port = echo.local_addr().unwrap().port();
-    let stop_flag = Arc::new(AtomicBool::new(false));
-    let stop_thread = stop_flag.clone();
-    std::thread::spawn(move || {
-        echo.set_read_timeout(Some(Duration::from_millis(100)))
-            .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while !stop_thread.load(Ordering::SeqCst) && Instant::now() < deadline {
-            let mut buf = [0u8; 512];
-            if let Ok((count, addr)) = echo.recv_from(&mut buf) {
-                let _ = echo.send_to(&buf[..count], addr);
+    // Deterministic 1/1/1 mix through a canned scanner: requested ==
+    // attempted + unscanned and attempted == open + closed + filtered +
+    // errors. No kernel ICMP delivery is required; the Closed outcome is
+    // injected as attributable refusal evidence, not inferred from silence.
+    struct CannedMixedScanner;
+    impl UdpScanner for CannedMixedScanner {
+        fn scan(
+            &self,
+            _ip: IpAddr,
+            ports: &[u16],
+            _source: &dyn UdpProbeSource,
+            config: &UdpScanConfig,
+        ) -> UdpScanOutcome {
+            let mut sorted: Vec<u16> = ports.to_vec();
+            sorted.sort_unstable();
+            sorted.dedup();
+            let mut outcome = UdpScanOutcome::default();
+            for (index, port) in sorted.iter().copied().enumerate() {
+                let (state, received) = match index % 3 {
+                    0 => (UdpPortState::Open, 1),
+                    1 => (UdpPortState::Closed, 0),
+                    _ => (UdpPortState::OpenOrFiltered, 0),
+                };
+                if matches!(state, UdpPortState::Closed) {
+                    outcome.closed_errors += 1;
+                }
+                if matches!(state, UdpPortState::OpenOrFiltered) {
+                    outcome.timeouts += 1;
+                }
+                if received > 0 {
+                    outcome.datagrams_received += 1;
+                }
+                outcome.datagrams_sent += 1;
+                let probe = UdpProbe {
+                    port,
+                    state,
+                    latency: Duration::ZERO,
+                    detail: format!("canned {state} for {port}"),
+                    attempts: 1,
+                    protocol: None,
+                    datagrams_sent: 1,
+                    datagrams_received: received,
+                };
+                match state {
+                    UdpPortState::Open => outcome.open_count += 1,
+                    UdpPortState::Closed => outcome.closed_count += 1,
+                    UdpPortState::OpenOrFiltered => outcome.filtered_count += 1,
+                    UdpPortState::Error => outcome.error_count += 1,
+                }
+                if config.retain_detail || matches!(state, UdpPortState::Open) {
+                    outcome.probes.push(probe);
+                }
             }
+            outcome.probes.sort_by_key(|probe| probe.port);
+            outcome
         }
-    });
-    let (_silent_holder, silent_port) = bind_udp();
-    let closed = closed_udp_port();
-    let plan = compile(&[
-        "127.0.0.1",
-        "--udp",
-        "--ports",
-        &format!("{echo_port},{closed},{silent_port}"),
-    ]);
-    let output = run_udp_task(
+    }
+    let plan = compile(&["127.0.0.1", "--udp", "--ports", "45001,45002,45003"]);
+    let policy = UdpScanPolicy::new(plan.level, plan.goal, plan.tcp_ports.clone(), plan.speed);
+    let guard = Arc::new(PolicyScopeGuard::new(plan.scope.clone()));
+    let module =
+        UdpDiscoveryModule::with_scanner(policy, Arc::new(CannedMixedScanner), guard.clone());
+    let task = udp_task_for(
         &plan,
-        "127.0.0.1",
-        &format!("explicit:{echo_port},{closed},{silent_port}"),
+        "127.0.0.1".parse().unwrap(),
+        "explicit:45001,45002,45003",
+        8000,
     );
-    stop_flag.store(true, Ordering::SeqCst);
+    let output = block_on_module(
+        &module,
+        ModuleContext::new(task, CancellationToken::default()),
+    )
+    .unwrap();
     let completed = completed_event(&output);
     let counts = &completed["counts"];
     let requested = completed["ports_requested"].as_u64().unwrap();
