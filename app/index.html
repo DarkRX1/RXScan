@@ -160,6 +160,10 @@
                   <input id="scan-allports" name="all_ports" type="checkbox" />
                   <label for="scan-allports">All TCP ports (one bounded task, overrides ports field)</label>
                 </div>
+                <div class="check-row">
+                  <input id="scan-osfp" name="os" type="checkbox" />
+                  <label for="scan-osfp">Bounded active OS fingerprinting (explicit, at most 6 probes per host; raw-gated with honest fallback)</label>
+                </div>
                 <div>
                   <label for="scan-deadline">Deadline (seconds, 1–3600)</label>
                   <input id="scan-deadline" name="deadline" type="number" min="1" max="3600" value="60" />
@@ -207,6 +211,9 @@
               </table>
             </div>
             <p class="muted" id="scan-empty">No open ports observed.</p>
+            <h3 id="scan-os-t">Operating systems</h3>
+            <ul class="events" id="scan-os"></ul>
+            <p class="muted" id="scan-os-empty">No OS evidence observed.</p>
             <details class="raw">
               <summary>Raw / JSON</summary>
               <div class="actions"><button type="button" id="scan-download">Download JSON</button></div>

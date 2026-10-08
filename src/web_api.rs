@@ -152,6 +152,10 @@ pub struct ScanRequest {
     pub speed: Option<String>,
     #[serde(default)]
     pub udp: bool,
+    /// Explicit bounded active OS fingerprinting (`--os` parity with CLI).
+    /// Default off; scope/cancellation/deadline rules are identical.
+    #[serde(default)]
+    pub os: bool,
     #[serde(default)]
     pub scope: Vec<String>,
     #[serde(default)]
@@ -1151,6 +1155,7 @@ fn build_scan_cli(request: ScanRequest) -> Result<ValidatedScan, ApiErrorBody> {
         ping: false,
         discover: false,
         udp: request.udp,
+        os: request.os,
         wordlist: None,
         scan_mode: request.mode.clone(),
         explain: false,
@@ -1406,7 +1411,8 @@ fn spawn_scan_worker(state: Arc<ServerState>, id: String, validated: ValidatedSc
                 let has_evidence = !report.port_details.is_empty()
                     || report.tcp_totals.open > 0
                     || report.services_identified > 0
-                    || report.graph_entities > 0;
+                    || report.graph_entities > 0
+                    || report.os_hosts.iter().any(|host| host.family != "Unknown");
                 // Findings-first details: every field is evidence-backed
                 // (`None` stays null, never fabricated). The GUI renders
                 // these as the PORT/SERVICE/DETAILS/CONFIDENCE table.
@@ -1437,6 +1443,25 @@ fn spawn_scan_worker(state: Arc<ServerState>, id: String, validated: ValidatedSc
                         "relationships_upserted": import.relationships_upserted,
                     })
                 });
+                // OS inference from the SAME Rust core the CLI renders: best
+                // candidate (or explicit Unknown) per host with confidence,
+                // coverage, and limitation notes. No JavaScript scoring.
+                let operating_systems: Vec<serde_json::Value> = report
+                    .os_hosts
+                    .iter()
+                    .take(256)
+                    .map(|host| {
+                        serde_json::json!({
+                            "host": host.host,
+                            "family": host.family,
+                            "generation": host.generation,
+                            "confidence": host.confidence,
+                            "band": host.band,
+                            "coverage": host.coverage,
+                            "limitation": host.limitation,
+                        })
+                    })
+                    .collect();
                 let result = serde_json::json!({
                     "scan_id": report.scan_id,
                     "termination": termination,
@@ -1451,6 +1476,7 @@ fn spawn_scan_worker(state: Arc<ServerState>, id: String, validated: ValidatedSc
                     },
                     "services_identified": report.services_identified,
                     "open_ports": open_ports,
+                    "operating_systems": operating_systems,
                     "graph": {
                         "entities": report.graph_entities,
                         "edges": report.graph_edges,

@@ -228,6 +228,10 @@ pub struct ScanPlan {
     pub modules: Vec<PlannedModule>,
     pub tcp_ports: TcpPortSelection,
     pub udp_requested: bool,
+    /// Explicit bounded active OS fingerprinting (`--os`). Default off so
+    /// recon defaults never become silently more active.
+    #[serde(default)]
+    pub os_requested: bool,
     pub explain_requested: bool,
     pub reasons: Vec<String>,
     pub skipped: Vec<String>,
@@ -352,6 +356,7 @@ impl ScanPlan {
         }
         let host_requested = cli.ping || cli.discover;
         let udp_requested = cli.udp;
+        let os_requested = cli.os;
         let ports_requested = cli.ports.is_some()
             || cli.all_ports
             || config.ports.is_some()
@@ -456,6 +461,12 @@ impl ScanPlan {
             "Network intelligence (post-scan, passive, offline): OS candidates from fingerprints/os/v1 packs over banner/service evidence (passive-only; no active OS probes emitted; lone app hints capped at 65, multi-class required above 70, ceiling 90); device-role candidates from fingerprints/device/v1 packs (two signal kinds required, weak single-kind capped at 55, ceiling 90; vendor/model scored separately); SSH identity via banner parse + bounded Curve25519 KEX capture (no authentication; host keys become sshkey:sha256 entities for reuse/rotation tracking); TLS posture from handshake + certificate facts (deprecated protocol / expiry / mismatch / self-signed / short key / weak signature only when evidenced; no cipher enumeration by default); software inventory from service entities; offline vulnerability correlation from RXSCAN_VULN_DIR datasets (potential matches only, never verdicts; unknown versions indeterminate). Detail streams as os_candidate/device_candidate/ssh_host_key/tls_posture/software_identity/vulnerability_candidate/attention_event JSONL; project mode persists + diffs + assesses deterministically."
                 .to_owned(),
         );
+        if os_requested {
+            reasons.push(
+                "Active OS fingerprinting requested explicitly (--os): a bounded probe plan per in-scope host (at most 6 probes: normal TCP handshake samples reusing ports the scan already knows, ICMP echo where the platform supports it; no exploitation, auth, fuzzing, evasion, or spoofing). Scope, cancellation, deadlines, and concurrency policy stay authoritative; unavailable raw capabilities degrade honestly to passive OS evidence with reduced confidence and an explicit limitation note. Unknown stays a first-class result."
+                    .to_owned(),
+            );
+        }
         reasons.push(format!(
             "Content discovery policy: {}.",
             crate::content::ContentDiscoveryPolicy::new(level, goal, speed).describe()
@@ -488,10 +499,12 @@ impl ScanPlan {
                 .to_owned(),
         );
         let mut skipped = level_skipped;
-        skipped.push(
+        let skipped_tail = if os_requested {
+            "Current execution includes bounded host discovery (ICMP echo, TCP reachability, local ARP cache, interface/link-scope awareness), TCP port scanning with capability-gated syn/auto mode selection (raw SYN on capable Linux IPv4 hosts, connect otherwise; requested/effective/fallback always recorded), service probing (SSH/HTTP/TLS/FTP/SMTP/Redis/MySQL/PostgreSQL/SMB/RDP/MongoDB/MQTT/generic, no auth), explicit bounded active OS fingerprinting (--os: at most 6 normal TCP/ICMP probes per in-scope host reusing known ports, scope/cancellation/deadline governed, raw-gated with honest passive fallback), DNS observations (A/AAAA/CNAME/MX/NS/TXT/PTR/SRV), HTTP/1.1 web observations with technology normalization, crawling, baseline checks, managed content discovery, inert contextual GET query fuzzing where evidence permits, plus passive post-scan intelligence (OS/device correlation, SSH identity, TLS posture, software inventory, offline vulnerability candidates, attention/change summaries in project mode) and per-entity project explain. Not implemented: raw SYN on IPv6 or non-Linux platforms, exhaustive cipher enumeration, SNMP authenticated polling, UPnP device-description fetching (SSDP stays classification-only; LOCATION never fetched), network-distance estimation beyond honest absence, password attacks / exploitation / destructive validation, JavaScript execution / browser automation, POST workflows, distributed scanning."
+        } else {
             "Current execution includes bounded host discovery (ICMP echo, TCP reachability, local ARP cache, interface/link-scope awareness), TCP port scanning with capability-gated syn/auto mode selection (raw SYN on capable Linux IPv4 hosts, connect otherwise; requested/effective/fallback always recorded), service probing (SSH/HTTP/TLS/FTP/SMTP/Redis/MySQL/PostgreSQL/SMB/RDP/MongoDB/MQTT/generic, no auth), DNS observations (A/AAAA/CNAME/MX/NS/TXT/PTR/SRV), HTTP/1.1 web observations with technology normalization, crawling, baseline checks, managed content discovery, inert contextual GET query fuzzing where evidence permits, plus passive post-scan intelligence (OS/device correlation, SSH identity, TLS posture, software inventory, offline vulnerability candidates, attention/change summaries in project mode) and per-entity project explain. Not implemented: raw SYN on IPv6 or non-Linux platforms, active OS-fingerprint probes, exhaustive cipher enumeration, SNMP authenticated polling, UPnP device-description fetching (SSDP stays classification-only; LOCATION never fetched), network-distance estimation beyond honest absence, password attacks / exploitation / destructive validation, JavaScript execution / browser automation, POST workflows, distributed scanning."
-                .to_owned(),
-        );
+        };
+        skipped.push(skipped_tail.to_owned());
         Ok(Self {
             targets,
             scope,
@@ -508,6 +521,7 @@ impl ScanPlan {
             modules,
             tcp_ports,
             udp_requested,
+            os_requested,
             explain_requested: cli.explain,
             reasons,
             skipped,

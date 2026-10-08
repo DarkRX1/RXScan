@@ -354,6 +354,7 @@ fn deadlines_produce_honest_partial_accounting_for_scans() {
         ping: false,
         discover: false,
         udp: false,
+        os: false,
         wordlist: None,
         scan_mode: Some("connect".to_owned()),
         explain: false,

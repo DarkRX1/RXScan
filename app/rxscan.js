@@ -662,6 +662,7 @@
       goal: String(fd.get("goal") || "recon"),
       speed: String(fd.get("speed") || "balanced"),
       udp: $("scan-udp").checked,
+      os: $("scan-osfp").checked,
       deadline_seconds: Number(fd.get("deadline") || 60),
       project: String(fd.get("project") || "default").trim() || "default",
       scope,
@@ -761,6 +762,24 @@
       if (!p.service || svc === "unknown") svcCell.className = "svc-unknown";
       tr.append(portCell, stateCell, svcCell, el("td", details), el("td", "observed"));
       tbody.appendChild(tr);
+    }
+    // OS inference from the core (no JS scoring): best candidate or
+    // explicit Unknown per host, with confidence and limitations.
+    const osList = $("scan-os");
+    clear(osList);
+    const systems = (r && r.operating_systems) || [];
+    $("scan-os-empty").hidden = systems.length !== 0;
+    if (!systems.length) $("scan-os-empty").textContent = "No OS evidence observed. Empty is honest — nothing inferred.";
+    for (const s of systems.slice(0, 100)) {
+      const name = s.family === "Unknown" ? "Unknown" : (s.family + (s.generation ? " " + s.generation : ""));
+      const bits = [name, (s.band || "unknown") + " " + (s.confidence || 0)];
+      if (typeof s.coverage === "number") bits.push("coverage " + Math.round(s.coverage * 100) + "%");
+      if (s.limitation) bits.push("limits: " + String(s.limitation).slice(0, 120));
+      const li = document.createElement("li");
+      const t = document.createElement("strong");
+      t.textContent = String(s.host || "—");
+      li.append(t, document.createTextNode(" — " + bits.join(" · ")));
+      osList.appendChild(li);
     }
     $("scan-raw").textContent = r ? JSON.stringify({ job: job.id, status: job.status, result: r }, null, 2) : "No result yet.";
   }

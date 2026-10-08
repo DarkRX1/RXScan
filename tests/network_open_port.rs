@@ -362,6 +362,7 @@ fn network_human_output_sanitizes_terminal_controls() {
             project_import: None,
             project_changes: Vec::new(),
             attention: Vec::new(),
+            os_hosts: Vec::new(),
         }
     };
     let human = rxscan::run::human_summary(&report);

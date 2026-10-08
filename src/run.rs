@@ -125,6 +125,30 @@ pub struct RunReport {
     /// only): concise diff plus generated attention. Empty otherwise.
     pub project_changes: Vec<crate::project_db::GraphChange>,
     pub attention: Vec<crate::project_db::AttentionEvent>,
+    /// OS inference summary per host for findings-first human output (best
+    /// candidate only; full evidence streams as `os_candidate` JSONL).
+    /// Empty when no host produced OS evidence.
+    pub os_hosts: Vec<OsHostSummary>,
+}
+
+/// Findings-first OS intelligence for one host.
+///
+/// Internal presentation view-model: only set from the same typed
+/// inference JSONL serializes. Unknown hosts (no defensible evidence)
+/// carry `family: "Unknown"` with the explicit reason, never a guess.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct OsHostSummary {
+    pub host: String,
+    pub family: String,
+    pub generation: Option<String>,
+    pub confidence: u8,
+    /// Explainable band (`high`/`medium`/`low`/`unknown`).
+    pub band: String,
+    /// Best-candidate coverage 0..=1.
+    pub coverage: f32,
+    /// Honest limitation note (unsupported probe family, missing raw
+    /// capability, unavailable open/closed-port evidence), if any.
+    pub limitation: Option<String>,
 }
 
 /// Summary of one `--project-db` import for human output.
@@ -215,6 +239,11 @@ fn execute_impl(
         if let Some(speed) = cli.speed {
             plan.speed = speed;
         }
+        // `--os` applies to resumed runs too: active probing is a bounded
+        // post-scan phase over replayed outputs, not a lowered task.
+        if cli.os {
+            plan.os_requested = true;
+        }
         plan
     } else {
         ScanPlan::compile(cli)?
@@ -257,6 +286,7 @@ fn execute_impl(
             project_import: None,
             project_changes: Vec::new(),
             attention: Vec::new(),
+            os_hosts: Vec::new(),
         });
     }
     let tasks = if loaded.is_none() {
@@ -461,6 +491,11 @@ fn execute_impl(
     // SAN/DNS-discovered names are annotated with scope state; contact
     // gating stays with the planner (recorded, never contacted here).
     let mut graph = crate::graph::build_graph(&module_outputs, Some(&plan.scope));
+    // Explicit bounded active OS probing (`--os` only): small deterministic
+    // plans per in-scope host reusing known ports. Scope, cancellation,
+    // deadlines, and capabilities stay authoritative; the phase degrades
+    // to passive evidence with explicit notes, never run failure.
+    let active_os = collect_active_os_evidence(&plan, &module_outputs, wall);
     // Intelligence pass (post-scan, pure, bounded): OS/device
     // classification over collected evidence, software inventory, and
     // offline vulnerability correlation. Fingerprint databases load once
@@ -488,7 +523,35 @@ fn execute_impl(
         &os_db,
         &device_db,
         vuln_db.as_ref(),
+        &active_os,
     );
+    // Findings-first OS view-model for human output (best candidate or
+    // explicit Unknown per host, derived from the same typed inference
+    // JSONL serializes).
+    let os_hosts: Vec<OsHostSummary> = intel
+        .os_reports
+        .iter()
+        .map(|report| match report.candidates.first() {
+            Some(best) => OsHostSummary {
+                host: report.host.clone(),
+                family: best.family.clone(),
+                generation: best.generation.clone(),
+                confidence: best.confidence,
+                band: crate::os_fingerprint::confidence_label(best.confidence).to_owned(),
+                coverage: report.coverage,
+                limitation: os_limitation_note(report),
+            },
+            None => OsHostSummary {
+                host: report.host.clone(),
+                family: "Unknown".to_owned(),
+                generation: None,
+                confidence: 0,
+                band: "unknown".to_owned(),
+                coverage: 0.0,
+                limitation: report.probe_availability.clone(),
+            },
+        })
+        .collect();
     let graph_entities = graph.entity_count();
     let graph_edges = graph.edge_count();
     let graph_truncated = graph.truncated;
@@ -807,6 +870,7 @@ fn execute_impl(
         project_import,
         project_changes,
         attention,
+        os_hosts,
     })
 }
 
@@ -1148,6 +1212,153 @@ fn load_vuln_db(dir: &std::path::Path) -> Option<crate::vuln::LocalVulnDb> {
     .ok()
 }
 
+/// Bounded active OS evidence for one scan (`--os` only): per-host
+/// matcher evidence plus one honest availability note per host.
+struct ActiveOsEvidence {
+    per_host: std::collections::BTreeMap<String, Vec<crate::os_fingerprint::OsEvidence>>,
+    notes: std::collections::BTreeMap<String, String>,
+}
+
+/// Explicit bounded active OS probing (`--os` only).
+///
+/// One small deterministic probe plan per in-scope IP host, reusing ports
+/// the scan already observed (no hidden scan expansion). Scope is
+/// re-checked per host and stays authoritative; process cancellation and
+/// the remaining execution deadline bound the phase; the runtime raw
+/// capability gates header observations. Unavailable capabilities degrade
+/// to passive evidence with an explicit note, never a run failure.
+/// Hostnames without a literal address are never resolved here (no extra
+/// network); they keep passive inference only.
+fn collect_active_os_evidence(
+    plan: &ScanPlan,
+    module_outputs: &[(crate::execution::TaskId, crate::execution::ModuleOutput)],
+    wall: std::time::Duration,
+) -> ActiveOsEvidence {
+    use std::collections::BTreeMap;
+    let mut evidence = ActiveOsEvidence {
+        per_host: BTreeMap::new(),
+        notes: BTreeMap::new(),
+    };
+    if !plan.os_requested {
+        return evidence;
+    }
+    let platform = crate::platform::capabilities::detect();
+    let cancel = crate::execution::CancellationToken::default();
+    let config = crate::os_active::ActiveProbeConfig::default();
+    let port_states = crate::os_active::host_tcp_port_states(module_outputs);
+    let passive = crate::os_fingerprint::collect_host_evidence(module_outputs);
+    let mut hosts: Vec<String> = port_states.keys().cloned().collect();
+    for host in passive.keys() {
+        if !port_states.contains_key(host) {
+            hosts.push(host.clone());
+        }
+    }
+    hosts.sort();
+    hosts.dedup();
+    // Phase budget: at most 30s total, less when the execution deadline
+    // leaves less room. Deadlines stay authoritative: zero remaining time
+    // skips every probe with an explicit note.
+    let phase_budget_ms: u64 = 30_000;
+    let remaining_ms = plan
+        .budgets
+        .max_execution_time_ms
+        .checked_sub(wall.as_millis().min(u128::from(u64::MAX)) as u64);
+    let mut budget_ms = phase_budget_ms;
+    if let Some(remaining) = remaining_ms {
+        budget_ms = budget_ms.min(remaining);
+    }
+    let phase_start = std::time::Instant::now();
+    for host in hosts {
+        if crate::platform::process::process_cancelled() || cancel.is_cancelled() {
+            evidence.notes.insert(
+                host.clone(),
+                "active OS probes cancelled; passive evidence retained".to_owned(),
+            );
+            break;
+        }
+        if phase_start.elapsed().as_millis() as u64 >= budget_ms {
+            evidence.notes.insert(
+                host.clone(),
+                "active OS probe budget exhausted; passive evidence retained".to_owned(),
+            );
+            continue;
+        }
+        let address: std::net::IpAddr = match host.parse() {
+            Ok(address) => address,
+            Err(_) => {
+                evidence.notes.insert(
+                    host.clone(),
+                    "hostname without literal address: active probes skipped without implicit resolution; passive evidence retained"
+                        .to_owned(),
+                );
+                continue;
+            }
+        };
+        let (open, closed) = port_states.get(&host).cloned().unwrap_or_default();
+        let probe_plan = crate::os_active::plan_os_probes(&host, &open, &closed, config.max_probes);
+        let outcome = crate::os_active::probe_host_with_scope(
+            address,
+            &plan.scope,
+            &config,
+            &cancel,
+            &platform,
+        );
+        if outcome.cancelled {
+            evidence.notes.insert(
+                host.clone(),
+                "active OS probes cancelled; passive evidence retained".to_owned(),
+            );
+            continue;
+        }
+        let items = crate::os_active::signals_to_evidence(&outcome.signals);
+        if !items.is_empty() {
+            evidence.per_host.insert(host.clone(), items);
+        }
+        let mut notes = probe_plan.missing.clone();
+        if let Some(reason) = outcome.unavailable_reason {
+            notes.push(reason);
+        }
+        notes.push(format!(
+            "active probe plan: {} probe(s) on port(s) {}",
+            probe_plan.probes_planned,
+            probe_plan
+                .ports
+                .iter()
+                .map(|port| port.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+        evidence.notes.insert(host.clone(), notes.join("; "));
+    }
+    evidence
+}
+
+/// Surface only honest limitation notes in human output: routine plan
+/// lines stay in JSONL, while unavailable/skipped/cancelled signals reach
+/// the findings view.
+fn os_limitation_note(report: &crate::os_fingerprint::OsHostReport) -> Option<String> {
+    let note = report.probe_availability.as_deref()?;
+    let lowered = note.to_ascii_lowercase();
+    let limitation = [
+        "unavailable",
+        "skipped",
+        "cancelled",
+        "exhausted",
+        "deadline",
+        "outside authorized scope",
+        "without implicit resolution",
+        "passive evidence retained",
+        "passive-only",
+    ]
+    .iter()
+    .any(|marker| lowered.contains(marker));
+    if limitation {
+        Some(note.chars().take(160).collect())
+    } else {
+        None
+    }
+}
+
 /// Post-scan intelligence: OS/device classification, SSH/TLS record
 /// extraction, software inventory, and offline vulnerability correlation.
 /// Attaches OS/device entities to the graph; everything else streams or
@@ -1160,20 +1371,53 @@ fn collect_intelligence(
     os_db: &crate::os_fingerprint::OsDb,
     device_db: &crate::device::DeviceDb,
     vuln_db: Option<&crate::vuln::LocalVulnDb>,
+    active_os: &ActiveOsEvidence,
 ) -> IntelBundle {
     use std::collections::{BTreeMap, BTreeSet};
     let now_ms = crate::model::Timestamp::now().0;
     let scan_plan_id = plan.stable_id().0;
-    // OS classification per host over passive evidence.
-    let host_evidence = crate::os_fingerprint::collect_host_evidence(module_outputs);
+    // OS classification per host over passive evidence plus bounded
+    // active evidence (`--os` only, merged additively). Inference stays
+    // deterministic: unknown is an explicit report on explicit runs, never
+    // a guessed label.
+    let mut host_evidence = crate::os_fingerprint::collect_host_evidence(module_outputs);
+    for (host, items) in &active_os.per_host {
+        let slot = host_evidence.entry(host.clone()).or_default();
+        for item in items.iter().take(16) {
+            if slot.len() < 64 {
+                slot.push(item.clone());
+            }
+        }
+    }
     let mut os_reports = Vec::new();
     let mut os_families: BTreeMap<String, String> = BTreeMap::new();
     let mut hosts: Vec<String> = host_evidence.keys().cloned().collect();
     hosts.sort();
     for host in hosts {
         let evidence = &host_evidence[&host];
-        let candidates = os_db.classify_host(evidence);
+        let inference = os_db.classify_detailed(evidence);
+        let candidates = inference.candidates();
+        let probe_note = active_os.notes.get(&host).cloned();
         if candidates.is_empty() {
+            // Unknown is first-class on explicit runs: record what was
+            // observed (or not) instead of dropping the host silently.
+            // Passive runs keep the quiet findings-first behavior.
+            if plan.os_requested {
+                os_reports.push(crate::os_fingerprint::OsHostReport {
+                    host: host.clone(),
+                    candidates: Vec::new(),
+                    evidence_count: host_evidence[&host].len(),
+                    coverage: 0.0,
+                    unavailable: Vec::new(),
+                    probe_availability: probe_note.or_else(|| {
+                        inference
+                            .unknown_reason
+                            .clone()
+                            .map(|reason| format!("unknown: {reason}"))
+                    }),
+                    provenance: Vec::new(),
+                });
+            }
             continue;
         }
         if let Some(top) = candidates.first() {
@@ -1240,6 +1484,22 @@ fn collect_intelligence(
             host: host.clone(),
             candidates,
             evidence_count: host_evidence[&host].len(),
+            coverage: inference
+                .best
+                .as_ref()
+                .map(|best| best.coverage)
+                .unwrap_or(0.0),
+            unavailable: inference
+                .best
+                .as_ref()
+                .map(|best| best.unavailable.clone())
+                .unwrap_or_default(),
+            probe_availability: probe_note,
+            provenance: inference
+                .best
+                .as_ref()
+                .map(|best| best.provenance.clone())
+                .unwrap_or_default(),
         });
     }
     // Device classification over graph signals + OS families.
@@ -1865,6 +2125,67 @@ fn human_summary_inner(
                 }
             }
             out.push('\n');
+        }
+    }
+
+    // OPERATING SYSTEM --------------------------------------------------
+    // Findings-first OS inference (best candidate or explicit Unknown per
+    // host). High confidence renders confirmed-green; medium/low render
+    // uncertain-amber; unknown renders muted-gray with its limitation.
+    // Full evidence (matched/conflicting/unavailable/provenance) streams
+    // as os_candidate JSONL and persists to project mode.
+    if !report.os_hosts.is_empty() {
+        out.push('\n');
+        out.push_str(&section_heading(caps, "Operating System"));
+        out.push('\n');
+        out.push('\n');
+        for host in &report.os_hosts {
+            let label = if host.family == "Unknown" {
+                "Unknown".to_owned()
+            } else if let Some(generation) = host.generation.as_deref() {
+                format!("{} {generation}", host.family)
+            } else {
+                host.family.clone()
+            };
+            let (band_label, band_style): (String, Style) = match host.band.as_str() {
+                "high" => ("HIGH".to_owned(), Style::Success),
+                "medium" | "low" => (host.band.to_ascii_uppercase(), Style::Warning),
+                _ => ("UNKNOWN".to_owned(), Style::Muted),
+            };
+            let clean_label = crate::terminal::truncate_display(
+                &crate::terminal::sanitize_human_text(&label),
+                48,
+            );
+            out.push_str(&format!(
+                "  {}  {}  {}\n",
+                paint(color, Style::Identifier, &host.host),
+                paint(color, Style::Primary, &clean_label),
+                paint(color, band_style, &band_label),
+            ));
+            if host.family != "Unknown" {
+                out.push_str(&format!(
+                    "    {}  {} confidence {} · coverage {}%\n",
+                    paint(color, Style::Secondary, "Detail"),
+                    paint(color, Style::Primary, &host.band),
+                    paint(color, Style::Value, &host.confidence.to_string()),
+                    paint(
+                        color,
+                        Style::Value,
+                        &format!("{}", (host.coverage * 100.0).round() as u32)
+                    ),
+                ));
+            }
+            if let Some(limitation) = host.limitation.as_deref() {
+                let clean = crate::terminal::truncate_display(
+                    &crate::terminal::sanitize_human_text(limitation),
+                    100,
+                );
+                out.push_str(&format!(
+                    "    {}  {}\n",
+                    paint(color, Style::Secondary, "Limits"),
+                    paint(color, Style::Muted, &clean),
+                ));
+            }
         }
     }
 

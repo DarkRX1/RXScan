@@ -68,6 +68,7 @@ fn recon_report(
         project_import: None,
         project_changes: Vec::new(),
         attention: Vec::new(),
+        os_hosts: Vec::new(),
     }
 }
 

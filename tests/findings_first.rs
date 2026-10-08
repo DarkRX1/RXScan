@@ -329,6 +329,7 @@ fn recon_report_with_ports(
         project_import: None,
         project_changes: Vec::new(),
         attention: Vec::new(),
+        os_hosts: Vec::new(),
     }
 }
 

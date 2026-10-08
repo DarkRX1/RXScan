@@ -79,6 +79,15 @@ pub struct Cli {
     #[arg(long)]
     pub udp: bool,
 
+    /// Request explicit bounded active OS fingerprinting: a small
+    /// deterministic probe plan per in-scope host (at most 6 probes),
+    /// reusing ports the scan already knows. Requires the raw-packet
+    /// capability for header observations; without it the run degrades
+    /// honestly to passive OS evidence with reduced confidence.
+    /// Default off: recon stays at its current activity level.
+    #[arg(long)]
+    pub os: bool,
+
     /// Stream a managed content-discovery candidate file.
     #[arg(short = 'w', long = "wordlist", value_name = "FILE")]
     pub wordlist: Option<std::path::PathBuf>,

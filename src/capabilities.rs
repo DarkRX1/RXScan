@@ -58,6 +58,17 @@ pub fn fingerprint_counts() -> (usize, usize) {
     (packs.len(), rules)
 }
 
+/// OS fingerprint corpus counts, loaded from the same packs the
+/// correlation engine matches. Dynamic: never a hard-coded marketing
+/// number. Returns `(packs, rules)`.
+pub fn os_corpus_counts() -> (usize, usize) {
+    let dir = std::env::var("RXSCAN_OS_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("fingerprints/os/v1"));
+    let db = crate::os_fingerprint::OsDb::load_from_dir(&dir);
+    (db.stats().pack_paths.len(), db.rule_count())
+}
+
 pub fn probe() -> Capabilities {
     let raw = crate::scan_mode::probe_raw_syn();
     let linux = cfg!(target_os = "linux");
@@ -67,6 +78,7 @@ pub fn probe() -> Capabilities {
     let arch = std::env::consts::ARCH.to_owned();
     let environment = platform_info.environment.as_str();
     let (packs, rules) = fingerprint_counts();
+    let (os_packs, os_rules) = os_corpus_counts();
     let username_providers = crate::search::embedded_username_pack()
         .map(|pack| pack.providers.len())
         .unwrap_or_default();
@@ -161,6 +173,15 @@ pub fn probe() -> Capabilities {
             "fingerprints",
             true,
             format!("{rules} rules in {packs} packs"),
+        ),
+        entry(
+            "os_corpus",
+            os_rules > 0,
+            if os_rules > 0 {
+                format!("{os_rules} rules in {os_packs} OS packs")
+            } else {
+                "OS fingerprint corpus unavailable: no valid packs loaded".to_owned()
+            },
         ),
     ];
     for (name, available, detail) in crate::investigate::capability_entries() {
@@ -269,6 +290,7 @@ pub fn human_label(name: &str) -> String {
         "username_providers" => "Username providers".to_owned(),
         "username_providers_fixture_backed" => "Fixture-backed providers".to_owned(),
         "fingerprints" => "Service fingerprints".to_owned(),
+        "os_corpus" => "OS fingerprint corpus".to_owned(),
         "project_db" => "Project database".to_owned(),
         "investigation" => "Investigation workflow".to_owned(),
         "investigation_username_seed" => "Username seed".to_owned(),
@@ -338,6 +360,7 @@ pub fn human_group(name: &str) -> &'static str {
         | "investigation_direct_network"
         | "investigation_network_bridge" => "INVESTIGATION",
         "fingerprints"
+        | "os_corpus"
         | "exposure"
         | "exposure_local_dataset"
         | "exposure_http_api"

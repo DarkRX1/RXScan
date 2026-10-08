@@ -104,6 +104,437 @@ impl OsEvidence {
     }
 }
 
+/// Address family an observation was made on. IPv4 TTL and IPv6 Hop
+/// Limit share no semantics; the family travels with the value so IPv6
+/// evidence can never fall through IPv4 interpretation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OsAddressFamily {
+    V4,
+    V6,
+}
+
+/// Where one OS observation came from. Network-stack provenance
+/// (`ActiveTcp`, `ActiveIcmp`, `ExistingTcpScan`) is never collapsed with
+/// application-context provenance (`ServiceEvidence`, `Ssh`, `Http`, `Tls`):
+/// a banner associated with an OS only corroborates, it never establishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OsProvenance {
+    ActiveTcp,
+    ActiveIcmp,
+    ActiveIp,
+    ExistingTcpScan,
+    ServiceEvidence,
+    Ssh,
+    Http,
+    Tls,
+    Fixture,
+    Imported,
+}
+
+impl OsProvenance {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ActiveTcp => "active TCP observation",
+            Self::ActiveIcmp => "active ICMP observation",
+            Self::ActiveIp => "active IP observation",
+            Self::ExistingTcpScan => "existing TCP scan",
+            Self::ServiceEvidence => "service fingerprint",
+            Self::Ssh => "SSH observation",
+            Self::Http => "HTTP observation",
+            Self::Tls => "TLS observation",
+            Self::Fixture => "fixture",
+            Self::Imported => "imported project evidence",
+        }
+    }
+}
+
+/// Quality/reliability of one observation. Application hints are always
+/// `Contextual`: weak alone, meaningful only in combination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OsQuality {
+    Strong,
+    Medium,
+    Weak,
+    Contextual,
+}
+
+impl OsQuality {
+    /// Per-observation confidence prior (1..=95). Classification-level
+    /// caps (lone-hint ceiling, multi-class floor, family ceiling) still
+    /// apply downstream; a strong single observation can never report
+    /// high confidence alone.
+    pub fn confidence(self) -> u8 {
+        match self {
+            Self::Strong => 70,
+            Self::Medium => 55,
+            Self::Weak => 35,
+            Self::Contextual => 45,
+        }
+    }
+}
+
+/// One typed OS observation: OBSERVED fact, never a derived guess.
+///
+/// A received TTL of 64 is `kind: "ttl", value: "64"`. The compatible
+/// initial-TTL families derived from it are reasoning, not observation,
+/// and are never persisted through this type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OsObservation {
+    /// Observation kind within the source (`ttl`, `window`, `mss`,
+    /// `option_order`, `tcp_reset`, `platform_token`, …).
+    pub kind: String,
+    /// Normalized value (bounded excerpt, e.g. `"64"`, `"29200"`,
+    /// `"2,1,3"`).
+    pub value: String,
+    /// Protocol/source key (must be a known key per
+    /// [`is_known_os_source`]; unknown keys stay unmatchable).
+    pub source: String,
+    /// Address family the observation was made on, when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<OsAddressFamily>,
+    /// Probe identifier that produced this observation, when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_id: Option<String>,
+    /// Observation timestamp (ms since UNIX epoch) when the existing
+    /// evidence conventions require it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp_ms: Option<u64>,
+    pub provenance: OsProvenance,
+    pub quality: OsQuality,
+    /// Bounded supporting detail (never raw packet payload material).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+impl OsObservation {
+    /// Normalize into matcher evidence. Values truncate to 64 chars and
+    /// confidence derives from quality; provenance travels alongside via
+    /// [`provenance_of_source`] labels in detailed inference (this flat
+    /// evidence row keeps the stable matcher schema unchanged).
+    pub fn to_evidence(&self) -> OsEvidence {
+        OsEvidence {
+            source: self.source.clone(),
+            feature: self.kind.chars().take(64).collect(),
+            value: self.value.chars().take(64).collect(),
+            confidence: self.quality.confidence(),
+            task_id: self.probe_id.clone(),
+            evidence_id: None,
+        }
+    }
+
+    /// Observations from a parsed IPv4 header view: received TTL, DF
+    /// behavior. The TTL value is the observed remainder, never an
+    /// initial-TTL guess.
+    pub fn from_ipv4_view(
+        view: &crate::os_packets::Ipv4View,
+        probe_id: Option<&str>,
+    ) -> Vec<OsObservation> {
+        vec![
+            OsObservation {
+                kind: "ttl".to_owned(),
+                value: view.ttl.to_string(),
+                source: "ip_ttl".to_owned(),
+                family: Some(OsAddressFamily::V4),
+                probe_id: probe_id.map(str::to_owned),
+                timestamp_ms: None,
+                provenance: OsProvenance::ActiveIp,
+                quality: OsQuality::Medium,
+                detail: None,
+            },
+            OsObservation {
+                kind: "df".to_owned(),
+                value: view.df.to_string(),
+                source: "ip_df".to_owned(),
+                family: Some(OsAddressFamily::V4),
+                probe_id: probe_id.map(str::to_owned),
+                timestamp_ms: None,
+                provenance: OsProvenance::ActiveIp,
+                quality: OsQuality::Weak,
+                detail: None,
+            },
+        ]
+    }
+
+    /// Observations from a parsed IPv6 base header view: received Hop
+    /// Limit (distinct semantics from IPv4 TTL, typed as V6).
+    pub fn from_ipv6_view(
+        view: &crate::os_packets::Ipv6View,
+        probe_id: Option<&str>,
+    ) -> Vec<OsObservation> {
+        vec![OsObservation {
+            kind: "hop_limit".to_owned(),
+            value: view.hop_limit.to_string(),
+            source: "ip_ttl".to_owned(),
+            family: Some(OsAddressFamily::V6),
+            probe_id: probe_id.map(str::to_owned),
+            timestamp_ms: None,
+            provenance: OsProvenance::ActiveIp,
+            quality: OsQuality::Medium,
+            detail: None,
+        }]
+    }
+
+    /// Observations from a parsed TCP segment view: flags, window, MSS,
+    /// window scale, SACK/timestamp presence, and option ordering.
+    /// Bounded: at most 8 observations per segment.
+    pub fn from_tcp_view(
+        view: &crate::os_packets::TcpView,
+        family: OsAddressFamily,
+        probe_id: Option<&str>,
+    ) -> Vec<OsObservation> {
+        let mut out = vec![
+            OsObservation {
+                kind: "flags".to_owned(),
+                value: format!("0x{:02x}", view.flags),
+                source: "tcp_behavior".to_owned(),
+                family: Some(family),
+                probe_id: probe_id.map(str::to_owned),
+                timestamp_ms: None,
+                provenance: OsProvenance::ActiveTcp,
+                quality: OsQuality::Medium,
+                detail: None,
+            },
+            OsObservation {
+                kind: "window".to_owned(),
+                value: view.window.to_string(),
+                source: "tcp_window".to_owned(),
+                family: Some(family),
+                probe_id: probe_id.map(str::to_owned),
+                timestamp_ms: None,
+                provenance: OsProvenance::ActiveTcp,
+                quality: OsQuality::Medium,
+                detail: None,
+            },
+        ];
+        if let Some(mss) = view.mss {
+            out.push(OsObservation {
+                kind: "mss".to_owned(),
+                value: mss.to_string(),
+                source: "tcp_mss".to_owned(),
+                family: Some(family),
+                probe_id: probe_id.map(str::to_owned),
+                timestamp_ms: None,
+                provenance: OsProvenance::ActiveTcp,
+                quality: OsQuality::Medium,
+                detail: None,
+            });
+        }
+        if let Some(wscale) = view.wscale {
+            out.push(OsObservation {
+                kind: "wscale".to_owned(),
+                value: wscale.to_string(),
+                source: "tcp_wscale".to_owned(),
+                family: Some(family),
+                probe_id: probe_id.map(str::to_owned),
+                timestamp_ms: None,
+                provenance: OsProvenance::ActiveTcp,
+                quality: OsQuality::Medium,
+                detail: None,
+            });
+        }
+        if view.sack_permitted {
+            out.push(OsObservation {
+                kind: "sack_permitted".to_owned(),
+                value: "true".to_owned(),
+                source: "tcp_options".to_owned(),
+                family: Some(family),
+                probe_id: probe_id.map(str::to_owned),
+                timestamp_ms: None,
+                provenance: OsProvenance::ActiveTcp,
+                quality: OsQuality::Weak,
+                detail: None,
+            });
+        }
+        if view.timestamps {
+            out.push(OsObservation {
+                kind: "timestamps".to_owned(),
+                value: "true".to_owned(),
+                source: "tcp_options".to_owned(),
+                family: Some(family),
+                probe_id: probe_id.map(str::to_owned),
+                timestamp_ms: None,
+                provenance: OsProvenance::ActiveTcp,
+                quality: OsQuality::Weak,
+                detail: None,
+            });
+        }
+        if !view.option_order.is_empty() {
+            let order = view
+                .option_order
+                .iter()
+                .map(|kind| kind.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            out.push(OsObservation {
+                kind: "option_order".to_owned(),
+                value: order.chars().take(64).collect(),
+                source: "tcp_options".to_owned(),
+                family: Some(family),
+                probe_id: probe_id.map(str::to_owned),
+                timestamp_ms: None,
+                provenance: OsProvenance::ActiveTcp,
+                quality: OsQuality::Strong,
+                detail: None,
+            });
+        }
+        out.truncate(8);
+        out
+    }
+
+    /// Observation from a parsed ICMP message view: type/code response
+    /// behavior (or silence, recorded by the caller as a separate weak
+    /// observation — missing evidence is never negative evidence).
+    pub fn from_icmp_view(
+        view: &crate::os_packets::IcmpView,
+        family: OsAddressFamily,
+        probe_id: Option<&str>,
+    ) -> Vec<OsObservation> {
+        vec![OsObservation {
+            kind: "type_code".to_owned(),
+            value: format!("{}/{}", view.icmp_type, view.code),
+            source: "icmp_behavior".to_owned(),
+            family: Some(family),
+            probe_id: probe_id.map(str::to_owned),
+            timestamp_ms: None,
+            provenance: OsProvenance::ActiveIcmp,
+            quality: OsQuality::Medium,
+            detail: None,
+        }]
+    }
+}
+
+/// Evidence sources with defined matching semantics. Pack features that
+/// reference any other key are reported by [`unknown_os_sources`] (lint)
+/// and classify at most as weak application hints (single-class ceiling),
+/// never strong evidence. The matcher itself never fails on them: unknown
+/// stays safe and weak.
+pub fn is_known_os_source(source: &str) -> bool {
+    matches!(
+        source,
+        "tcp_options"
+            | "tcp_window"
+            | "tcp_mss"
+            | "tcp_wscale"
+            | "tcp_timing"
+            | "tcp_rtt"
+            | "ip_ttl"
+            | "ip_df"
+            | "ip_id"
+            | "icmp_behavior"
+            | "tcp_behavior"
+            | "tcp_reset"
+            | "ssh_banner"
+            | "service_product"
+            | "smtp_banner"
+            | "ftp_banner"
+            | "banner_token"
+            | "http_server"
+            | "tls_subject"
+            | "tls_issuer"
+    )
+}
+
+/// Provenance label for an evidence source. Network-stack observations
+/// and application-context hints never share a label.
+pub fn provenance_of_source(source: &str) -> &'static str {
+    match source {
+        "ip_ttl" | "ip_df" | "ip_id" => OsProvenance::ActiveIp.as_str(),
+        "tcp_options" | "tcp_window" | "tcp_mss" | "tcp_wscale" => OsProvenance::ActiveTcp.as_str(),
+        "tcp_timing" | "tcp_rtt" => "active TCP timing",
+        "icmp_behavior" => OsProvenance::ActiveIcmp.as_str(),
+        "tcp_behavior" | "tcp_reset" => OsProvenance::ExistingTcpScan.as_str(),
+        "ssh_banner" => OsProvenance::Ssh.as_str(),
+        "http_server" => OsProvenance::Http.as_str(),
+        "service_product" => OsProvenance::ServiceEvidence.as_str(),
+        "tls_subject" | "tls_issuer" => OsProvenance::Tls.as_str(),
+        _ => "application hint",
+    }
+}
+
+/// Confidence label vocabulary (shared with project intelligence bands:
+/// high >= 75, medium >= 50, low below; unknown is absence of evidence).
+pub fn confidence_label(confidence: u8) -> &'static str {
+    if confidence >= 75 {
+        "high"
+    } else if confidence >= 50 {
+        "medium"
+    } else {
+        "low"
+    }
+}
+
+/// Report unknown observation keys in one pack (deterministic, sorted).
+/// Used by corpus lint: unknown keys are reported, never silently matched.
+pub fn unknown_os_sources(pack: &OsPack) -> Vec<String> {
+    let mut unknown = BTreeSet::new();
+    for rule in &pack.rules {
+        for feature in rule.features.iter().chain(rule.exclusions.iter()) {
+            if !is_known_os_source(&feature.source) {
+                unknown.insert(feature.source.clone());
+            }
+        }
+    }
+    unknown.into_iter().collect()
+}
+
+/// One explainable OS candidate: score inputs stay visible instead of
+/// collapsing into a bare label.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OsDetailedCandidate {
+    pub family: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_hint: Option<String>,
+    pub confidence: u8,
+    /// Explainable band for `confidence` (`high`/`medium`/`low`).
+    pub confidence_band: String,
+    /// 0..=1: matched features over the best rule's feature count.
+    pub coverage: f32,
+    /// Matched evidence (`source:pattern`), bounded.
+    pub matched: Vec<String>,
+    /// Explicitly contradicted evidence (`source:pattern`), bounded.
+    pub conflicting: Vec<String>,
+    /// Rule evidence kinds with no observation at all, bounded.
+    pub unavailable: Vec<String>,
+    /// Distinct provenance labels behind the matched evidence.
+    pub provenance: Vec<String>,
+    #[serde(default)]
+    pub rule_ids: Vec<String>,
+}
+
+/// Full inference result for one host. `Unknown` (no candidates) is a
+/// first-class result with an explicit reason, never a guessed label.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OsInference {
+    pub best: Option<OsDetailedCandidate>,
+    #[serde(default)]
+    pub alternatives: Vec<OsDetailedCandidate>,
+    pub unknown: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unknown_reason: Option<String>,
+}
+
+impl OsInference {
+    /// Flatten to the stable candidate list (best first, then
+    /// alternatives). Empty when unknown.
+    pub fn candidates(&self) -> Vec<OsCandidate> {
+        let mut candidates = Vec::new();
+        if let Some(best) = &self.best {
+            candidates.push(detailed_to_candidate(best));
+        }
+        for alternative in &self.alternatives {
+            candidates.push(detailed_to_candidate(alternative));
+        }
+        candidates
+    }
+}
+
 /// One OS hypothesis for a host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OsCandidate {
@@ -491,7 +922,25 @@ impl OsDb {
     /// by (confidence desc, family asc); empty when nothing matched.
     /// Deterministic and bounded (one candidate per matching rule family
     /// at most — families merge across rules, best rule wins per family).
+    /// Compatibility wrapper over [`classify_detailed`](Self::classify_detailed).
     pub fn classify_host(&self, evidence: &[OsEvidence]) -> Vec<OsCandidate> {
+        let inference = self.classify_detailed(evidence);
+        let mut candidates = Vec::new();
+        if let Some(best) = inference.best {
+            candidates.push(detailed_to_candidate(&best));
+        }
+        for alternative in inference.alternatives {
+            candidates.push(detailed_to_candidate(&alternative));
+        }
+        candidates
+    }
+
+    /// Classify one host with full explanation: coverage, conflicting
+    /// evidence, unavailable evidence kinds, and provenance per candidate.
+    /// Same evidence + same corpus = same result; evidence and fingerprint
+    /// order never change the semantic result (inputs sort by rule id,
+    /// families merge in a `BTreeMap`, candidates sort deterministically).
+    pub fn classify_detailed(&self, evidence: &[OsEvidence]) -> OsInference {
         // Index evidence by source for bounded lookup.
         let mut by_source: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
         for item in evidence {
@@ -505,34 +954,83 @@ impl OsDb {
         }
         // family -> (best score state).
         let mut families: BTreeMap<String, FamilyScore> = BTreeMap::new();
+        // Families with at least one rule vetoed by contradictory evidence
+        // while other evidence still matched that family (bounded notes).
+        let mut family_conflicts: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut any_feature_hit = false;
         for rule in &self.rules {
-            // Exclusions veto the rule outright.
-            if rule.exclusions.iter().any(|feature| {
-                by_source
-                    .get(feature.source.as_str())
-                    .is_some_and(|texts| texts.iter().any(|text| feature_matches(feature, text)))
-            }) {
+            // Exclusions veto the rule outright; the hit is recorded as an
+            // explicit contradiction for the family instead of vanishing.
+            let vetoed: Vec<String> = rule
+                .exclusions
+                .iter()
+                .filter(|feature| {
+                    by_source.get(feature.source.as_str()).is_some_and(|texts| {
+                        texts.iter().any(|text| feature_matches(feature, text))
+                    })
+                })
+                .map(|feature| format!("{}:{}", feature.source, feature.pattern))
+                .take(4)
+                .collect();
+            if !vetoed.is_empty() {
+                let slot = family_conflicts.entry(rule.family.clone()).or_default();
+                for hit in vetoed {
+                    if slot.len() < 4 && !slot.contains(&hit) {
+                        slot.push(hit);
+                    }
+                }
+                // A vetoed rule whose features still matched is explicit
+                // contradiction (not mere absence): unknown reports it.
+                if rule.features.iter().any(|feature| {
+                    by_source.get(feature.source.as_str()).is_some_and(|texts| {
+                        texts.iter().any(|text| feature_matches(feature, text))
+                    })
+                }) {
+                    any_feature_hit = true;
+                }
                 continue;
             }
             let mut weight_sum: u32 = 0;
+            let mut matched_count: u32 = 0;
             let mut classes: BTreeSet<OsEvidenceClass> = BTreeSet::new();
             let mut supporting = Vec::new();
+            let mut matched_sources = BTreeSet::new();
+            let mut unavailable = Vec::new();
             for feature in &rule.features {
-                let Some(texts) = by_source.get(feature.source.as_str()) else {
-                    continue;
-                };
-                if texts.iter().any(|text| feature_matches(feature, text)) {
-                    weight_sum += u32::from(feature.weight);
-                    classes.insert(OsEvidence::class_of(&feature.source));
-                    if supporting.len() < 8 {
-                        supporting.push(format!("{}:{}", feature.source, feature.pattern));
+                match by_source.get(feature.source.as_str()) {
+                    None => {
+                        if unavailable.len() < 8 && !unavailable.contains(&feature.source) {
+                            unavailable.push(feature.source.clone());
+                        }
+                    }
+                    Some(texts) => {
+                        if texts.iter().any(|text| feature_matches(feature, text)) {
+                            weight_sum += u32::from(feature.weight);
+                            matched_count += 1;
+                            classes.insert(OsEvidence::class_of(&feature.source));
+                            matched_sources.insert(feature.source.clone());
+                            if supporting.len() < 8 {
+                                supporting.push(format!("{}:{}", feature.source, feature.pattern));
+                            }
+                        }
                     }
                 }
+            }
+            if matched_count > 0 {
+                any_feature_hit = true;
             }
             if classes.is_empty() {
                 continue;
             }
             let confidence = confidence_for(classes.len(), weight_sum, rule.confidence_cap);
+            let coverage =
+                (matched_count as f32 / rule.features.len().max(1) as f32).clamp(0.0, 1.0);
+            let provenance = matched_sources
+                .iter()
+                .map(|source| provenance_of_source(source).to_owned())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
             let entry = families
                 .entry(rule.family.clone())
                 .or_insert_with(|| FamilyScore {
@@ -540,42 +1038,75 @@ impl OsDb {
                     device_hint: rule.device_hint.clone(),
                     variant: rule.variant.clone(),
                     confidence: 0,
+                    coverage: 0.0,
                     supporting: Vec::new(),
+                    unavailable: Vec::new(),
+                    provenance: Vec::new(),
                     rule_ids: Vec::new(),
                 });
             if confidence > entry.confidence {
                 entry.confidence = confidence;
+                entry.coverage = coverage;
                 entry.generation = rule.generation.clone();
                 entry.device_hint = rule.device_hint.clone();
                 entry.variant = rule.variant.clone();
                 entry.supporting = supporting;
+                entry.unavailable = unavailable;
+                entry.provenance = provenance;
                 entry.rule_ids = vec![rule.id.clone()];
             } else if confidence == entry.confidence && entry.rule_ids.len() < 4 {
                 entry.rule_ids.push(rule.id.clone());
             }
         }
-        let mut candidates: Vec<OsCandidate> = families
+        let mut detailed: Vec<OsDetailedCandidate> = families
             .into_iter()
-            .map(|(family, score)| OsCandidate {
-                family,
-                device_hint: score.device_hint,
-                generation: score.generation,
-                variant: score.variant,
-                confidence: score.confidence,
-                supporting: score.supporting,
-                conflicting: Vec::new(),
-                rule_ids: score.rule_ids,
+            .map(|(family, score)| {
+                let conflicting = family_conflicts.remove(&family).unwrap_or_default();
+                OsDetailedCandidate {
+                    family,
+                    generation: score.generation,
+                    variant: score.variant,
+                    device_hint: score.device_hint,
+                    confidence: score.confidence,
+                    confidence_band: confidence_label(score.confidence).to_owned(),
+                    coverage: score.coverage,
+                    matched: score.supporting,
+                    conflicting,
+                    unavailable: score.unavailable,
+                    provenance: score.provenance,
+                    rule_ids: score.rule_ids,
+                }
             })
             .collect();
-        // Conflicting evidence: families that excluded nothing but lost on
-        // confidence note the winner as context (bounded).
-        candidates.sort_by(|a, b| {
+        detailed.sort_by(|a, b| {
             b.confidence
                 .cmp(&a.confidence)
                 .then_with(|| a.family.cmp(&b.family))
         });
-        candidates.truncate(4);
-        candidates
+        detailed.truncate(4);
+        if detailed.is_empty() {
+            let reason = if evidence.is_empty() {
+                "no OS evidence was collected for this host"
+            } else if any_feature_hit {
+                "contradictory evidence vetoed every matching candidate"
+            } else {
+                "no fingerprint matched the collected evidence"
+            };
+            return OsInference {
+                best: None,
+                alternatives: Vec::new(),
+                unknown: true,
+                unknown_reason: Some(reason.to_owned()),
+            };
+        }
+        let mut detailed_iter = detailed.into_iter();
+        let best = detailed_iter.next();
+        OsInference {
+            best,
+            alternatives: detailed_iter.collect(),
+            unknown: false,
+            unknown_reason: None,
+        }
     }
 }
 
@@ -584,8 +1115,25 @@ struct FamilyScore {
     device_hint: Option<String>,
     variant: Option<String>,
     confidence: u8,
+    coverage: f32,
     supporting: Vec<String>,
+    unavailable: Vec<String>,
+    provenance: Vec<String>,
     rule_ids: Vec<String>,
+}
+
+/// Flatten a detailed candidate back to the stable candidate record.
+fn detailed_to_candidate(detailed: &OsDetailedCandidate) -> OsCandidate {
+    OsCandidate {
+        family: detailed.family.clone(),
+        generation: detailed.generation.clone(),
+        device_hint: detailed.device_hint.clone(),
+        variant: detailed.variant.clone(),
+        confidence: detailed.confidence,
+        supporting: detailed.matched.clone(),
+        conflicting: detailed.conflicting.clone(),
+        rule_ids: detailed.rule_ids.clone(),
+    }
 }
 
 /// Confidence from distinct classes + summed weights, honoring the lone-hint
@@ -1077,12 +1625,405 @@ mod tests {
         assert_eq!(db.stats().files_rejected, 0);
         let _ = std::fs::remove_dir_all(&base);
     }
+
+    // ---------------- active OS observation model ----------------
+
+    #[test]
+    fn observation_serializes_and_converts_bounded() {
+        let observation = OsObservation {
+            kind: "ttl".to_owned(),
+            value: "64".to_owned(),
+            source: "ip_ttl".to_owned(),
+            family: Some(OsAddressFamily::V4),
+            probe_id: Some("tcp-80".to_owned()),
+            timestamp_ms: Some(1_700_000_000_000),
+            provenance: OsProvenance::ActiveIp,
+            quality: OsQuality::Medium,
+            detail: None,
+        };
+        let json = serde_json::to_string(&observation).unwrap();
+        let decoded: OsObservation = serde_json::from_str(&json).unwrap();
+        assert_eq!(observation, decoded);
+        let evidence = observation.to_evidence();
+        assert_eq!(evidence.source, "ip_ttl");
+        assert_eq!(evidence.feature, "ttl");
+        assert_eq!(evidence.value, "64");
+        // Oversized values truncate, never grow the matcher.
+        let big = OsObservation {
+            value: "x".repeat(5000),
+            ..observation.clone()
+        };
+        assert!(big.to_evidence().value.len() <= 64);
+    }
+
+    #[test]
+    fn ipv4_and_ipv6_observations_stay_distinct() {
+        let v4 = OsObservation::from_ipv4_view(
+            &crate::os_packets::Ipv4View {
+                ttl: 64,
+                df: true,
+                identification: 1,
+                protocol: 6,
+                header_len: 20,
+            },
+            Some("p1"),
+        );
+        let v6 = OsObservation::from_ipv6_view(
+            &crate::os_packets::Ipv6View {
+                hop_limit: 64,
+                next_header: 6,
+                payload_len: 32,
+                src: "::1".parse().unwrap(),
+                dst: "::1".parse().unwrap(),
+            },
+            Some("p1"),
+        );
+        assert!(
+            v4.iter()
+                .any(|item| item.kind == "ttl" && item.family == Some(OsAddressFamily::V4))
+        );
+        assert!(
+            v6.iter()
+                .all(|item| item.family == Some(OsAddressFamily::V6))
+        );
+        assert!(v6.iter().any(|item| item.kind == "hop_limit"));
+        // Same numeric value, different families: never equal as observations.
+        assert_ne!(v4[0].family, v6[0].family);
+    }
+
+    #[test]
+    fn tcp_and_icmp_views_become_typed_observations() {
+        let tcp = crate::os_packets::parse_tcp_segment(&{
+            let mut segment = vec![0u8; 32];
+            segment[12] = 0x80;
+            segment[13] = 0x12;
+            segment[14..16].copy_from_slice(&29200u16.to_be_bytes());
+            segment[20..24].copy_from_slice(&[2, 4, 0x05, 0xB4]);
+            segment[24] = 1;
+            segment[25..28].copy_from_slice(&[3, 3, 7]);
+            segment
+        })
+        .unwrap();
+        let observations = OsObservation::from_tcp_view(&tcp, OsAddressFamily::V4, None);
+        let kinds: Vec<&str> = observations.iter().map(|item| item.kind.as_str()).collect();
+        assert!(kinds.contains(&"flags"));
+        assert!(kinds.contains(&"window"));
+        assert!(kinds.contains(&"mss"));
+        assert!(kinds.contains(&"wscale"));
+        assert!(kinds.contains(&"option_order"));
+        assert!(observations.len() <= 8);
+        assert!(
+            observations
+                .iter()
+                .all(|item| item.provenance == OsProvenance::ActiveTcp)
+        );
+        let icmp = crate::os_packets::parse_icmp_message(&[3u8, 3, 0, 0, 0, 0, 0, 0])
+            .unwrap()
+            .0;
+        let icmp_observations =
+            OsObservation::from_icmp_view(&icmp, OsAddressFamily::V4, Some("icmp-1"));
+        assert_eq!(icmp_observations[0].value, "3/3");
+        assert_eq!(icmp_observations[0].probe_id.as_deref(), Some("icmp-1"));
+    }
+
+    #[test]
+    fn known_sources_cover_matcher_vocabulary_and_lint_reports_unknown() {
+        for source in [
+            "ssh_banner",
+            "http_server",
+            "banner_token",
+            "service_product",
+            "ip_ttl",
+            "tcp_window",
+            "tcp_options",
+            "icmp_behavior",
+            "tcp_behavior",
+        ] {
+            assert!(is_known_os_source(source), "known: {source}");
+        }
+        assert!(!is_known_os_source("port_22_open"));
+        assert!(!is_known_os_source("apache"));
+        let pack = parse_os_pack(
+            r#"{"schema_version": 1, "rules": [
+            {"id": "lint-x", "family": "Linux",
+             "features": [{"source": "port_22_open", "pattern": "x", "weight": 10}],
+             "confidence_cap": 80, "source": "lint"}]}"#,
+            "lint",
+        )
+        .unwrap();
+        assert_eq!(unknown_os_sources(&pack), vec!["port_22_open".to_owned()]);
+        // Unknown keys never produce strong claims: weakest class, capped
+        // at the lone-hint ceiling. Lint flags them for maintainers.
+        let db = OsDb::from_packs(vec![("lint".to_owned(), pack)]);
+        let weak = db.classify_host(&[evidence("port_22_open", "x")]);
+        assert!(
+            weak.iter()
+                .all(|candidate| candidate.confidence <= SINGLE_HINT_CAP)
+        );
+    }
+
+    #[test]
+    fn provenance_never_collapses_stack_and_service() {
+        assert_eq!(provenance_of_source("ip_ttl"), "active IP observation");
+        assert_eq!(provenance_of_source("tcp_window"), "active TCP observation");
+        assert_eq!(
+            provenance_of_source("icmp_behavior"),
+            "active ICMP observation"
+        );
+        assert_eq!(provenance_of_source("tcp_behavior"), "existing TCP scan");
+        assert_eq!(provenance_of_source("ssh_banner"), "SSH observation");
+        assert_eq!(provenance_of_source("http_server"), "HTTP observation");
+        assert_eq!(
+            provenance_of_source("service_product"),
+            "service fingerprint"
+        );
+        assert_ne!(
+            provenance_of_source("tcp_window"),
+            provenance_of_source("service_product")
+        );
+    }
+
+    #[test]
+    fn confidence_bands_match_project_intelligence() {
+        assert_eq!(confidence_label(90), "high");
+        assert_eq!(confidence_label(75), "high");
+        assert_eq!(confidence_label(74), "medium");
+        assert_eq!(confidence_label(50), "medium");
+        assert_eq!(confidence_label(49), "low");
+        assert_eq!(confidence_label(0), "low");
+    }
+
+    fn detail_db() -> OsDb {
+        OsDb::from_packs(vec![(
+            "d.json".to_owned(),
+            parse_os_pack(
+                r#"{"schema_version": 1, "rules": [
+                {"id": "d-linux", "family": "Linux",
+                 "features": [
+                   {"source": "tcp_behavior", "pattern": "reset", "weight": 15},
+                   {"source": "ssh_banner", "pattern": "Ubuntu", "weight": 20}],
+                 "exclusions": [
+                   {"source": "ssh_banner", "pattern": "Windows", "weight": 1}],
+                 "confidence_cap": 85, "source": "d"},
+                {"id": "d-linux-banner", "family": "Linux",
+                 "features": [
+                   {"source": "ssh_banner", "pattern": "Ubuntu", "weight": 18}],
+                 "confidence_cap": 65, "source": "d"},
+                {"id": "d-win", "family": "Windows",
+                 "features": [
+                   {"source": "ssh_banner", "pattern": "Windows", "weight": 22}],
+                 "confidence_cap": 80, "source": "d"}]}"#,
+                "d",
+            )
+            .unwrap(),
+        )])
+    }
+
+    #[test]
+    fn detailed_inference_explains_coverage_conflicts_and_gaps() {
+        let db = detail_db();
+        let inference = db.classify_detailed(&[
+            evidence("tcp_behavior", "port 80 reset"),
+            evidence("ssh_banner", "Ubuntu"),
+        ]);
+        assert!(!inference.unknown);
+        let best = inference.best.unwrap();
+        assert_eq!(best.family, "Linux");
+        assert_eq!(best.coverage, 1.0);
+        assert!(best.unavailable.is_empty());
+        assert_eq!(best.confidence_band, confidence_label(best.confidence));
+        assert!(best.confidence <= OS_CONFIDENCE_CAP);
+        assert!(best.provenance.contains(&"existing TCP scan".to_owned()));
+        assert!(best.provenance.contains(&"SSH observation".to_owned()));
+        // Partial evidence: coverage drops, confidence cannot claim more.
+        let partial = db
+            .classify_detailed(&[evidence("ssh_banner", "Ubuntu")])
+            .best
+            .unwrap();
+        assert!(partial.coverage < 1.0);
+        assert!(!partial.unavailable.is_empty());
+        assert!(partial.confidence <= SINGLE_HINT_CAP);
+        // Contradiction is explicit, not silent: the vetoed rule's hit is
+        // recorded on the surviving same-family candidate, and a fully
+        // vetoed corpus reports unknown with the contradiction reason.
+        let conflict = db.classify_detailed(&[
+            evidence("tcp_behavior", "port 80 reset"),
+            evidence("ssh_banner", "Ubuntu Windows box"),
+        ]);
+        assert!(!conflict.unknown);
+        let linux = conflict
+            .best
+            .iter()
+            .chain(conflict.alternatives.iter())
+            .find(|candidate| candidate.family == "Linux")
+            .expect("Linux survives through its unvetoed rule");
+        assert!(
+            linux.conflicting.contains(&"ssh_banner:Windows".to_owned()),
+            "conflict exposed: {:?}",
+            linux.conflicting
+        );
+        let veto_only = OsDb::from_packs(vec![(
+            "v.json".to_owned(),
+            parse_os_pack(
+                r#"{"schema_version": 1, "rules": [
+                {"id": "v-linux", "family": "Linux",
+                 "features": [
+                   {"source": "tcp_behavior", "pattern": "reset", "weight": 15},
+                   {"source": "ssh_banner", "pattern": "Ubuntu", "weight": 20}],
+                 "exclusions": [
+                   {"source": "ssh_banner", "pattern": "Windows", "weight": 1}],
+                 "confidence_cap": 85, "source": "v"}]}"#,
+                "v",
+            )
+            .unwrap(),
+        )]);
+        let vetoed = veto_only.classify_detailed(&[
+            evidence("tcp_behavior", "port 80 reset"),
+            evidence("ssh_banner", "Ubuntu Windows box"),
+        ]);
+        assert!(vetoed.unknown);
+        assert_eq!(
+            vetoed.unknown_reason.as_deref(),
+            Some("contradictory evidence vetoed every matching candidate")
+        );
+        // No evidence at all: unknown with its own reason.
+        let empty = db.classify_detailed(&[]);
+        assert!(empty.unknown);
+        assert!(empty.unknown_reason.is_some());
+        // Evidence that matches nothing: unknown, never invented.
+        let nomatch = db.classify_detailed(&[evidence("ssh_banner", "hello world")]);
+        assert!(nomatch.unknown);
+    }
+
+    #[test]
+    fn classic_candidates_carry_conflicts() {
+        let db = detail_db();
+        // Windows evidence present alongside Linux evidence: the strict
+        // Linux rule is vetoed by its exclusion, Linux survives through its
+        // unvetoed rule with the conflict attached, and Windows leads on
+        // confidence. Vetoed rules never report as candidates themselves.
+        let candidates = db.classify_host(&[
+            evidence("tcp_behavior", "port 80 reset"),
+            evidence("ssh_banner", "Ubuntu Windows box"),
+        ]);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].family, "Windows");
+        let linux = candidates
+            .iter()
+            .find(|candidate| candidate.family == "Linux")
+            .unwrap();
+        assert!(linux.conflicting.contains(&"ssh_banner:Windows".to_owned()));
+    }
+
+    #[test]
+    fn evidence_permutation_and_pack_order_never_change_results() {
+        let db = detail_db();
+        let first = vec![
+            evidence("tcp_behavior", "port 80 reset"),
+            evidence("ssh_banner", "Ubuntu"),
+            evidence("http_server", "noise"),
+        ];
+        let mut permuted = first.clone();
+        permuted.reverse();
+        assert_eq!(db.classify_host(&first), db.classify_host(&permuted));
+        assert_eq!(
+            db.classify_detailed(&first),
+            db.classify_detailed(&permuted)
+        );
+        // Fingerprint order independence: reversed pack input, same result.
+        let pack_a = parse_os_pack(
+            r#"{"schema_version": 1, "rules": [
+            {"id": "o-a", "family": "Linux",
+             "features": [{"source": "ssh_banner", "pattern": "Ubuntu", "weight": 20}],
+             "confidence_cap": 85, "source": "o"}]}"#,
+            "a",
+        )
+        .unwrap();
+        let pack_b = parse_os_pack(
+            r#"{"schema_version": 1, "rules": [
+            {"id": "o-b", "family": "Windows",
+             "features": [{"source": "ssh_banner", "pattern": "Windows", "weight": 20}],
+             "confidence_cap": 85, "source": "o"}]}"#,
+            "b",
+        )
+        .unwrap();
+        let forward = OsDb::from_packs(vec![
+            ("a".to_owned(), pack_a.clone()),
+            ("b".to_owned(), pack_b.clone()),
+        ]);
+        let backward = OsDb::from_packs(vec![("b".to_owned(), pack_b), ("a".to_owned(), pack_a)]);
+        let probe = vec![evidence("ssh_banner", "Ubuntu Windows")];
+        assert_eq!(
+            forward.classify_host(&probe),
+            backward.classify_host(&probe)
+        );
+    }
+
+    #[test]
+    fn supporting_evidence_is_monotonic_without_new_contradiction() {
+        let db = detail_db();
+        let weak = vec![evidence("tcp_behavior", "port 80 reset")];
+        let stronger = vec![
+            evidence("tcp_behavior", "port 80 reset"),
+            evidence("ssh_banner", "Ubuntu"),
+        ];
+        let weak_conf = db
+            .classify_host(&weak)
+            .iter()
+            .find(|candidate| candidate.family == "Linux")
+            .map(|candidate| candidate.confidence)
+            .unwrap_or(0);
+        let strong_conf = db
+            .classify_host(&stronger)
+            .iter()
+            .find(|candidate| candidate.family == "Linux")
+            .map(|candidate| candidate.confidence)
+            .unwrap_or(0);
+        assert!(strong_conf >= weak_conf);
+        // Adding contradiction cannot silently increase confidence.
+        let contradicted = vec![
+            evidence("tcp_behavior", "port 80 reset"),
+            evidence("ssh_banner", "Ubuntu"),
+            evidence("ssh_banner", "Windows"),
+        ];
+        let contra_conf = db
+            .classify_host(&contradicted)
+            .iter()
+            .find(|candidate| candidate.family == "Linux")
+            .map(|candidate| candidate.confidence)
+            .unwrap_or(0);
+        assert!(contra_conf <= strong_conf);
+    }
+
+    #[test]
+    fn missing_evidence_is_not_contradiction() {
+        // A rule needing two features still matches on one (partial
+        // coverage); absence of the second source never vetoes.
+        let db = detail_db();
+        let partial = db.classify_host(&[evidence("ssh_banner", "Ubuntu")]);
+        assert!(partial.iter().any(|candidate| candidate.family == "Linux"));
+    }
 }
 
 /// Per-host OS report streamed as an `os_candidate` JSONL record.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Additive detail fields (`coverage`, `unavailable`, `probe_availability`,
+/// `provenance`) default for old readers; new readers explain exactly how
+/// strong the evidence is, what conflicts, and what could not be observed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OsHostReport {
     pub host: String,
     pub candidates: Vec<OsCandidate>,
     pub evidence_count: usize,
+    /// Best-candidate coverage 0..=1 (0 when unknown).
+    #[serde(default)]
+    pub coverage: f32,
+    /// Evidence kinds the winning rule needed but nothing observed.
+    #[serde(default)]
+    pub unavailable: Vec<String>,
+    /// Active-probe availability for this host (`None` = passive-only run).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_availability: Option<String>,
+    /// Distinct provenance labels behind the best candidate.
+    #[serde(default)]
+    pub provenance: Vec<String>,
 }

@@ -134,6 +134,23 @@ DNS, NTP, and SSDP.
 UDP silence is not reported as proof that a port is open or closed. RXScan
 preserves the resulting `open|filtered` uncertainty.
 
+### OS fingerprinting
+
+OS detection is explicit and evidence-backed, never a guess from one hint:
+
+```bash
+rxscan example.test --os
+```
+
+`--os` runs a bounded probe plan per in-scope host (at most 6 normal
+TCP/ICMP probes, reusing ports the scan already knows) and explains every
+candidate: matched evidence, conflicting evidence, unavailable evidence,
+coverage, and provenance. Without the raw-packet capability it degrades
+honestly to passive evidence with reduced confidence. `Unknown` is a
+first-class result when evidence is insufficient. See
+`docs/OS_FINGERPRINTING.md` for the evidence model, limitations, and
+current corpus reality.
+
 ## Service identification
 
 RXScan identifies services from observed protocol behavior instead of assigning

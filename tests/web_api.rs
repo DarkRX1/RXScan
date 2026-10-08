@@ -631,6 +631,7 @@ fn scan_cancellation_reaches_scheduler() {
         ping: false,
         discover: false,
         udp: false,
+        os: false,
         wordlist: None,
         scan_mode: Some("connect".to_owned()),
         explain: false,
