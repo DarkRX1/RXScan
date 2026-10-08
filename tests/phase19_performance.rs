@@ -1089,10 +1089,17 @@ fn large_wordlist_streams_with_candidate_and_request_caps() {
             .unwrap();
     stop.store(true, Ordering::SeqCst);
     let seen = requests.lock().unwrap().len();
-    assert!(
-        seen <= MAX_CONTENT_REQUESTS,
-        "requests {seen} exceed per-task cap {}",
-        MAX_CONTENT_REQUESTS
+    // Exact target-side cap: the module counts each fetch at initiation, so
+    // the request budget is consumed even by a fetch that later fails after
+    // connecting. Every initiation opens exactly one connection to this
+    // single-address non-redirecting fixture, hence the target observes
+    // exactly MAX_CONTENT_REQUESTS accepts — a transient fetch failure can
+    // no longer escape the cap as a 129th connection. (Module-side
+    // completion detail is not used here: the completion event itself is
+    // subject to the output event cap on saturated runs.)
+    assert_eq!(
+        seen, MAX_CONTENT_REQUESTS,
+        "target must observe exactly the cap (seen {seen})"
     );
     assert!(output.events.len() <= content::MAX_CONTENT_EVENTS);
     assert!(output.findings.len() <= content::MAX_CONTENT_FINDINGS);

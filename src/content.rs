@@ -542,6 +542,14 @@ impl ContentRunState<'_> {
         }
         self.admitted += 1;
         self.emit_attempt(&target, &candidate)?;
+        // Count the request when it is initiated, not when the fetch
+        // completes: the per-task cap bounds load placed on the target, and a
+        // fetch that fails after connecting (read timeout under load) still
+        // consumed a server-side accept. Counting completions lets one failed
+        // attempt escape the cap (129 accepts for a 128 cap). Initiation
+        // counting keeps module accounting and target-observed connections
+        // exactly aligned for single-address non-redirect fetches.
+        self.requests += 1;
         let Some(fetch) = fetch_content(
             &target,
             self.policy,
@@ -553,7 +561,6 @@ impl ContentRunState<'_> {
         else {
             return Ok(());
         };
-        self.requests += 1;
         let signature = signature_for_response(&fetch.response, &fetch.body);
         let state = classify_discovery(&fetch, &signature, &self.baseline_signatures);
         match state {

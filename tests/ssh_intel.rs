@@ -115,6 +115,12 @@ impl SshFixture {
                 };
                 let received = received_thread.clone();
                 std::thread::spawn(move || {
+                    // Accepted sockets inherit the listener's nonblocking flag
+                    // on some platforms; the KEX exchange below needs
+                    // blocking-with-timeout semantics (an immediate WouldBlock
+                    // in the ident loop would abort the handshake before the
+                    // client speaks). Force blocking; timeouts stay bounded.
+                    let _ = stream.set_nonblocking(false);
                     let _ = stream.write_all(banner);
                     // Read client ident line.
                     let mut line = Vec::new();
