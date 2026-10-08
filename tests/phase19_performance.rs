@@ -235,15 +235,151 @@ fn test_scheduler(
     .unwrap()
 }
 
+/// Normalized peak-memory quantity in kibibytes (KiB, 1024 bytes).
+///
+/// Platform implementations (no new dependencies, no shell-out, no fake zero):
+/// * Linux/Android/other `/proc`: `/proc/self/status` `VmHWM` is already KiB
+///   (proven behavior, preserved).
+/// * macOS: `getrusage(RUSAGE_SELF)` `ru_maxrss` is bytes on macOS (BSD
+///   outlier; Linux reports KiB) -> bytes/1024 = KiB.
+/// * Windows: `GetProcessMemoryInfo` `PeakWorkingSetSize` is bytes
+///   (`PROCESS_MEMORY_COUNTERS` docs) -> bytes/1024 = KiB.
+///
+/// Returns `None` when measurement is unavailable; callers must not treat
+/// `None` as zero.
 fn peak_rss_kb() -> Option<u64> {
+    #[cfg(target_os = "windows")]
+    {
+        peak_rss_kb_windows()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        peak_rss_kb_macos()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        peak_rss_kb_proc()
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn peak_rss_kb_proc() -> Option<u64> {
     std::fs::read_to_string("/proc/self/status")
         .ok()?
         .lines()
         .find_map(|line| {
             line.strip_prefix("VmHWM:")
                 .and_then(|rest| rest.split_whitespace().next())
-                .and_then(|value| value.parse().ok())
+                .and_then(|value| value.parse::<u64>().ok())
         })
+        .filter(|kb| *kb > 0)
+}
+
+/// macOS peak RSS via `getrusage(RUSAGE_SELF)`.
+///
+/// `ru_maxrss` is bytes on macOS (unlike Linux KiB); normalized to KiB.
+/// Raw FFI without new dependencies, matching the existing `signal(2)`
+/// pattern in `src/platform/process.rs`.
+#[cfg(target_os = "macos")]
+fn peak_rss_kb_macos() -> Option<u64> {
+    #[repr(C)]
+    struct Timeval {
+        tv_sec: i64,
+        tv_usec: i32,
+    }
+    #[repr(C)]
+    struct Rusage {
+        ru_utime: Timeval,
+        ru_stime: Timeval,
+        ru_maxrss: i64,
+        ru_ixrss: i64,
+        ru_idrss: i64,
+        ru_isrss: i64,
+        ru_minflt: i64,
+        ru_majflt: i64,
+        ru_nswap: i64,
+        ru_inblock: i64,
+        ru_oublock: i64,
+        ru_msgsnd: i64,
+        ru_msgrcv: i64,
+        ru_nsignals: i64,
+        ru_nvcsw: i64,
+        ru_nivcsw: i64,
+    }
+    unsafe extern "C" {
+        fn getrusage(who: i32, usage: *mut Rusage) -> i32;
+    }
+    const RUSAGE_SELF: i32 = 0;
+    // SAFETY: `getrusage` writes a valid `Rusage` on success (return 0);
+    // zeroed init is valid for this integer-only struct; return code is
+    // checked before reading.
+    let mut usage = std::mem::MaybeUninit::<Rusage>::zeroed();
+    let ret = unsafe { getrusage(RUSAGE_SELF, usage.as_mut_ptr()) };
+    if ret != 0 {
+        return None;
+    }
+    let usage = unsafe { usage.assume_init() };
+    if usage.ru_maxrss <= 0 {
+        return None;
+    }
+    Some((usage.ru_maxrss as u64).div_ceil(1024))
+}
+
+/// Windows peak working set via `GetProcessMemoryInfo`.
+///
+/// `PeakWorkingSetSize` is bytes; normalized to KiB. Raw FFI without new
+/// dependencies, matching the existing `SetConsoleCtrlHandler` pattern in
+/// `src/platform/process.rs`.
+#[cfg(target_os = "windows")]
+fn peak_rss_kb_windows() -> Option<u64> {
+    #[repr(C)]
+    struct ProcessMemoryCounters {
+        cb: u32,
+        page_fault_count: u32,
+        peak_working_set_size: usize,
+        working_set_size: usize,
+        quota_peak_paged_pool_usage: usize,
+        quota_paged_pool_usage: usize,
+        quota_peak_non_paged_pool_usage: usize,
+        quota_non_paged_pool_usage: usize,
+        pagefile_usage: usize,
+        peak_pagefile_usage: usize,
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentProcess() -> *mut std::ffi::c_void;
+    }
+    #[link(name = "psapi")]
+    unsafe extern "system" {
+        fn GetProcessMemoryInfo(
+            process: *mut std::ffi::c_void,
+            counters: *mut ProcessMemoryCounters,
+            cb: u32,
+        ) -> i32;
+    }
+    // SAFETY: `GetCurrentProcess` returns a valid pseudo-handle; we pass a
+    // valid out-pointer with correct size; return code checked before reading.
+    unsafe {
+        let process = GetCurrentProcess();
+        if process.is_null() {
+            return None;
+        }
+        let mut counters = std::mem::MaybeUninit::<ProcessMemoryCounters>::zeroed();
+        (*counters.as_mut_ptr()).cb = std::mem::size_of::<ProcessMemoryCounters>() as u32;
+        let ok = GetProcessMemoryInfo(
+            process,
+            counters.as_mut_ptr(),
+            std::mem::size_of::<ProcessMemoryCounters>() as u32,
+        );
+        if ok == 0 {
+            return None;
+        }
+        let counters = counters.assume_init();
+        if counters.peak_working_set_size == 0 {
+            return None;
+        }
+        Some((counters.peak_working_set_size as u64).div_ceil(1024))
+    }
 }
 
 // ---------- 85. large scheduler ----------
@@ -291,7 +427,10 @@ fn large_scheduler_stays_bounded_and_accounts_every_task() {
         "active_peak {} exceeds concurrency 4",
         report.active_peak
     );
-    assert!(peak_rss_kb().is_some(), "VmHWM must be observable");
+    assert!(
+        peak_rss_kb().is_some(),
+        "peak memory must be observable (VmHWM/getrusage/PeakWorkingSet)"
+    );
 }
 
 // Helper to admit tasks from tests without duplicating construction.

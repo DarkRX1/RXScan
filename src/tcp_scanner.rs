@@ -943,8 +943,22 @@ mod tests {
     }
 
     #[test]
-    fn loopback_refused_is_closed_not_timeout() {
-        // High loopback port is almost certainly closed (refused fast).
+    fn loopback_unused_port_reports_observed_evidence() {
+        // Real-socket smoke test for an intentionally non-listening loopback
+        // port. The OS may honestly surface explicit refusal (Closed) or no
+        // refusal before the deadline (FilteredOrTimedOut); both are honest
+        // observations. Deterministic refusal -> Closed proof lives in
+        // `portable_closed_never_retries_and_timeout_retries_once` (mock
+        // connector); this test must not claim refusal was observed.
+        // Race-resistant fixture: bind an ephemeral port then drop it, so no
+        // listener remains. Even so, no OS is required to surface refusal
+        // (hosted Windows times out after 500ms with one attempt).
+        let unused = {
+            let s = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let p = s.local_addr().unwrap().port();
+            drop(s);
+            p
+        };
         let config = ScanConfig::bounded(
             Duration::from_millis(500),
             16,
@@ -952,19 +966,29 @@ mod tests {
             None,
             CancellationToken::default(),
         );
-        let outcome = NativeTcpScanner.scan("127.0.0.1".parse().unwrap(), &[65_000], &config);
+        let outcome = NativeTcpScanner.scan("127.0.0.1".parse().unwrap(), &[unused], &config);
         assert_eq!(outcome.probes.len(), 1);
+        assert_eq!(outcome.unscanned, 0);
         assert!(!outcome.cancelled);
-        // Refused (Closed) is the expected loopback result; accept Error only
-        // if the sandbox blocks loopback connects, but never Timeout/Open.
-        assert!(
-            matches!(
-                outcome.probes[0].state,
-                PortState::Closed | PortState::Error
-            ),
+        assert!(!outcome.truncated);
+        assert_eq!(outcome.probes[0].port, unused);
+        // Exact accounting for whichever honest path occurred (no retry with
+        // max_retries=0, so exactly one attempt).
+        assert_eq!(
+            outcome.probes[0].attempts, 1,
             "unexpected {:?}",
             outcome.probes[0]
         );
+        // Honest timeout is not Closed; sandbox blocks are Error. Never Open.
+        assert!(
+            matches!(
+                outcome.probes[0].state,
+                PortState::Closed | PortState::FilteredOrTimedOut | PortState::Error
+            ),
+            "unused loopback port must report observed Closed/FilteredOrTimedOut/Error, got {:?}",
+            outcome.probes[0]
+        );
+        assert_ne!(outcome.probes[0].state, PortState::Open);
     }
 
     /// Mock connector for portable worker-pool proofs (no external network).
@@ -1147,11 +1171,16 @@ mod tests {
     }
 
     #[test]
-    fn portable_open_and_closed_on_loopback() {
-        // Real loopback: listener is Open, free port is Closed/Error.
+    fn portable_open_and_unused_on_loopback() {
+        // Real loopback via injectable connector: an open listener MUST prove
+        // Open; an intentionally-unused port may honestly report Closed
+        // (explicit refusal) or FilteredOrTimedOut (no refusal before the
+        // deadline). Error is allowed only for sandboxed loopback blocks.
+        // Deterministic refusal -> Closed proof lives in
+        // `portable_closed_never_retries_and_timeout_retries_once`.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let open = listener.local_addr().unwrap().port();
-        let closed = {
+        let unused = {
             let s = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let p = s.local_addr().unwrap().port();
             drop(s);
@@ -1160,19 +1189,39 @@ mod tests {
         let config = portable_config(800, 8, 0);
         let ip: IpAddr = "127.0.0.1".parse().unwrap();
         let outcome =
-            scan_ports_portable_with_connector(ip, &[open, closed], &config, &StdTcpConnector);
+            scan_ports_portable_with_connector(ip, &[open, unused], &config, &StdTcpConnector);
         assert_eq!(outcome.probes.len(), 2);
-        let by_port: std::collections::BTreeMap<u16, PortState> =
-            outcome.probes.iter().map(|p| (p.port, p.state)).collect();
-        assert_eq!(by_port.get(&open), Some(&PortState::Open));
-        assert!(matches!(
-            by_port.get(&closed),
-            Some(PortState::Closed) | Some(PortState::Error)
-        ));
-        // IPv6 loopback where available: refused or error, never panic.
+        assert_eq!(outcome.unscanned, 0);
+        assert!(!outcome.truncated);
+        let by_probe: std::collections::BTreeMap<u16, &PortProbe> =
+            outcome.probes.iter().map(|p| (p.port, p)).collect();
+        let open_probe = by_probe.get(&open).expect("open probe missing");
+        assert_eq!(open_probe.state, PortState::Open);
+        assert_eq!(open_probe.attempts, 1, "unexpected {open_probe:?}");
+        let unused_probe = by_probe.get(&unused).expect("unused probe missing");
+        assert_eq!(unused_probe.attempts, 1, "unexpected {unused_probe:?}");
+        assert!(
+            matches!(
+                unused_probe.state,
+                PortState::Closed | PortState::FilteredOrTimedOut | PortState::Error
+            ),
+            "unused loopback port must report observed Closed/FilteredOrTimedOut/Error, got {unused_probe:?}"
+        );
+        assert_ne!(unused_probe.state, PortState::Open);
+        // IPv6 loopback where available: honest evidence, never panic, exact
+        // accounting. Ephemeral fixture when IPv6 bind works; otherwise an
+        // arbitrary port with accounting-only check (no state assumption).
         let config = portable_config(400, 4, 0);
         let ip6: IpAddr = "::1".parse().unwrap();
-        let outcome = scan_ports_portable_with_connector(ip6, &[65_000], &config, &StdTcpConnector);
+        let port6 = std::net::TcpListener::bind("[::1]:0")
+            .ok()
+            .map(|s| {
+                let p = s.local_addr().unwrap().port();
+                drop(s);
+                p
+            })
+            .unwrap_or(65_000);
+        let outcome = scan_ports_portable_with_connector(ip6, &[port6], &config, &StdTcpConnector);
         assert_eq!(outcome.probes.len() + outcome.unscanned, 1);
     }
 }
