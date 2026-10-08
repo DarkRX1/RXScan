@@ -787,18 +787,18 @@ fn read_request(stream: &mut BufReader<TcpStream>) -> Result<HttpRequest, ApiErr
             format!("request body exceeds {MAX_BODY_BYTES} bytes"),
         ));
     }
-    let mut body = vec![0u8; content_length];
-    if content_length > 0 {
-        stream
-            .read_exact(&mut body)
-            .map_err(|_| ApiErrorBody::new("bad_request", "truncated request body"))?;
-    }
     if content_length > MAX_BODY_BYTES {
         // Drained above so the 413 response is delivered cleanly.
         return Err(ApiErrorBody::new(
             "payload_too_large",
             format!("request body exceeds {MAX_BODY_BYTES} bytes"),
         ));
+    }
+    let mut body = vec![0u8; content_length];
+    if content_length > 0 {
+        stream
+            .read_exact(&mut body)
+            .map_err(|_| ApiErrorBody::new("bad_request", "truncated request body"))?;
     }
     Ok(HttpRequest {
         method,
