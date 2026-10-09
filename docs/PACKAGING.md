@@ -4,31 +4,49 @@ No fake availability is claimed: do not document `apt install rxscan`, AUR, Home
 
 ## Artifacts (future releases)
 
-Released `v1.0.2`: Linux x86_64 only. Below lists `master` development
-artifact names; Windows/macOS and other variants are configured with hosted
-validation pending and runtime unverified (see `docs/PLATFORMS.md`).
-Linux x86_64 is the only locally runtime-tested artifact.
+Released `v1.0.2`: source archives only (no ready-to-run binaries). Below
+lists `master` development artifact names produced by the `Distribution
+artifacts` workflow (manual dispatch; Actions artifacts, never releases).
+Names derive from package version + target metadata
+(`scripts/package-artifact.sh --print-name <target>`); official releases
+drop the `-dev` segment. Linux x86_64 is the only locally runtime-tested
+artifact; see `docs/PLATFORMS.md` for hosted validation status.
 
-- `rxscan-linux-x86_64.tar.gz` (locally runtime-tested)
-- `rxscan-linux-aarch64.tar.gz` (configured; hosted validation pending)
-- musl variants where provided (`rxscan-linux-*-musl.tar.gz`; configured; hosted validation pending)
-- `rxscan-windows-x86_64.zip` (native CI configured; hosted validation pending; runtime unverified)
-- `rxscan-macos-x86_64.tar.gz`, `rxscan-macos-aarch64.tar.gz` (native CI configured; hosted validation pending; runtime unverified)
+- `RXScan-<version>-dev-linux-x86_64.tar.gz` (locally runtime-tested; native smoke)
+- `RXScan-<version>-dev-linux-aarch64.tar.gz` (build-only: extraction-verified)
+- musl variants where provided (`RXScan-<version>-dev-linux-*-musl.tar.gz`; configured)
+- `RXScan-<version>-dev-windows-x86_64.zip` (native smoke: PowerShell + cmd + Git Bash launch, GUI loopback check)
+- `RXScan-<version>-dev-macos-arm64.tar.gz` (native smoke)
+- `RXScan-<version>-dev-macos-x86_64.tar.gz` (build-only: extraction + arch verified)
 - Termux: no published archive yet (experimental cross-build configured only, runtime unverified; do not
-  document `rxscan-termux-aarch64.tar.gz` as downloadable until the release
-  workflow actually produces an Android-appropriate binary)
+  document an installable Termux/APK filename until the workflow actually produces one)
+- Android APK: development artifact `RXScan-<version>-dev-android-arm64.apk` once the Android job lands (see `docs/ANDROID.md`); sideloading requires user permission, debug-signed only
 
-Each includes: executable, required bundled runtime assets (`app/`,
-`fingerprints/`, `search/` corpus), `LICENSE`, minimal usage readme.
-`SHA-256` checksums ship alongside (`dist/SHA256SUMS` from the single Linux
-packaging job).
+Each desktop archive extracts: executable, `README.md`, `LICENSE`, required
+bundled runtime assets (`app/`, `fingerprints/`, `search/` corpus).
+`SHA-256` checksums ship alongside (`dist/SHA256SUMS`) plus a
+machine-readable `dist/release-manifest.json` (filename, platform,
+architecture, target triple, artifact type, version, commit, sha256, size;
+no usernames, hostnames, or local paths).
 
 Build locally:
 
 ```sh
-bash scripts/package-artifact.sh x86_64-unknown-linux-gnu rxscan-linux-x86_64.tar.gz
-sha256sum dist/rxscan-linux-x86_64.tar.gz
+bash scripts/package-artifact.sh x86_64-unknown-linux-gnu
+bash scripts/dist-smoke.sh dist/RXScan-*-linux-x86_64.tar.gz
+sha256sum dist/RXScan-*.tar.gz
+python3 scripts/dist-manifest.py
 ```
+
+Distribution workflow (`.github/workflows/dist.yml`, manual dispatch only):
+builds native binaries per OS, packages once on Linux (deterministic Bash+tar
+env, explicit required-asset checks, no `|| true` for required content),
+smoke-tests each native artifact after extraction (`--version`,
+`capabilities`, offline loopback GUI check; Windows additionally launched
+from PowerShell, cmd, and Git Bash), generates `SHA256SUMS` +
+`release-manifest.json` with a privacy self-check, uploads Actions artifacts
+only. Never tags, releases, publishes, or mutates historical tags
+(`v1.0.0`/`v1.0.1`/`v1.0.2` immutable).
 
 Release workflow (`.github/workflows/release.yml`): validates version/tag consistency via `cargo metadata` (no grep), runs gates, builds native binaries per OS, packages once on Linux (deterministic Bash+tar env, explicit required-asset checks, no `|| true` for required content), generates `SHA256SUMS`, preserves licenses and `.exe` suffixes, uploads artifacts with `manual-*` prefix for untagged dispatches. Never publishes or mutates historical tags (`v1.0.0`/`v1.0.1`/`v1.0.2` immutable).
 

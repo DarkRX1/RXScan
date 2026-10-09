@@ -1,0 +1,235 @@
+name: Distribution artifacts
+
+# Development distribution proof (no public release). Manual dispatch only:
+# ordinary pushes never run this workflow and nothing here creates tags,
+# GitHub Releases, crates.io publications, or store uploads. Historical
+# tags v1.0.0/v1.0.1/v1.0.2 are never touched. Artifacts carry a -dev
+# segment so nobody mistakes them for an official release.
+on:
+  workflow_dispatch:
+
+# Least privilege: read the repo, upload workflow artifacts only.
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          # macOS arm64: native build AND native runtime on this runner.
+          - os: macos-26
+            target: aarch64-apple-darwin
+          # macOS x86_64: BUILD ONLY. The macos-26 runner is Apple
+          # Silicon, so no Intel runtime is claimed: the binary is
+          # cross-built with the native Apple toolchain and packaged,
+          # but smoke-tested for extraction/layout only.
+          - os: macos-26
+            target: x86_64-apple-darwin
+            build_only: true
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.85.0
+          targets: ${{ matrix.target }}
+      - name: Install cross linker (linux arm64 gnu)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+      - name: Add Apple Intel target (macOS x86_64 build only)
+        if: matrix.target == 'x86_64-apple-darwin'
+        run: rustup target add x86_64-apple-darwin
+      - run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Stage raw binary
+        shell: bash
+        run: |
+          mkdir -p raw/${{ matrix.target }}/release
+          if [[ "${{ matrix.target }}" == *windows* ]]; then
+            cp "target/${{ matrix.target }}/release/rxscan.exe" "raw/${{ matrix.target }}/release/"
+          else
+            cp "target/${{ matrix.target }}/release/rxscan" "raw/${{ matrix.target }}/release/"
+          fi
+          ls -l "raw/${{ matrix.target }}/release"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-raw-${{ matrix.target }}
+          path: raw/${{ matrix.target }}/release/rxscan*
+          retention-days: 7
+
+  package:
+    name: package + checksums + manifest
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download raw binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dist-raw-*
+          path: _raw
+          merge-multiple: false
+      - name: Reconstruct target layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          for d in _raw/dist-raw-*/; do
+            target="$(basename "$d" | sed 's/^dist-raw-//')"
+            mkdir -p "target/$target/release"
+            cp "$d"/release/rxscan* "target/$target/release/"
+          done
+          ls -R target | head -n 50
+      - name: Package development artifacts (version-derived -dev names)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          export RXSCAN_DEV=1
+          bash scripts/package-artifact.sh x86_64-unknown-linux-gnu
+          bash scripts/package-artifact.sh aarch64-unknown-linux-gnu
+          bash scripts/package-artifact.sh x86_64-pc-windows-msvc
+          bash scripts/package-artifact.sh aarch64-apple-darwin
+          bash scripts/package-artifact.sh x86_64-apple-darwin
+          ls -l dist
+      - name: Checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum -- *.tar.gz *.zip) | tee dist/SHA256SUMS
+          cat dist/SHA256SUMS
+      - name: Manifest (+ privacy self-check)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/dist-manifest.py
+          cat dist/release-manifest.json
+          python3 - <<'EOF'
+          import json
+          m = json.load(open("dist/release-manifest.json"))
+          assert m["project"] == "RXScan"
+          assert isinstance(m["artifacts"], list) and len(m["artifacts"]) == 5
+          blob = json.dumps(m)
+          for needle in ("/home/", "/Users/", "C:\\", "RUNNER_", "GITHUB_"):
+              assert needle not in blob, f"manifest leaks environment detail: {needle}"
+          print("manifest schema + privacy OK")
+          EOF
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rxscan-dist-dev
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS
+            dist/release-manifest.json
+          retention-days: 14
+
+  smoke-linux:
+    name: smoke linux artifacts
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download distribution archives
+        uses: actions/download-artifact@v4
+        with:
+          name: rxscan-dist-dev
+          path: dist
+      - name: Smoke x86_64 (native execution after extraction)
+        shell: bash
+        run: bash scripts/dist-smoke.sh dist/RXScan-*-linux-x86_64.tar.gz
+      - name: "Verify aarch64 (build-only: extraction + layout, no execution)"
+        shell: bash
+        run: |
+          bash scripts/dist-smoke.sh dist/RXScan-*-linux-aarch64.tar.gz --build-only
+          file dist/RXScan-*-linux-aarch64.tar.gz
+
+  smoke-windows:
+    name: smoke windows artifact
+    needs: package
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download distribution archives
+        uses: actions/download-artifact@v4
+        with:
+          name: rxscan-dist-dev
+          path: dist
+      - name: Extract archive
+        shell: pwsh
+        run: |
+          Get-ChildItem dist
+          New-Item -ItemType Directory -Force -Path smoke | Out-Null
+          Expand-Archive dist/RXScan-*-windows-x86_64.zip -DestinationPath smoke
+          Get-ChildItem smoke
+          if (!(Test-Path smoke/rxscan.exe)) { throw "rxscan.exe missing after extraction" }
+          if (!(Test-Path smoke/LICENSE)) { throw "LICENSE missing after extraction" }
+          if (!(Test-Path smoke/README.md)) { throw "README.md missing after extraction" }
+      - name: Launch from PowerShell
+        shell: pwsh
+        run: |
+          .\smoke\rxscan.exe --version
+          .\smoke\rxscan.exe capabilities | Out-Null
+          .\smoke\rxscan.exe capabilities --json | Out-Null
+      - name: Launch from cmd.exe
+        shell: cmd
+        run: smoke\rxscan.exe --version
+      - name: Launch from Git Bash + offline GUI smoke
+        shell: bash
+        run: |
+          ./smoke/rxscan.exe --version
+          ./smoke/rxscan.exe capabilities --json | python3 -c 'import json,sys; d=json.load(sys.stdin); assert "environment" in d'
+          mkdir -p smoke-web
+          ./smoke/rxscan.exe web --port 0 --no-open --data-dir smoke-web > smoke-web.log 2>&1 &
+          SRV=$!
+          BASE=""
+          for i in $(seq 1 100); do
+            sleep 0.2
+            kill -0 $SRV 2>/dev/null || { echo "server exited:"; cat smoke-web.log; exit 1; }
+            BASE=$(grep -Eo 'http://127\.0\.0\.1:[0-9]+' smoke-web.log | head -n 1 || true)
+            [ -n "$BASE" ] && break
+          done
+          [ -n "$BASE" ] || { cat smoke-web.log; exit 1; }
+          python3 - "$BASE" <<'EOF'
+          import json,sys,urllib.request
+          base = sys.argv[1]
+          assert json.load(urllib.request.urlopen(base + "/api/v1/health", timeout=10))["status"] == "ok"
+          assert "RXScan" in urllib.request.urlopen(base + "/", timeout=10).read().decode("utf-8", "replace")
+          print("windows GUI smoke ok")
+          EOF
+          kill $SRV 2>/dev/null || true
+
+  smoke-macos:
+    name: smoke macos artifacts
+    needs: package
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download distribution archives
+        uses: actions/download-artifact@v4
+        with:
+          name: rxscan-dist-dev
+          path: dist
+      - name: Smoke arm64 (native execution after extraction)
+        shell: bash
+        run: bash scripts/dist-smoke.sh dist/RXScan-*-macos-arm64.tar.gz
+      - name: "Verify x86_64 (build-only: extraction + arch check, no execution)"
+        shell: bash
+        run: |
+          bash scripts/dist-smoke.sh dist/RXScan-*-macos-x86_64.tar.gz --build-only
+          D=$(mktemp -d)
+          tar -xzf dist/RXScan-*-macos-x86_64.tar.gz -C "$D"
+          lipo -archs "$D/rxscan" | grep -q x86_64
+          rm -rf "$D"
+          echo "macos x86_64 arch verified (build-only, no runtime claim)"

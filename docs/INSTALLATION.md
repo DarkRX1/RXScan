@@ -1,33 +1,48 @@
 # RXScan Installation
 
-Released `v1.0.2` is Linux x86_64 only. Below covers current `master`
-development artifacts; Windows/macOS native binaries and other variants are
-configured with hosted validation pending and runtime unverified (see
-`docs/PLATFORMS.md`).
+Released `v1.0.2` is source-archives only (GitHub-generated source
+tarballs; no ready-to-run binaries). Below covers current `master`
+development distribution artifacts; see `docs/PLATFORMS.md` for per-target
+validation status.
+
+Development artifacts are named `RXScan-<version>-dev-<os>-<arch>.tar.gz`
+(`.zip` on Windows); official releases will drop the `-dev` segment.
+Development builds are GitHub Actions artifacts of the `Distribution
+artifacts` workflow — they are not releases and never replace `v1.0.2`.
 
 Start with the easiest route for your platform. No Rust toolchain required to *use* RXScan.
+
+Unsigned-binary notice: development executables are unsigned. Windows
+SmartScreen may warn for the unsigned `.exe`; macOS Gatekeeper may warn
+for unsigned/not-notarized binaries (verify SHA-256, move via Finder, never
+disable system security globally). No signing/notarization exists yet.
 
 ## Linux
 
 ```sh
-tar -xzf rxscan-linux-x86_64.tar.gz
-cd rxscan
+tar -xzf RXScan-1.0.2-dev-linux-x86_64.tar.gz
 ./rxscan --help
 ./rxscan capabilities
 ```
 
-ARM64: use `rxscan-linux-aarch64.tar.gz` where provided. Musl variants are named
-similarly where provided. Linux x86_64 is locally runtime-tested; other
-variants are configured with hosted validation pending (see
-`docs/PLATFORMS.md`). See `docs/PACKAGING.md` for `.deb`/`.rpm`/PKGBUILD scaffolding (no fake `apt install rxscan` until a real repo exists).
+Each archive extracts `rxscan`, `README.md`, `LICENSE`, plus the required
+runtime sidecars (`app/`, `fingerprints/`, `search/`). Verify with
+`sha256sum -c SHA256SUMS` using the shipped checksum file.
+
+ARM64: use `RXScan-1.0.2-dev-linux-aarch64.tar.gz` where provided
+(build-only in current CI: extraction-verified, execution unverified).
+Musl variants are named similarly where provided. Linux x86_64 is locally
+runtime-tested; other variants are configured with hosted validation pending
+(see `docs/PLATFORMS.md`). See `docs/PACKAGING.md` for `.deb`/`.rpm`/PKGBUILD
+scaffolding (no fake `apt install rxscan` until a real repo exists).
 
 ## Windows
 
 PowerShell:
 
 ```powershell
-Expand-Archive rxscan-windows-x86_64.zip -DestinationPath rxscan
-cd rxscan\rxscan
+Expand-Archive RXScan-1.0.2-dev-windows-x86_64.zip -DestinationPath rxscan
+cd rxscan
 .\rxscan.exe --help
 .\rxscan.exe capabilities
 ```
@@ -49,9 +64,8 @@ Manual ZIP install always works. Optional winget/Scoop/Chocolatey manifests are 
 ## macOS
 
 ```sh
-tar -xzf rxscan-macos-aarch64.tar.gz   # Apple Silicon
-# or: tar -xzf rxscan-macos-x86_64.tar.gz  # Intel
-cd rxscan
+tar -xzf RXScan-1.0.2-dev-macos-arm64.tar.gz   # Apple Silicon (native smoke-tested)
+# or: tar -xzf RXScan-1.0.2-dev-macos-x86_64.tar.gz  # Intel (build-only: extraction-verified, execution unverified)
 ./rxscan --help
 ```
 
