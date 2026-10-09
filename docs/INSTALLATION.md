@@ -3,7 +3,9 @@
 Released `v1.0.2` is source-archives only (GitHub-generated source
 tarballs; no ready-to-run binaries). Below covers current `master`
 development distribution artifacts; see `docs/PLATFORMS.md` for per-target
-validation status.
+validation status (native post-extraction smoke proof for Linux x86_64,
+Windows x86_64, and macOS arm64; build-only for Linux arm64 and macOS
+x86_64; emulator install/launch proof for the Android APK).
 
 Development artifacts are named `RXScan-<version>-dev-<os>-<arch>.tar.gz`
 (`.zip` on Windows); official releases will drop the `-dev` segment.
@@ -32,8 +34,8 @@ runtime sidecars (`app/`, `fingerprints/`, `search/`). Verify with
 ARM64: use `RXScan-1.0.2-dev-linux-aarch64.tar.gz` where provided
 (build-only in current CI: extraction-verified, execution unverified).
 Musl variants are named similarly where provided. Linux x86_64 is locally
-runtime-tested; other variants are configured with hosted validation pending
-(see `docs/PLATFORMS.md`). See `docs/PACKAGING.md` for `.deb`/`.rpm`/PKGBUILD
+runtime-tested with hosted smoke proof; per-variant status lives in
+`docs/PLATFORMS.md`. See `docs/PACKAGING.md` for `.deb`/`.rpm`/PKGBUILD
 scaffolding (no fake `apt install rxscan` until a real repo exists).
 
 ## Windows
