@@ -128,7 +128,7 @@ jobs:
           "$BT/zipalign" -c -p 4 "$APK" && echo "zipalign ok"
           "$BT/apksigner" verify --print-certs "$APK"
       - name: Emulator install + launch smoke (x86_64 slice)
-        uses: reactivecircus/android-emulator-runner@v2.5.2
+        uses: reactivecircus/android-emulator-runner@v2.38.0
         with:
           api-level: 30
           arch: x86_64
