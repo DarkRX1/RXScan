@@ -125,7 +125,7 @@ pub fn last_error() -> String {
 // ReleaseStringUTFChars = 170.
 // ---------------------------------------------------------------------------
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", test))]
 mod jni {
     use std::ffi::{CStr, CString};
     use std::os::raw::{c_char, c_int, c_void};
@@ -143,72 +143,86 @@ mod jni {
     where
         T: Copy,
     {
-        let table = *(env as *const *const *const c_void);
-        *table.add(index).cast::<T>()
+        // SAFETY: env is a valid JNIEnv whose function table is alive for
+        // the call; indices follow the stable jni.h layout.
+        unsafe {
+            let table = *(env as *const *const *const c_void);
+            *table.add(index).cast::<T>()
+        }
     }
 
     pub unsafe fn jstring_to_rust(env: JNIEnv, value: Jstring) -> String {
         if value.is_null() {
             return String::new();
         }
-        let get: GetStringUtfChars = table_entry(env, 169);
-        let chars = get(env as *mut c_void, value, std::ptr::null());
-        if chars.is_null() {
-            return String::new();
+        // SAFETY: env/value come from the calling JVM frame.
+        unsafe {
+            let get: GetStringUtfChars = table_entry(env, 169);
+            let chars = get(env as *mut c_void, value, std::ptr::null());
+            if chars.is_null() {
+                return String::new();
+            }
+            let text = CStr::from_ptr(chars).to_string_lossy().into_owned();
+            let release: ReleaseStringUtfChars = table_entry(env, 170);
+            release(env as *mut c_void, value, chars);
+            text
         }
-        let text = CStr::from_ptr(chars).to_string_lossy().into_owned();
-        let release: ReleaseStringUtfChars = table_entry(env, 170);
-        release(env as *mut c_void, value, chars);
-        text
     }
 
     pub unsafe fn rust_to_jstring(env: JNIEnv, text: &str) -> Jstring {
         let owned = CString::new(text).unwrap_or_default();
-        let new: NewStringUtf = table_entry(env, 167);
-        new(env as *mut c_void, owned.as_ptr())
+        // SAFETY: env comes from the calling JVM frame.
+        unsafe {
+            let new: NewStringUtf = table_entry(env, 167);
+            new(env as *mut c_void, owned.as_ptr())
+        }
     }
 
     /// Package `dev.rxscan.app`, Kotlin `RustBridge` companion `@JvmStatic`.
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn Java_dev_rxscan_app_RustBridge_startServer(
         env: JNIEnv,
         _cls: Jclass,
         data_dir: Jstring,
     ) -> Jint {
-        let dir = jstring_to_rust(env, data_dir);
+        // SAFETY: called by the JVM with a valid env/object args.
+        let dir = unsafe { jstring_to_rust(env, data_dir) };
         match super::start_server(&dir) {
             Ok(port) => i32::from(port),
             Err(_) => -1,
         }
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn Java_dev_rxscan_app_RustBridge_stopServer(_env: JNIEnv, _cls: Jclass) {
         super::stop_server();
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn Java_dev_rxscan_app_RustBridge_version(
         env: JNIEnv,
         _cls: Jclass,
     ) -> Jstring {
-        rust_to_jstring(env, &super::version())
+        // SAFETY: called by the JVM with a valid env.
+        unsafe { rust_to_jstring(env, &super::version()) }
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn Java_dev_rxscan_app_RustBridge_capabilitiesJson(
         env: JNIEnv,
         _cls: Jclass,
     ) -> Jstring {
-        rust_to_jstring(env, &super::capabilities_json())
+        // SAFETY: called by the JVM with a valid env.
+        unsafe { rust_to_jstring(env, &super::capabilities_json()) }
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn Java_dev_rxscan_app_RustBridge_lastError(
         env: JNIEnv,
         _cls: Jclass,
     ) -> Jstring {
-        rust_to_jstring(env, &super::last_error())
+        // SAFETY: called by the JVM with a valid env.
+        unsafe { rust_to_jstring(env, &super::last_error()) }
     }
 }
 
