@@ -19,8 +19,8 @@ Reusable gate for any release candidate. Stop on the first failure.
 - [ ] Startup: 11+ samples of release `--help` (min/median/max)
 - [ ] `sh scripts/release-check.sh` (or with `--skip-install` + separate
   documented install proof)
-- [ ] `LICENSE` file present and confirmed by maintainer (**currently
-  missing: manifest declares MIT but no file ships — release blocker**)
+- [ ] `LICENSE` file present and confirmed by maintainer (`LICENSE` ships
+  at the repo root; v1.0.0–v1.0.2 were released under MIT).
 
 ## Artifact dry run (no publishing)
 
@@ -33,7 +33,7 @@ mkdir -p "$DIST"
 cargo build --release --locked
 cp target/release/rxscan "$DIST/"
 cp README.md CHANGELOG.md SECURITY.md "$DIST/"
-# LICENSE goes here once the file exists (blocker).
+cp README.md CHANGELOG.md SECURITY.md LICENSE "$DIST/"
 (cd dist && tar -czf "${NAME}.tar.gz" "$NAME")
 (cd dist && sha256sum "${NAME}.tar.gz" > SHA256SUMS)
 (cd dist && sha256sum -c SHA256SUMS)
