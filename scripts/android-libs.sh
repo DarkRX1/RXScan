@@ -15,11 +15,16 @@ BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
 test -d "$BIN" || { echo "NDK llvm bin missing: $BIN" >&2; exit 1; }
 
 build_abi() {
-  local abi="$1" target="$2" clang="$3" cc_var="$4" linker_var="$5"
+  # NDK r27 removed the versioned *-ar wrappers: point AR at llvm-ar
+  # explicitly (same as the CI cross-check lane), or cc-rs/ring fail
+  # with "failed to find tool *-ar".
+  local abi="$1" target="$2" clang="$3" cc_var="$4" linker_var="$5" ar_var="$6"
   test -x "$clang" || { echo "NDK clang driver missing: $clang" >&2; exit 1; }
+  test -x "$BIN/llvm-ar" || { echo "NDK llvm-ar missing" >&2; exit 1; }
   rustup target add "$target"
   export "$cc_var=$clang"
   export "$linker_var=$clang"
+  export "$ar_var=$BIN/llvm-ar"
   cargo build --locked --release --target "$target" --lib
   local out="android/app/src/main/jniLibs/$abi"
   mkdir -p "$out"
@@ -34,13 +39,15 @@ for abi in $ABIS; do
       build_abi "$abi" "aarch64-linux-android" \
         "$BIN/aarch64-linux-android24-clang" \
         "CC_aarch64_linux_android" \
-        "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER"
+        "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER" \
+        "AR_aarch64_linux_android"
       ;;
     x86_64)
       build_abi "$abi" "x86_64-linux-android" \
         "$BIN/x86_64-linux-android24-clang" \
         "CC_x86_64_linux_android" \
-        "CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER"
+        "CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER" \
+        "AR_x86_64_linux_android"
       ;;
     *) echo "unsupported ABI: $abi" >&2; exit 1 ;;
   esac
