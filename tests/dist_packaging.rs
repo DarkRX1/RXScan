@@ -14,7 +14,7 @@ fn print_name(target: &str, dev: bool) -> Result<String, String> {
     let script = repo_root().join("scripts/package-artifact.sh");
     let mut cmd = Command::new("bash");
     cmd.arg(&script).arg("--print-name").arg(target);
-    cmd.env("RXSCAN_VERSION", "1.0.2");
+    cmd.env("RXSCAN_VERSION", "1.1.0");
     cmd.env("RXSCAN_DEV", if dev { "1" } else { "0" });
     let output = cmd.output().map_err(|e| format!("spawn bash: {e}"))?;
     if !output.status.success() {
@@ -32,23 +32,23 @@ fn artifact_names_derive_from_version_and_target() {
     let cases = [
         (
             "x86_64-unknown-linux-gnu",
-            "RXScan-1.0.2-dev-linux-x86_64.tar.gz",
+            "RXScan-1.1.0-dev-linux-x86_64.tar.gz",
         ),
         (
             "aarch64-unknown-linux-gnu",
-            "RXScan-1.0.2-dev-linux-aarch64.tar.gz",
+            "RXScan-1.1.0-dev-linux-aarch64.tar.gz",
         ),
         (
             "x86_64-pc-windows-msvc",
-            "RXScan-1.0.2-dev-windows-x86_64.zip",
+            "RXScan-1.1.0-dev-windows-x86_64.zip",
         ),
         (
             "aarch64-apple-darwin",
-            "RXScan-1.0.2-dev-macos-arm64.tar.gz",
+            "RXScan-1.1.0-dev-macos-arm64.tar.gz",
         ),
         (
             "x86_64-apple-darwin",
-            "RXScan-1.0.2-dev-macos-x86_64.tar.gz",
+            "RXScan-1.1.0-dev-macos-x86_64.tar.gz",
         ),
     ];
     for (target, expected) in cases {
@@ -61,7 +61,7 @@ fn artifact_names_derive_from_version_and_target() {
     // Official (non-dev) names have no -dev segment.
     assert_eq!(
         print_name("x86_64-unknown-linux-gnu", false).expect("official name"),
-        "RXScan-1.0.2-linux-x86_64.tar.gz"
+        "RXScan-1.1.0-linux-x86_64.tar.gz"
     );
 }
 
@@ -82,8 +82,8 @@ fn manifest_schema_and_privacy() {
     // Minimal stand-in archives with distribution names (content is
     // irrelevant; the manifest records hashes/sizes of whatever it scans).
     for name in [
-        "RXScan-1.0.2-dev-linux-x86_64.tar.gz",
-        "RXScan-1.0.2-dev-windows-x86_64.zip",
+        "RXScan-1.1.0-dev-linux-x86_64.tar.gz",
+        "RXScan-1.1.0-dev-windows-x86_64.zip",
     ] {
         std::fs::write(dir.join(name), format!("payload for {name}")).expect("fixture");
     }
@@ -97,7 +97,7 @@ fn manifest_schema_and_privacy() {
         .arg(&dir)
         .arg("--out")
         .arg(&out)
-        .env("RXSCAN_VERSION", "1.0.2")
+        .env("RXSCAN_VERSION", "1.1.0")
         .env("RXSCAN_COMMIT", "0123456789abcdef0123456789abcdef01234567")
         .status()
         .expect("spawn python3");
@@ -105,7 +105,7 @@ fn manifest_schema_and_privacy() {
     let text = std::fs::read_to_string(&out).expect("manifest written");
     let manifest: serde_json::Value = serde_json::from_str(&text).expect("manifest is valid JSON");
     assert_eq!(manifest["project"], "RXScan");
-    assert_eq!(manifest["version"], "1.0.2");
+    assert_eq!(manifest["version"], "1.1.0");
     let artifacts = manifest["artifacts"].as_array().expect("artifacts array");
     assert_eq!(artifacts.len(), 2, "only distribution archives listed");
     for entry in artifacts {
@@ -126,7 +126,7 @@ fn manifest_schema_and_privacy() {
                 "manifest entry lacks {key}: {entry}"
             );
         }
-        assert_eq!(entry["version"], "1.0.2");
+        assert_eq!(entry["version"], "1.1.0");
         assert_eq!(entry["development"], true);
         let sha = entry["sha256"].as_str().expect("sha string");
         assert_eq!(sha.len(), 64, "sha256 hex length");

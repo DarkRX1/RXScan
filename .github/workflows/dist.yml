@@ -3,15 +3,26 @@ name: Distribution artifacts
 # Development distribution proof (no public release). Manual dispatch only:
 # ordinary pushes never run this workflow and nothing here creates tags,
 # GitHub Releases, crates.io publications, or store uploads. Historical
-# tags v1.0.0/v1.0.1/v1.0.2 are never touched. Artifacts carry a -dev
-# segment so nobody mistakes them for an official release.
+# tags are never touched. By default artifacts carry a -dev segment so
+# nobody mistakes them for an official release; dispatch with
+# official=true to rebuild byte-named official artifacts from a release
+# commit (used for v1.1.0 publication).
 on:
   workflow_dispatch:
+    inputs:
+      official:
+        description: "Build official (non-dev) release artifacts"
+        type: boolean
+        default: false
 
 # Least privilege: read the repo, upload workflow artifacts only.
 permissions:
   contents: read
   actions: write
+
+# Internal artifact-bundle names follow the mode (-dev vs -official);
+# public filenames are derived from version metadata by the packaging
+# scripts (DIST_SUFFIX is set per-mode in bash below).
 
 jobs:
   build:
@@ -106,22 +117,28 @@ jobs:
       - name: Assemble debug APK (debug-signed, never committed keys)
         shell: bash
         working-directory: android
-        run: gradle assembleDebug --console=plain
-      - name: Rename to version-derived dev APK name
+        run: |
+          set -euo pipefail
+          # Official releases carry the bare versionName; dev builds keep -dev.
+          if [ "${{ inputs.official }}" = "true" ]; then EXTRA="-PrxscanRelease"; else EXTRA=""; fi
+          # shellcheck disable=SC2086
+          gradle assembleDebug --console=plain $EXTRA
+      - name: Rename to version-derived APK name
         shell: bash
         run: |
           set -euo pipefail
           VERSION="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          if [ "${{ inputs.official }}" = "true" ]; then APK_SUFFIX=""; else APK_SUFFIX="-dev"; fi
           mkdir -p dist
-          cp android/app/build/outputs/apk/debug/app-debug.apk "dist/RXScan-${VERSION}-dev-android-arm64.apk"
+          cp android/app/build/outputs/apk/debug/app-debug.apk "dist/RXScan-${VERSION}${APK_SUFFIX}-android-arm64.apk"
           ls -l dist
       - name: Static APK verification (badging, alignment, signature)
         shell: bash
         run: |
           set -euo pipefail
           # Globs do not expand in assignments: expand via an array and
-          # require exactly one dev APK.
-          apks=(dist/RXScan-*-dev-android-arm64.apk)
+          # require exactly one APK.
+          apks=(dist/RXScan-*-android-arm64.apk)
           test "${#apks[@]}" -eq 1 || { echo "expected one APK, found: ${apks[*]}" >&2; ls dist >&2; exit 1; }
           APK="${apks[0]}"
           echo "APK=$APK"
@@ -139,11 +156,11 @@ jobs:
           arch: x86_64
           # One line: the action runs each line in a separate shell, so
           # the multi-step smoke lives in a repo script instead.
-          script: bash scripts/android-emulator-smoke.sh 'dist/RXScan-*-dev-android-arm64.apk'
+          script: bash scripts/android-emulator-smoke.sh 'dist/RXScan-*-android-arm64.apk'
       - uses: actions/upload-artifact@v4
         with:
-          name: rxscan-apk-dev
-          path: dist/RXScan-*-dev-android-arm64.apk
+          name: rxscan-apk${{ inputs.official == true && '-official' || '-dev' }}
+          path: dist/RXScan-*-android-arm64.apk
           retention-days: 14
 
   package:
@@ -161,7 +178,7 @@ jobs:
       - name: Download dev APK
         uses: actions/download-artifact@v4
         with:
-          name: rxscan-apk-dev
+          name: rxscan-apk${{ inputs.official == true && '-official' || '-dev' }}
           path: _apk
       - name: Reconstruct target layout
         shell: bash
@@ -178,18 +195,20 @@ jobs:
             cp "$bin" "target/$target/release/"
           done
           ls -R target | head -n 50
-      - name: Package development artifacts (version-derived -dev names)
+      - name: Package artifacts (version-derived names)
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist
-          export RXSCAN_DEV=1
+          # DIST_SUFFIX drives scripts/package-artifact.sh naming:
+          # '' for official releases, '-dev' for development builds.
+          if [ "${{ inputs.official }}" = "true" ]; then export DIST_SUFFIX=""; else export DIST_SUFFIX="-dev"; fi
           bash scripts/package-artifact.sh x86_64-unknown-linux-gnu
           bash scripts/package-artifact.sh aarch64-unknown-linux-gnu
           bash scripts/package-artifact.sh x86_64-pc-windows-msvc
           bash scripts/package-artifact.sh aarch64-apple-darwin
           bash scripts/package-artifact.sh x86_64-apple-darwin
-          cp _apk/RXScan-*-dev-android-arm64.apk dist/
+          cp _apk/RXScan-*-android-arm64.apk dist/
           ls -l dist
       - name: Checksums
         shell: bash
@@ -215,7 +234,7 @@ jobs:
           EOF
       - uses: actions/upload-artifact@v4
         with:
-          name: rxscan-dist-dev
+          name: rxscan-dist${{ inputs.official == true && '-official' || '-dev' }}
           path: |
             dist/*.tar.gz
             dist/*.zip
@@ -233,7 +252,7 @@ jobs:
       - name: Download distribution archives
         uses: actions/download-artifact@v4
         with:
-          name: rxscan-dist-dev
+          name: rxscan-dist${{ inputs.official == true && '-official' || '-dev' }}
           path: dist
       - name: Smoke x86_64 (native execution after extraction)
         shell: bash
@@ -253,7 +272,7 @@ jobs:
       - name: Download distribution archives
         uses: actions/download-artifact@v4
         with:
-          name: rxscan-dist-dev
+          name: rxscan-dist${{ inputs.official == true && '-official' || '-dev' }}
           path: dist
       - name: Extract archive
         shell: pwsh
@@ -308,7 +327,7 @@ jobs:
       - name: Download distribution archives
         uses: actions/download-artifact@v4
         with:
-          name: rxscan-dist-dev
+          name: rxscan-dist${{ inputs.official == true && '-official' || '-dev' }}
           path: dist
       - name: Smoke arm64 (native execution after extraction)
         shell: bash

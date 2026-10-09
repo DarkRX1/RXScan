@@ -22,7 +22,10 @@ fn release_uses_structured_version_and_manual_prefix() {
         !yml.contains("grep '^version'"),
         "fragile grep must be gone"
     );
-    assert!(yml.contains("manual-"), "manual builds must be prefixed");
+    assert!(
+        yml.contains("-dev"),
+        "manual builds must carry the -dev segment, never masquerade as releases"
+    );
     assert!(
         yml.contains("SHA256SUMS") || yml.contains("SHA256SUM"),
         "checksums must be generated"

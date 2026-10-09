@@ -3,7 +3,7 @@ name: Release artifacts
 # Release automation (no auto-publish). Runs on version tags (v*.*.*) or
 # manual dispatch. Historical tags v1.0.0/v1.0.1/v1.0.2 are never rebuilt or
 # moved; this workflow only builds the *current* tag. Manual dispatches
-# produce `manual-*` artifacts that never masquerade as tagged releases.
+# produce `-dev` artifacts that never masquerade as tagged releases.
 # Publishing to package managers requires explicit maintainer authorization
 # and is not performed here.
 on:
@@ -31,7 +31,7 @@ jobs:
           if [[ "$TAG" == v* ]]; then
             test "v$VERSION" = "$TAG" || (echo "tag $TAG != Cargo version v$VERSION" && exit 1)
           else
-            echo "manual/dispatch build: artifacts will be named manual-* and are not releases"
+            echo "manual/dispatch build: artifacts will be version-derived -dev names and are not releases"
           fi
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -122,17 +122,18 @@ jobs:
           set -euo pipefail
           TAG="${GITHUB_REF_NAME:-manual}"
           if [[ "$TAG" == v* ]]; then
-            PREFIX=""
+            unset DIST_SUFFIX RXSCAN_DEV
+            echo "tagged build: official version-derived names"
           else
-            PREFIX="manual-"
-            echo "manual build: prefixing artifacts with manual-"
+            export RXSCAN_DEV=1
+            echo "manual build: version-derived -dev names, not releases"
           fi
           mkdir -p dist
-          bash scripts/package-artifact.sh x86_64-unknown-linux-gnu "${PREFIX}rxscan-linux-x86_64.tar.gz"
-          bash scripts/package-artifact.sh aarch64-unknown-linux-gnu "${PREFIX}rxscan-linux-aarch64.tar.gz"
-          bash scripts/package-artifact.sh x86_64-pc-windows-msvc "${PREFIX}rxscan-windows-x86_64.zip"
-          bash scripts/package-artifact.sh x86_64-apple-darwin "${PREFIX}rxscan-macos-x86_64.tar.gz"
-          bash scripts/package-artifact.sh aarch64-apple-darwin "${PREFIX}rxscan-macos-aarch64.tar.gz"
+          bash scripts/package-artifact.sh x86_64-unknown-linux-gnu
+          bash scripts/package-artifact.sh aarch64-unknown-linux-gnu
+          bash scripts/package-artifact.sh x86_64-pc-windows-msvc
+          bash scripts/package-artifact.sh x86_64-apple-darwin
+          bash scripts/package-artifact.sh aarch64-apple-darwin
           ls -l dist
       - name: Checksums (Linux sha256sum guaranteed here)
         shell: bash

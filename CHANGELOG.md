@@ -1,7 +1,28 @@
 # Changelog
 
-## Unreleased (master, newer than v1.0.2)
+## Unreleased (master, newer than v1.1.0)
 
+(nothing yet)
+
+## v1.1.0
+
+First release with ready-to-run binaries. Everything below shipped in
+this release and is covered by hosted proof (CI plus the Distribution
+artifacts workflow with post-extraction smoke tests, checksums, and a
+release manifest).
+
+- Distribution: version-derived artifacts (`RXScan-<version>-<os>-<arch>`)
+  for Windows x86_64 (runtime-tested), Linux x86_64 (runtime-tested),
+  Linux ARM64 (build-only), macOS ARM64 (runtime-tested), macOS x86_64
+  (build-only), plus SHA256SUMS and a machine-readable
+  release-manifest.json. GUI assets are embedded in the binary; archives
+  additionally carry `app/`, `fingerprints/`, and `search/` sidecars.
+- Android APK (beta/experimental): same Rust core plus the shared
+  frontend in a thin WebView shell over loopback; install- and
+  launch-tested on an emulator. Physical ARM64-device execution remains
+  unverified. Debug-signed only.
+- Responsive web console: phone/tablet layouts (360–768px), touch-sized
+  graph targets, pinch zoom; desktop presentation unchanged.
 - Host discovery: neighbor-cache reads, bounded ARP/NDP, SYN/ACK technique
   identities, corroboration without confidence summing.
 - TCP `connect|syn|auto` modes (Linux IPv4 raw SYN with fallback) and the

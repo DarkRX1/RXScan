@@ -419,7 +419,7 @@ Known limitations include:
 - public-provider coverage is finite and providers change, block, or
   rate-limit without notice — verification states are in
   `rxscan search providers` and `docs/PROVIDER_CONTRACT.md`;
-- Windows/macOS portability is under development on master (see docs/PLATFORMS.md); released v1.0.2 remains Linux-only.
+- Windows/macOS portability ships in v1.1.0 for the proven targets (see docs/PLATFORMS.md); released v1.0.2 remains Linux-only.
 
 RXScan is a young project. It should not be treated as having the protocol
 coverage, fingerprint corpus, platform breadth, or operational history of
@@ -444,7 +444,11 @@ authorized to assess.
 
 ## Platform support
 
-Released `v1.0.2`: Linux x86_64.
+Released `v1.1.0`: ready-to-run binaries for Windows x86_64
+(runtime-tested), Linux x86_64 (runtime-tested), Linux ARM64
+(build-only), macOS ARM64 (runtime-tested), and macOS x86_64
+(build-only), plus an Android APK (beta/experimental: emulator
+install/launch-tested; physical ARM64-device execution unverified).
 
 Current `master` (development): portable core with explicit capability
 detection across Linux, Windows native, WSL, macOS, and Android/Termux.
@@ -452,19 +456,17 @@ Restricted environments lose only genuinely unavailable capabilities
 (raw packet, privileged enumeration) with one controlled explanation and
 passive fallback. Active OS fingerprinting is experimental (see
 `docs/PLATFORMS.md`); Termux has no published archive yet. Linux x86_64 is
-locally runtime-tested. Windows x86_64 and macOS (Intel / Apple Silicon)
-have native CI configured with hosted validation pending and runtime
-unverified — not yet Supported.
+locally runtime-tested.
 See `docs/PLATFORMS.md` for the matrix and `docs/INSTALLATION.md`
 for the easiest install route per platform. Do not treat master-only
-portability as part of `v1.0.2`.
+work as part of `v1.1.0`.
 
 ## Building from source
 
 Requirements:
 
 - Rust 1.85 or newer
-- See docs/BUILDING.md for configured targets (Linux x86_64 locally runtime-tested; others hosted validation pending)
+- See docs/BUILDING.md for configured targets (Linux x86_64 locally runtime-tested; see docs/PLATFORMS.md for hosted proof per target)
 
 Build:
 
@@ -518,7 +520,13 @@ Published releases and their notes are available on the
 The `v1.0.0` and `v1.0.1` tags were published with incorrect `0.1.0` Cargo
 package metadata. Those historical tags are intentionally left unchanged.
 
-`v1.0.2` is the first correctly versioned 1.x release.
+`v1.0.2` is the first correctly versioned 1.x release (source archives
+only).
+
+`v1.1.0` is the first release with ready-to-run distribution artifacts:
+Windows x86_64, Linux x86_64, and macOS ARM64 runtime-tested; Linux ARM64
+and macOS x86_64 build-only; Android APK beta/experimental (emulator
+install/launch-tested, physical-device execution unverified, debug-signed).
 
 Development on `master` may contain changes newer than the latest published
 release.

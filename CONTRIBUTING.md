@@ -90,7 +90,7 @@ states: `search/providers/v1/README.md`. Short version:
   about how code was produced.
 - Never document a command or flag that current `--help` does not
   expose. CLI help is the authority for user-facing syntax.
-- Distinguish the published release (`v1.0.2`) from current master.
+- Distinguish the published release (`v1.1.0`) from current master.
   Never present master-only work as shipped.
 - Every local Markdown link must resolve (checked by
   `tests/repo_hygiene.rs`). No external network dependency for link

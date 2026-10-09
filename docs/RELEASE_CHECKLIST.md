@@ -1,4 +1,4 @@
-# Release Checklist (v0.1.0 prerelease)
+# Release Checklist (reusable; last used for v1.1.0)
 
 Reusable gate for any release candidate. Stop on the first failure.
 
@@ -27,7 +27,7 @@ Reusable gate for any release candidate. Stop on the first failure.
 ```sh
 COMMIT=$(git rev-parse --short HEAD)
 TARGET=$(rustc -vV | sed -n 's/host: //p')
-NAME="rxscan-0.1.0-${TARGET}"
+NAME="rxscan-${VERSION:-1.1.0}-${TARGET}"
 DIST="dist/${NAME}"
 mkdir -p "$DIST"
 cargo build --release --locked

@@ -1,8 +1,9 @@
 # RXScan on Android
 
-Development status: an installable development APK is produced by the
-`Distribution artifacts` workflow (manual dispatch; Actions artifacts,
-never releases). Released `v1.0.2` has no Android artifact of any kind.
+Development status: `v1.1.0` ships a beta/experimental Android APK
+(emulator install/launch-tested; physical ARM64-device execution remains
+unverified; debug-signed only). Released `v1.0.2` has no Android artifact
+of any kind.
 Termux (source-build, experimental) and the APK (normal install) are
 separate distributions; see `docs/PLATFORMS.md`.
 
@@ -90,6 +91,7 @@ cd android && gradle assembleDebug
 # Output: android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-The distributable is renamed to `RXScan-<version>-dev-android-arm64.apk`
-by the workflow (version derived from Cargo.toml). Sideloading requires
+The distributable is named `RXScan-<version>-android-arm64.apk`
+(`-dev` suffixed for development builds) with the version derived from
+Cargo.toml. Sideloading requires
 the user's install permission; debug-signed only.

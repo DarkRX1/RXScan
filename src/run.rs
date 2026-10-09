@@ -1908,7 +1908,7 @@ pub fn human_summary_with_opens(
 /// `PORTS`, `SCAN SUMMARY`, concise exceptional warnings, and a footer
 /// recap. Legacy diagnostic prose (`Duration:`, `TCP discovery …`,
 /// `Services: …`, `DIAGNOSTICS` telemetry) lives only in the explain
-/// rendering ([`human_explain_caps`]); see `--explain` and JSONL.
+/// rendering; see `--explain` and JSONL.
 pub fn human_summary_caps(
     report: &RunReport,
     caps: crate::terminal::TerminalCapabilities,

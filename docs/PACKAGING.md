@@ -2,25 +2,26 @@
 
 No fake availability is claimed: do not document `apt install rxscan`, AUR, Homebrew, winget, Chocolatey, Scoop, or crates.io until the artifact/repo truly exists. Packaging definitions and release automation may precede publication.
 
-## Artifacts (future releases)
+## Artifacts
 
-Released `v1.0.2`: source archives only (no ready-to-run binaries). Below
-lists `master` development artifact names produced by the `Distribution
-artifacts` workflow (manual dispatch; Actions artifacts, never releases).
-Names derive from package version + target metadata
-(`scripts/package-artifact.sh --print-name <target>`); official releases
-drop the `-dev` segment. Linux x86_64 is the only locally runtime-tested
-artifact; see `docs/PLATFORMS.md` for hosted validation status.
+Released `v1.0.2`: source archives only (no ready-to-run binaries).
+Released `v1.1.0` ships the following ready-to-run artifacts (proven by
+the `Distribution artifacts` workflow with post-extraction smoke tests,
+`SHA256SUMS`, and `release-manifest.json`; see `docs/PLATFORMS.md` for
+runtime vs build-only status):
 
-- `RXScan-<version>-dev-linux-x86_64.tar.gz` (locally runtime-tested; native smoke)
-- `RXScan-<version>-dev-linux-aarch64.tar.gz` (build-only: extraction-verified)
-- musl variants where provided (`RXScan-<version>-dev-linux-*-musl.tar.gz`; configured)
-- `RXScan-<version>-dev-windows-x86_64.zip` (native smoke: PowerShell + cmd + Git Bash launch, GUI loopback check)
-- `RXScan-<version>-dev-macos-arm64.tar.gz` (native smoke)
-- `RXScan-<version>-dev-macos-x86_64.tar.gz` (build-only: extraction + arch verified)
-- Termux: no published archive yet (experimental cross-build configured only, runtime unverified; do not
-  document an installable Termux/APK filename until the workflow actually produces one)
-- Android APK: development artifact `RXScan-<version>-dev-android-arm64.apk` once the Android job lands (see `docs/ANDROID.md`); sideloading requires user permission, debug-signed only
+- `RXScan-1.1.0-linux-x86_64.tar.gz` (runtime-tested)
+- `RXScan-1.1.0-windows-x86_64.zip` (runtime-tested)
+- `RXScan-1.1.0-macos-arm64.tar.gz` (runtime-tested)
+- `RXScan-1.1.0-linux-aarch64.tar.gz` (build-only)
+- `RXScan-1.1.0-macos-x86_64.tar.gz` (build-only)
+- `RXScan-1.1.0-android-arm64.apk` (beta/experimental: emulator
+  install/launch-tested; physical-device execution unverified)
+
+Development builds from `master` use the same scheme with a `-dev`
+segment (`RXScan-<version>-dev-<os>-<arch>`) and are Actions artifacts
+only, never releases. Artifact names always derive from package version +
+target metadata (`scripts/package-artifact.sh --print-name <target>`).
 
 Each desktop archive extracts: executable, `README.md`, `LICENSE`, required
 bundled runtime assets (`app/`, `fingerprints/`, `search/` corpus).

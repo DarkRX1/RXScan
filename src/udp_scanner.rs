@@ -1122,7 +1122,7 @@ pub enum PortableRecvDecision {
 const WSAEMSGSIZE_RAW: i32 = 10040;
 
 /// Pure classifier for portable `recv_from` failures. Production
-/// [`scan_ports_udp_portable`] branches on this; unit tests prove the
+/// `scan_ports_udp_portable` branches on this; unit tests prove the
 /// mapping with synthetic `io::Error`s so no test depends on a kernel
 /// surfacing ICMP.
 pub fn decide_portable_recv_failure(

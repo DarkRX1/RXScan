@@ -25,7 +25,10 @@ android {
         minSdk = 26
         targetSdk = 34
         versionCode = versionCodeValue
-        versionName = "${rxscanVersion}-dev"
+        // Official releases (gradle -PrxscanRelease) carry the bare
+        // version; development builds keep a -dev suffix so nobody
+        // mistakes them for a release.
+        versionName = project.hasProperty("rxscanRelease") ? rxscanVersion : "${rxscanVersion}-dev"
         // arm64-v8a devices first; x86_64 so the CI emulator can
         // install and launch the same APK for runtime proof.
         ndk {

@@ -1,10 +1,13 @@
 # RXScan Platform Support
 
-Technical, restrained matrix. Released version behavior (`v1.0.2`) differs
-from current `master` development behavior; only `master` gains the portable
-platform layer described here.
+Technical, restrained matrix. Released version behavior (`v1.1.0`) differs
+from current `master` development behavior; only `master` gains newer
+portable platform work described here.
 
-Released `v1.0.2`: Linux x86_64 only.
+Released `v1.1.0`: ready-to-run binaries (Windows x86_64, Linux x86_64,
+macOS ARM64 runtime-tested; Linux ARM64, macOS x86_64 build-only) plus a
+beta/experimental Android APK (emulator-tested, physical-device
+execution unverified). Earlier releases were source-only.
 
 Current `master` (development): portable core with explicit capability
 detection. Hosted proof comes from two workflows: `CI` (deterministic
