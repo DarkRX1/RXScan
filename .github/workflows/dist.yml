@@ -137,8 +137,10 @@ jobs:
         with:
           api-level: 30
           arch: x86_64
+          # The action executes this script with /usr/bin/sh (dash):
+          # stay POSIX (no pipefail, no bashisms).
           script: |
-            set -euo pipefail
+            set -eu
             APK=$(echo dist/RXScan-*-dev-android-arm64.apk)
             adb install "$APK"
             adb logcat -c
