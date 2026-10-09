@@ -137,25 +137,9 @@ jobs:
         with:
           api-level: 30
           arch: x86_64
-          # The action executes this script with /usr/bin/sh (dash):
-          # stay POSIX (no pipefail, no bashisms).
-          script: |
-            set -eu
-            APK=$(echo dist/RXScan-*-dev-android-arm64.apk)
-            adb install "$APK"
-            adb logcat -c
-            adb shell am start -n dev.rxscan.app.debug/dev.rxscan.app.MainActivity
-            for i in $(seq 1 30); do
-              sleep 5
-              if adb logcat -d | grep -qE "RXScan.*serving on port [0-9]+"; then
-                echo "EMULATOR RUNTIME PROOF:"
-                adb logcat -d | grep -E "RXScan" | head -n 10
-                exit 0
-              fi
-            done
-            echo "embedded server start not observed in logcat" >&2
-            adb logcat -d | tail -n 50 >&2 || true
-            exit 1
+          # One line: the action runs each line in a separate shell, so
+          # the multi-step smoke lives in a repo script instead.
+          script: bash scripts/android-emulator-smoke.sh 'dist/RXScan-*-dev-android-arm64.apk'
       - uses: actions/upload-artifact@v4
         with:
           name: rxscan-apk-dev
