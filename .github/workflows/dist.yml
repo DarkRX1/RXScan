@@ -119,7 +119,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          APK=dist/RXScan-*-dev-android-arm64.apk
+          # Globs do not expand in assignments: expand via an array and
+          # require exactly one dev APK.
+          apks=(dist/RXScan-*-dev-android-arm64.apk)
+          test "${#apks[@]}" -eq 1 || { echo "expected one APK, found: ${apks[*]}" >&2; ls dist >&2; exit 1; }
+          APK="${apks[0]}"
+          echo "APK=$APK"
           BT="$(find "$ANDROID_HOME/build-tools" -maxdepth 1 -type d | sort -V | tail -n 1)"
           echo "build-tools: $BT"
           "$BT/aapt" dump badging "$APK" | head -n 20
