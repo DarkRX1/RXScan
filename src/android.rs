@@ -229,6 +229,15 @@ mod jni {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    /// The embedded server is process-global: tests touching it must hold
+    /// this lock for their whole body, or parallel scheduling makes
+    /// start/stop assertions race (observed on hosted macOS runners).
+    fn serial() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn version_matches_package() {
@@ -244,6 +253,9 @@ mod tests {
 
     #[test]
     fn empty_data_dir_is_rejected_not_started() {
+        let _guard = serial()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         stop_server();
         assert!(start_server("").is_err());
         assert!(!last_error().is_empty());
@@ -252,6 +264,9 @@ mod tests {
 
     #[test]
     fn embedded_server_starts_idempotent_on_loopback() {
+        let _guard = serial()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         stop_server();
         let dir = std::env::temp_dir().join(format!("rxscan-android-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
