@@ -105,10 +105,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Layout-agnostic: locate the staged binary inside each raw
+          # artifact instead of assuming preserved directory nesting.
           for d in _raw/raw-*/; do
             target="$(basename "$d" | sed 's/^raw-//')"
+            bin="$(find "$d" -type f -name 'rxscan*' | head -n 1)"
+            test -n "$bin" || { echo "no binary inside $d:" >&2; find "$d" >&2; exit 1; }
+            echo "$target <- $bin"
             mkdir -p "target/$target/release"
-            cp "$d"/release/rxscan* "target/$target/release/"
+            cp "$bin" "target/$target/release/"
           done
           ls -R target | head -n 50
       - name: Package artifacts (single Bash env)

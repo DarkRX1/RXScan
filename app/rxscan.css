@@ -383,7 +383,26 @@ tr.status-running td:nth-child(3) { color: var(--rx-cyan-bright); font-weight: 7
   .grid-form { grid-template-columns: 1fr; }
   .dash-logo { width: 44px; height: 44px; }
   .table-wrap { margin-left: -0.5rem; margin-right: -0.5rem; }
+  /* Phone: stack provider grids, wrap key/value rows, keep tables readable */
+  .sources-grid { grid-template-columns: 1fr 1fr; }
+  .prov-filter { grid-template-columns: 1fr; }
+  .kv > div { flex-wrap: wrap; }
+  .kv dt { min-width: 0; }
+  .graph-toolbar select { width: 100%; max-width: 12rem; }
+  .viz .bar { max-width: 100%; }
 }
+@media (max-width: 420px) {
+  .sources-grid { grid-template-columns: 1fr; }
+  table.findings { font-size: 0.85rem; }
+  table.findings th, table.findings td { padding: 0.4rem 0.5rem; }
+}
+/* Touch: larger tap targets, graph gestures cooperate with page scroll */
+@media (pointer: coarse) {
+  .sidebar a { padding: 0.7rem 0.9rem; }
+  .tabs button { padding: 0.6rem 1rem; }
+  .gnode { cursor: pointer; }
+}
+#inv-graph, #p-graph { touch-action: pan-y pinch-zoom; }
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }

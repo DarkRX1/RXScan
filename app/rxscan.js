@@ -140,6 +140,22 @@
         const a = byId.get(e.from);
         const b = byId.get(e.to);
         if (!a || !b) continue;
+        const under = document.createElementNS(NS, "line");
+        under.setAttribute("x1", a._x.toFixed(1));
+        under.setAttribute("y1", a._y.toFixed(1));
+        under.setAttribute("x2", b._x.toFixed(1));
+        under.setAttribute("y2", b._y.toFixed(1));
+        under.setAttribute("stroke", "transparent");
+        under.setAttribute("stroke-width", "14");
+        under.setAttribute("class", "gedge-hit");
+        under.setAttribute("tabindex", "0");
+        under.setAttribute("role", "button");
+        under.setAttribute("aria-label", "Relationship " + e.relation);
+        under.addEventListener("click", () => selectEdge(e));
+        under.addEventListener("keydown", (ev) => {
+          if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); selectEdge(e); }
+        });
+        g.appendChild(under);
         const line = document.createElementNS(NS, "line");
         line.setAttribute("x1", a._x.toFixed(1));
         line.setAttribute("y1", a._y.toFixed(1));
@@ -156,6 +172,20 @@
         g.appendChild(line);
       }
       for (const n of shown) {
+        const hit = document.createElementNS(NS, "circle");
+        hit.setAttribute("cx", n._x.toFixed(1));
+        hit.setAttribute("cy", n._y.toFixed(1));
+        hit.setAttribute("r", "18");
+        hit.setAttribute("fill", "transparent");
+        hit.setAttribute("class", "gnode-hit");
+        hit.setAttribute("tabindex", "0");
+        hit.setAttribute("role", "button");
+        hit.setAttribute("aria-label", "Entity " + n.kind + " " + n.label);
+        hit.addEventListener("click", () => selectNode(n));
+        hit.addEventListener("keydown", (ev) => {
+          if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); selectNode(n); }
+        });
+        g.appendChild(hit);
         const c = document.createElementNS(NS, "circle");
         c.setAttribute("cx", n._x.toFixed(1));
         c.setAttribute("cy", n._y.toFixed(1));
@@ -257,20 +287,54 @@
       render();
     }
 
-    // pan
+    // pan (single pointer) + pinch zoom (two pointers, touch-friendly)
     let drag = null;
+    const pointers = new Map();
+    let pinchStart = 0;
+    let pinchK = 1;
+    function pinchDistance() {
+      const pts = Array.from(pointers.values());
+      if (pts.length < 2) return 0;
+      const dx = pts[0].x - pts[1].x;
+      const dy = pts[0].y - pts[1].y;
+      return Math.sqrt(dx * dx + dy * dy);
+    }
     svg.addEventListener("pointerdown", (ev) => {
-      drag = { x: ev.clientX, y: ev.clientY, vx: view.x, vy: view.y };
+      pointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+      if (pointers.size === 2) {
+        pinchStart = pinchDistance() || 1;
+        pinchK = view.k;
+        drag = null;
+      } else {
+        drag = { x: ev.clientX, y: ev.clientY, vx: view.x, vy: view.y };
+      }
       svg.setPointerCapture(ev.pointerId);
     });
     svg.addEventListener("pointermove", (ev) => {
+      if (!pointers.has(ev.pointerId)) return;
+      pointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+      if (pointers.size === 2) {
+        const d = pinchDistance();
+        if (d > 0 && pinchStart > 0) {
+          view.k = Math.min(4, Math.max(0.4, pinchK * (d / pinchStart)));
+          const g = svg.querySelector("g");
+          if (g) applyTransform(g);
+        }
+        return;
+      }
       if (!drag) return;
       view.x = drag.vx + (ev.clientX - drag.x);
       view.y = drag.vy + (ev.clientY - drag.y);
       const g = svg.querySelector("g");
       if (g) applyTransform(g);
     });
-    svg.addEventListener("pointerup", () => { drag = null; });
+    function endPointer(ev) {
+      pointers.delete(ev.pointerId);
+      if (pointers.size < 2) pinchStart = 0;
+      if (pointers.size === 0) drag = null;
+    }
+    svg.addEventListener("pointerup", endPointer);
+    svg.addEventListener("pointercancel", endPointer);
     svg.addEventListener("wheel", (ev) => {
       ev.preventDefault();
       const f = ev.deltaY < 0 ? 1.1 : 0.9;

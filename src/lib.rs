@@ -1,5 +1,6 @@
 //! RXScan's stable M0 boundary: input normalization, scope, and plans.
 pub mod analysis;
+pub mod android;
 pub mod archive;
 pub mod arp;
 pub mod assets;

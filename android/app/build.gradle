@@ -1,0 +1,56 @@
+plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+}
+
+// RXScan version is derived from Cargo.toml (single source of truth),
+// never a scattered hardcoded release number here.
+def cargoToml = file("../../Cargo.toml").readLines()
+def rxscanVersion = cargoToml.find { it.startsWith("version = ") }
+    ?.replaceFirst(/^version = "(.*)"$/, "\$1")
+    ?: "0.0.0-dev"
+def versionParts = (rxscanVersion =~ /(\d+)\.(\d+)\.(\d+)/)
+if (!versionParts.matches()) {
+    throw new GradleException("Cargo.toml version is not X.Y.Z: ${rxscanVersion}")
+}
+def versionCodeValue = versionParts[0][1].toInteger() * 10000 +
+    versionParts[0][2].toInteger() * 100 + versionParts[0][3].toInteger()
+
+android {
+    namespace = "dev.rxscan.app"
+    compileSdk = 34
+
+    defaultConfig {
+        applicationId = "dev.rxscan.app"
+        minSdk = 26
+        targetSdk = 34
+        versionCode = versionCodeValue
+        versionName = "${rxscanVersion}-dev"
+        // arm64-v8a devices first; x86_64 so the CI emulator can
+        // install and launch the same APK for runtime proof.
+        ndk {
+            abiFilters += ["arm64-v8a", "x86_64"]
+        }
+    }
+
+    buildTypes {
+        debug {
+            // Gradle debug signing flow (auto-generated debug keystore,
+            // never committed). Sideloading still requires user permission.
+            applicationIdSuffix = ".debug"
+        }
+        release {
+            // Remote WebView debugging stays off in release builds.
+            debuggable = false
+            minifyEnabled = false
+            shrinkResources = false
+        }
+    }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+}

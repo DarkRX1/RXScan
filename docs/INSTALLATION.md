@@ -71,9 +71,22 @@ tar -xzf RXScan-1.0.2-dev-macos-arm64.tar.gz   # Apple Silicon (native smoke-tes
 
 If Gatekeeper quarantines the binary, verify the SHA-256 checksum and move the app via Finder (do not disable system security globally). Homebrew formula/tap is scaffolding only until published.
 
-## Android / Termux
+## Android
 
-No root required. Core search/investigation works unprivileged.
+Two separate distributions; do not confuse them.
+
+**APK (normal install, development):** download
+`RXScan-1.0.2-dev-android-arm64.apk` from the `Distribution artifacts`
+workflow's Actions artifacts (not a release), allow sideloaded installs
+when Android asks, and install. The APK is the application: no Termux,
+no Rust, no repository clone, no separately running server. It is
+debug-signed only (Gradle debug flow; production/Play signing is out of
+scope). Raw-packet and active OS-probe capabilities report as
+restricted/unavailable on Android (see `docs/ANDROID.md`); TCP/DNS/HTTP/
+TLS/search/investigation/graph/projects work unprivileged, no root.
+
+**Termux (source build, experimental):** no root required. Core
+search/investigation works unprivileged.
 
 Termux is experimental; cross-build configured with hosted validation
 pending and runtime unverified (see `docs/PLATFORMS.md`).
