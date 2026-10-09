@@ -56,7 +56,6 @@ class MainActivity : Activity() {
         settings.domStorageEnabled = true
         settings.allowFileAccess = false
         settings.allowContentAccess = false
-        settings.geolocationEnabled = false
         settings.saveFormData = false
         settings.savePassword = false
         settings.mediaPlaybackRequiresUserGesture = true
