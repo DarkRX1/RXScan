@@ -788,7 +788,20 @@ fn read_request(stream: &mut BufReader<TcpStream>) -> Result<HttpRequest, ApiErr
         ));
     }
     if content_length > MAX_BODY_BYTES {
-        // Drained above so the 413 response is delivered cleanly.
+        // Bounded drain: consume the body with a fixed-size buffer so the
+        // client receives a clean response instead of seeing leftover bytes.
+        let mut remaining = content_length;
+        let mut buf = [0u8; 4096];
+        while remaining > 0 {
+            let chunk_len = remaining.min(buf.len());
+            let n = stream
+                .read(&mut buf[..chunk_len])
+                .map_err(|_| ApiErrorBody::new("bad_request", "truncated request body"))?;
+            if n == 0 {
+                break;
+            }
+            remaining -= n;
+        }
         return Err(ApiErrorBody::new(
             "payload_too_large",
             format!("request body exceeds {MAX_BODY_BYTES} bytes"),
