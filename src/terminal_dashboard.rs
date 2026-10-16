@@ -67,7 +67,10 @@ struct FeedInner {
 pub struct DashboardFeed {
     inner: Mutex<FeedInner>,
     cancelled: Arc<AtomicBool>,
-    last_draw: Mutex<Instant>,
+    // None = never drawn (first frame always due). Option (not arithmetic
+    // on Instant) because subtracting from `now` can underflow the clock
+    // origin on fresh machines (notably Windows CI VMs).
+    last_draw: Mutex<Option<Instant>>,
 }
 
 impl DashboardFeed {
@@ -86,7 +89,7 @@ impl DashboardFeed {
                 note: String::new(),
             }),
             cancelled,
-            last_draw: Mutex::new(now - Duration::from_secs(3600)),
+            last_draw: Mutex::new(None),
         }
     }
 
@@ -164,21 +167,22 @@ impl DashboardFeed {
 
     /// True when a redraw is due under the throttle.
     pub fn draw_due(&self) -> bool {
-        self.last_draw
-            .lock()
-            .is_ok_and(|last| last.elapsed().as_millis() >= u128::from(DRAW_THROTTLE_MS))
+        self.last_draw.lock().is_ok_and(|last| match *last {
+            None => true,
+            Some(when) => when.elapsed().as_millis() >= u128::from(DRAW_THROTTLE_MS),
+        })
     }
 
     pub fn mark_drawn(&self) {
         if let Ok(mut last) = self.last_draw.lock() {
-            *last = Instant::now();
+            *last = Some(Instant::now());
         }
     }
 
     #[cfg(test)]
     fn mark_drawn_for_test(&self) {
         if let Ok(mut last) = self.last_draw.lock() {
-            *last = Instant::now() - Duration::from_secs(3600);
+            *last = None;
         }
     }
 }
