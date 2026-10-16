@@ -125,6 +125,10 @@ fn main() {
         run_diff(&args);
         return;
     }
+    if args.get(1).is_some_and(|arg| arg == "graph") {
+        run_graph(&args);
+        return;
+    }
     if args.get(1).is_some_and(|arg| arg == "analyze") {
         run_analyze(&args);
         return;
@@ -380,6 +384,7 @@ fn suggest_command(input: &str) -> Option<String> {
         "report",
         "analyze",
         "diff",
+        "graph",
         "unknown",
         "scan",
         "web",
@@ -3082,6 +3087,298 @@ fn run_diff(args: &[String]) {
             std::process::exit(1);
         }
     }
+}
+
+/// Maltego-style link-analysis graph over a project database
+/// (`rxscan graph ...`). Offline and read-only: walks stored entities and
+/// relationships only, never contacts anything. Output is secret-masked.
+///
+/// Usage:
+/// `rxscan graph <project.db> [--format png|svg|graphml|json|html] [--out PATH] [--min-confidence N] [--types a,b,c] [--layout organic|hierarchical|circular|block|radial] [--limit N] [--seed ID] [--depth N]`
+fn run_graph(args: &[String]) {
+    use rxscan::graph_view as gv;
+    const USAGE: &str = "rxscan graph <project.db> [--format png|svg|graphml|json|html] [--out PATH] [--min-confidence N] [--types a,b,c] [--layout organic|hierarchical|circular|block|radial] [--limit N] [--seed ID] [--depth N]";
+    let mut format: Option<gv::GraphFormat> = None;
+    let mut output_path: Option<String> = None;
+    let mut min_confidence = 0u8;
+    let mut types: Option<String> = None;
+    let mut layout = gv::LayoutKind::Organic;
+    let mut limit = gv::DEFAULT_VIEW_NODES;
+    let mut seed: Option<String> = None;
+    let mut depth = 2usize;
+    let mut project: Option<String> = None;
+    let mut iter = args[2..].iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                out_line!(
+                    "RXScan link-analysis graph (offline, read-only, secret-masked)\n\nUSAGE\n  {USAGE}\n\nFORMATS\n  json     typed nodes/edges with evidence + confidence (default to stdout)\n  graphml  directed GraphML with data keys\n  svg      standalone vector scene (shape = kind, dash = inference, width = confidence)\n  html     standalone interactive page (offline, no external requests)\n  png      raster overview (binary; requires --out)\n\nFILTERS\n  --min-confidence N   drop relationships below N (0-100)\n  --types a,b,c        one or more of: network ip host port_service software certificate domain url username account exposure evidence scope\n  --seed ID --depth N  bounded neighborhood instead of the full graph\n  --limit N            node cap (1-50000; exports report truncation honestly)\n\nEXAMPLES\n  rxscan graph scan.db --format html --out graph.html\n  rxscan graph scan.db --types ip,host,port_service --min-confidence 70"
+                );
+                return;
+            }
+            "--format" => {
+                let Some(value) = iter.next() else {
+                    err!("rxscan graph: --format requires a value");
+                    std::process::exit(2);
+                };
+                match gv::GraphFormat::parse(value) {
+                    Some(parsed) => format = Some(parsed),
+                    None => {
+                        err!("rxscan graph: unknown format '{value}' (png|svg|graphml|json|html)");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "--out" | "--output" => {
+                let Some(path) = iter.next() else {
+                    err!("rxscan graph: --out requires a path");
+                    std::process::exit(2);
+                };
+                output_path = Some(path.to_owned());
+            }
+            "--min-confidence" => {
+                let Some(value) = iter.next() else {
+                    err!("rxscan graph: --min-confidence requires a value 0-100");
+                    std::process::exit(2);
+                };
+                match value.parse::<u16>() {
+                    Ok(value) if value <= 100 => min_confidence = value as u8,
+                    _ => {
+                        err!("rxscan graph: --min-confidence must be an integer 0-100");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "--types" => {
+                let Some(value) = iter.next() else {
+                    err!("rxscan graph: --types requires a comma-separated list");
+                    std::process::exit(2);
+                };
+                types = Some(value.to_owned());
+            }
+            "--layout" => {
+                let Some(value) = iter.next() else {
+                    err!("rxscan graph: --layout requires a value");
+                    std::process::exit(2);
+                };
+                match gv::LayoutKind::parse(value) {
+                    Some(parsed) => layout = parsed,
+                    None => {
+                        err!(
+                            "rxscan graph: unknown layout '{value}' (organic|hierarchical|circular|block|radial)"
+                        );
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "--limit" => {
+                let Some(value) = iter.next() else {
+                    err!("rxscan graph: --limit requires a value");
+                    std::process::exit(2);
+                };
+                match value.parse::<usize>() {
+                    Ok(value) if (1..=gv::MAX_VIEW_NODES).contains(&value) => limit = value,
+                    _ => {
+                        err!(
+                            "rxscan graph: --limit must be an integer 1-{}",
+                            gv::MAX_VIEW_NODES
+                        );
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "--seed" => {
+                let Some(value) = iter.next() else {
+                    err!("rxscan graph: --seed requires an entity id");
+                    std::process::exit(2);
+                };
+                seed = Some(value.to_owned());
+            }
+            "--depth" => {
+                let Some(value) = iter.next() else {
+                    err!("rxscan graph: --depth requires a value 0-6");
+                    std::process::exit(2);
+                };
+                match value.parse::<usize>() {
+                    Ok(value) if value <= 6 => depth = value,
+                    _ => {
+                        err!("rxscan graph: --depth must be an integer 0-6");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            value if project.is_none() && !value.starts_with("--") => {
+                project = Some(value.to_owned());
+            }
+            _ => {
+                err!("rxscan graph: usage: {USAGE}");
+                std::process::exit(2);
+            }
+        }
+    }
+    let Some(project) = project else {
+        err!("rxscan graph: usage: {USAGE}");
+        std::process::exit(2);
+    };
+    let type_set = match types {
+        Some(list) => {
+            let mut set = std::collections::BTreeSet::new();
+            for name in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                match gv::DisplayKind::parse(name) {
+                    Some(kind) if kind != gv::DisplayKind::Cluster => {
+                        set.insert(kind);
+                    }
+                    _ => {
+                        err!("rxscan graph: unknown entity type '{name}'");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            if set.is_empty() {
+                err!("rxscan graph: --types requires at least one entity type");
+                std::process::exit(2);
+            }
+            Some(set)
+        }
+        None => None,
+    };
+    let db = match rxscan::project_db::ProjectDb::open(std::path::Path::new(&project)) {
+        Ok(db) => db,
+        Err(error) => {
+            err!("rxscan graph: could not open project database: {error}");
+            std::process::exit(1);
+        }
+    };
+    let options = gv::ViewOptions {
+        types: type_set,
+        min_confidence,
+        limit_nodes: limit,
+        limit_edges: limit.saturating_mul(2).clamp(1, gv::MAX_VIEW_EDGES),
+        seed,
+        depth,
+        ..gv::ViewOptions::default()
+    }
+    .bounded();
+    let view = match gv::build_from_db(&db, &options) {
+        Ok(view) => view,
+        Err(error) => {
+            err!("rxscan graph: {error}");
+            std::process::exit(1);
+        }
+    };
+    // Default: human summary to stdout; --out without --format infers
+    // from the file extension; png always requires --out (binary).
+    let resolved = match (format, output_path.clone()) {
+        (Some(format), _) => Some(format),
+        (None, Some(path)) => infer_graph_format(&path),
+        (None, None) => None,
+    };
+    if output_path.is_none() && resolved == Some(gv::GraphFormat::Png) {
+        err!("rxscan graph: --format png is binary and requires --out PATH");
+        std::process::exit(2);
+    }
+    match resolved {
+        None => out_line!("{}", render_graph_summary(&view)),
+        Some(format) => {
+            let positions = gv::layout(&view, layout, options.seed.as_deref());
+            match gv::render_export(&view, format, &positions, &project) {
+                Ok(bytes) => {
+                    if let Some(path) = output_path {
+                        if let Some(parent) = std::path::Path::new(&path).parent() {
+                            if !parent.as_os_str().is_empty() {
+                                if let Err(error) = std::fs::create_dir_all(parent) {
+                                    err!("rxscan graph: could not create output dir: {error}");
+                                    std::process::exit(1);
+                                }
+                            }
+                        }
+                        if let Err(error) = std::fs::write(&path, &bytes) {
+                            err!("rxscan graph: could not write {path}: {error}");
+                            std::process::exit(1);
+                        }
+                        out_line!(
+                            "graph exported: {path} format={} nodes={} edges={} truncated={} network_requests=0",
+                            format.as_str(),
+                            view.nodes.len(),
+                            view.edges.len(),
+                            view.truncated,
+                        );
+                    } else if let Err(error) =
+                        std::io::Write::write_all(&mut std::io::stdout(), &bytes)
+                    {
+                        if error.kind() != std::io::ErrorKind::BrokenPipe {
+                            err!("rxscan graph: {error}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                Err(error) => {
+                    err!("rxscan graph: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+}
+
+/// Infer an export format from an output file extension.
+fn infer_graph_format(path: &str) -> Option<rxscan::graph_view::GraphFormat> {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => Some(rxscan::graph_view::GraphFormat::Png),
+        "svg" => Some(rxscan::graph_view::GraphFormat::Svg),
+        "graphml" => Some(rxscan::graph_view::GraphFormat::Graphml),
+        "html" | "htm" => Some(rxscan::graph_view::GraphFormat::Html),
+        "json" => Some(rxscan::graph_view::GraphFormat::Json),
+        _ => None,
+    }
+}
+
+/// Human summary of a masked graph view (default `rxscan graph` output).
+fn render_graph_summary(view: &rxscan::graph_view::ViewGraph) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "RXScan graph: {} nodes ({} total), {} edges ({} total), truncated={} network_requests=0",
+        view.nodes.len(),
+        view.total_nodes,
+        view.edges.len(),
+        view.total_edges,
+        view.truncated,
+    );
+    let mut kinds: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for node in &view.nodes {
+        *kinds.entry(node.kind.as_str()).or_default() += 1;
+    }
+    for (kind, count) in &kinds {
+        let _ = writeln!(out, "  {kind}: {count}");
+    }
+    let mut top: Vec<&rxscan::graph_view::ViewNode> = view.nodes.iter().collect();
+    top.sort_by(|a, b| {
+        b.link_confidence
+            .cmp(&a.link_confidence)
+            .then(a.id.cmp(&b.id))
+    });
+    for node in top.into_iter().take(5) {
+        let conf = node
+            .link_confidence
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "unrated".to_owned());
+        let _ = writeln!(
+            out,
+            "  - {} [{}] confidence={} evidence={}",
+            rxscan::report::safe_display(&node.label),
+            node.kind.as_str(),
+            conf,
+            node.evidence.len(),
+        );
+    }
+    out
 }
 
 /// Passive investigation workflow (`rxscan investigate ...`).

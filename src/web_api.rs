@@ -22,7 +22,7 @@
 //!   the browser requests typed operations only.
 
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     io::{BufRead, BufReader, Read, Write},
     net::{IpAddr, TcpListener, TcpStream},
     path::PathBuf,
@@ -76,6 +76,10 @@ pub const DEFAULT_PAGE_LIMIT: usize = 50;
 pub const MAX_PAGE_LIMIT: usize = 500;
 /// Maximum graph nodes returned in one response.
 pub const MAX_GRAPH_NODES: usize = 500;
+/// Node cap for the extended graph view (filtered full graph for the GUI
+/// Graph view; seed mode stays exact below this too). Bounded: a 10k-node
+/// page is ~3 MiB JSON; larger projects page or export via the CLI.
+pub const MAX_GRAPH_VIEW_NODES: usize = 10_000;
 /// Maximum ports in one explicit scan request.
 pub const MAX_SCAN_PORTS: usize = 5000;
 /// Maximum scope/exclude entries per scan request.
@@ -303,6 +307,12 @@ pub struct GraphNodeDto {
     pub first_seen_ms: u64,
     pub last_seen_ms: u64,
     pub observation_count: u64,
+    /// Display entity (`graph_view::DisplayKind`, additive).
+    pub display_kind: String,
+    /// Strongest incident-edge confidence (`None` = unrated, additive).
+    pub confidence: Option<u8>,
+    /// Scope annotation (`in_scope`/`out_of_scope`/`scope_unknown`).
+    pub scope: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -314,6 +324,14 @@ pub struct GraphEdgeDto {
     pub scan_run: String,
     pub module: String,
     pub evidence: String,
+    /// Display link (`graph_view::DisplayRel`, additive).
+    pub display_relation: String,
+    /// Stored relation name (additive).
+    pub stored_relation: String,
+    /// Solid (observed) vs dashed (inferred) rendering (additive).
+    pub observed: bool,
+    /// Stroke width derived from confidence (additive).
+    pub thickness: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2576,6 +2594,22 @@ fn handle_project_findings(
     }
 }
 
+/// Evidence graph for the GUI Graph view and link-analysis clients.
+///
+/// Query parameters (all optional except as noted):
+/// `seed` (entity id; empty/missing = bounded full graph),
+/// `depth` (0..=INVEST_MAX_DEPTH, default 2),
+/// `limit` (1..=10000, default 100),
+/// `types` (comma-separated display kinds),
+/// `min_confidence` (0..=100),
+/// `scope` (`all`|`in`|`out`, default `all`),
+/// `since`/`until` (epoch milliseconds).
+///
+/// The response keeps the historical `{nodes, edges}` shape and adds
+/// display fields (`display_kind`, `display_relation`, `observed`,
+/// `thickness`, `confidence`, `scope`) plus view honesty counters
+/// (`truncated`, `total_nodes`, `total_edges`). Secret material is masked
+/// server-side by the shared view model.
 fn handle_project_graph(
     state: &Arc<ServerState>,
     stream: &mut TcpStream,
@@ -2584,11 +2618,11 @@ fn handle_project_graph(
     query: &BTreeMap<String, String>,
 ) {
     let seed = query.get("seed").map(String::as_str).unwrap_or("").trim();
-    if seed.is_empty() || seed.len() > 512 {
+    if seed.len() > 512 {
         error_response(
             stream,
             rid,
-            &ApiErrorBody::new("bad_request", "graph requires a seed entity id"),
+            &ApiErrorBody::new("bad_request", "seed entity id is too long"),
         );
         return;
     }
@@ -2625,14 +2659,198 @@ fn handle_project_graph(
         .unwrap_or("100")
         .parse()
         .unwrap_or(0);
-    if limit == 0 || limit > MAX_GRAPH_NODES {
+    if limit == 0 || limit > MAX_GRAPH_VIEW_NODES {
         error_response(
             stream,
             rid,
             &ApiErrorBody::new(
                 "bad_request",
-                format!("limit must be 1..={MAX_GRAPH_NODES}"),
+                format!("limit must be 1..={MAX_GRAPH_VIEW_NODES}"),
             ),
+        );
+        return;
+    }
+    let min_confidence: u8 = match query
+        .get("min_confidence")
+        .map(String::as_str)
+        .unwrap_or("0")
+        .parse::<u16>()
+    {
+        Ok(value) if value <= 100 => value as u8,
+        _ => {
+            error_response(
+                stream,
+                rid,
+                &ApiErrorBody::new("bad_request", "min_confidence must be 0..=100"),
+            );
+            return;
+        }
+    };
+    let mut types: Option<BTreeSet<crate::graph_view::DisplayKind>> = None;
+    if let Some(raw) = query.get("types") {
+        let mut set = BTreeSet::new();
+        for part in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            match crate::graph_view::DisplayKind::parse(part) {
+                Some(kind) => {
+                    set.insert(kind);
+                }
+                None => {
+                    error_response(
+                        stream,
+                        rid,
+                        &ApiErrorBody::new("bad_request", "unknown entity type"),
+                    );
+                    return;
+                }
+            }
+        }
+        types = Some(set);
+    }
+    let scope = match query.get("scope").map(String::as_str).unwrap_or("all") {
+        "all" => crate::graph_view::ScopeFilter::All,
+        "in" => crate::graph_view::ScopeFilter::InScope,
+        "out" => crate::graph_view::ScopeFilter::OutOfScope,
+        _ => {
+            error_response(
+                stream,
+                rid,
+                &ApiErrorBody::new("bad_request", "scope must be all, in, or out"),
+            );
+            return;
+        }
+    };
+    let moment = |key: &str| {
+        query
+            .get(key)
+            .map(|raw| {
+                raw.parse::<u64>().map_err(|_| {
+                    ApiErrorBody::new("bad_request", "since/until must be epoch milliseconds")
+                })
+            })
+            .transpose()
+    };
+    let since = match moment("since") {
+        Ok(value) => value,
+        Err(error) => {
+            error_response(stream, rid, &error);
+            return;
+        }
+    };
+    let until = match moment("until") {
+        Ok(value) => value,
+        Err(error) => {
+            error_response(stream, rid, &error);
+            return;
+        }
+    };
+    let (_, db) = match open_project(state, name) {
+        Ok(opened) => opened,
+        Err(error) => {
+            error_response(stream, rid, &error);
+            return;
+        }
+    };
+    let options = crate::graph_view::ViewOptions {
+        types,
+        min_confidence,
+        scope,
+        since_ms: since,
+        until_ms: until,
+        limit_nodes: limit,
+        limit_edges: limit
+            .saturating_mul(2)
+            .clamp(1, crate::graph_view::MAX_VIEW_EDGES),
+        seed: (!seed.is_empty()).then(|| seed.to_owned()),
+        depth,
+        include_evidence: false,
+    }
+    .bounded();
+    let view = match crate::graph_view::build_from_db(&db, &options) {
+        Ok(view) => view,
+        Err(detail) => {
+            eprintln!("[rxscan-web] rid={rid:016x} graph view failed: {detail}");
+            error_response(
+                stream,
+                rid,
+                &ApiErrorBody::new("internal", "graph unavailable"),
+            );
+            return;
+        }
+    };
+    // Seed-required legacy check: an explicit unknown seed is a client
+    // error (404), not an empty graph.
+    if let Some(seed) = options.seed.as_deref() {
+        if db.entity(seed).map(|row| row.is_none()).unwrap_or(true) {
+            error_response(
+                stream,
+                rid,
+                &ApiErrorBody::new("not_found", "seed entity not found"),
+            );
+            return;
+        }
+    }
+    let nodes: Vec<GraphNodeDto> = view
+        .nodes
+        .iter()
+        .map(|node| GraphNodeDto {
+            id: node.id.clone(),
+            kind: node.stored_kind.clone(),
+            label: node.label.clone(),
+            first_seen_ms: node.first_seen_ms,
+            last_seen_ms: node.last_seen_ms,
+            observation_count: node.observations,
+            display_kind: node.kind.as_str().to_owned(),
+            confidence: node.link_confidence,
+            scope: node.scope.as_str().to_owned(),
+        })
+        .collect();
+    let edges: Vec<GraphEdgeDto> = view
+        .edges
+        .iter()
+        .map(|edge| GraphEdgeDto {
+            from: edge.from.clone(),
+            to: edge.to.clone(),
+            relation: edge.stored_relation.clone(),
+            confidence: edge.confidence,
+            scan_run: edge.scan_run.clone(),
+            module: edge.module.clone(),
+            evidence: edge.evidence.join("; "),
+            display_relation: edge.relation.as_str().to_owned(),
+            stored_relation: edge.stored_relation.clone(),
+            observed: edge.observed,
+            thickness: edge.thickness,
+        })
+        .collect();
+    json_response(
+        stream,
+        rid,
+        200,
+        &serde_json::json!({
+            "graph_schema_version": crate::graph_view::VIEW_SCHEMA_VERSION,
+            "nodes": nodes,
+            "edges": edges,
+            "truncated": view.truncated,
+            "total_nodes": view.total_nodes,
+            "total_edges": view.total_edges,
+        }),
+    );
+}
+
+/// Node detail with evidence chain (`GET .../graph/node?node=ID`).
+/// Same [`graph_view::node_detail`] code path the CLI explain mode uses.
+fn handle_project_graph_node(
+    state: &Arc<ServerState>,
+    stream: &mut TcpStream,
+    rid: u64,
+    name: &str,
+    query: &BTreeMap<String, String>,
+) {
+    let node = query.get("node").map(String::as_str).unwrap_or("").trim();
+    if node.is_empty() || node.len() > 512 {
+        error_response(
+            stream,
+            rid,
+            &ApiErrorBody::new("bad_request", "node entity id is required"),
         );
         return;
     }
@@ -2643,68 +2861,150 @@ fn handle_project_graph(
             return;
         }
     };
-    // Bounded breadth-first expansion from the seed over stored
-    // relationships; the server walks the graph, the GUI only renders it.
-    let mut nodes: Vec<GraphNodeDto> = Vec::new();
-    let mut edges: Vec<GraphEdgeDto> = Vec::new();
-    let mut visited: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    let mut frontier: Vec<(String, usize)> = vec![(seed.to_owned(), 0)];
-    visited.insert(seed.to_owned());
-    while let Some((current, current_depth)) = frontier.pop() {
-        if nodes.len() >= limit {
-            break;
-        }
-        let row = match db.entity(&current) {
-            Ok(row) => row,
-            Err(_) => continue,
-        };
-        if let Some(row) = row {
-            nodes.push(GraphNodeDto {
-                id: row.entity_id,
-                kind: row.kind,
-                label: row.label,
-                first_seen_ms: row.first_seen_ms,
-                last_seen_ms: row.last_seen_ms,
-                observation_count: row.observation_count,
-            });
-        }
-        if current_depth >= depth {
-            continue;
-        }
-        let mut adjacent = db.edges_from(&current).unwrap_or_default();
-        adjacent.extend(db.edges_to(&current).unwrap_or_default());
-        for edge in adjacent {
-            if edges.len() >= limit * 2 {
-                break;
-            }
-            let neighbor = if edge.from_id == current {
-                edge.to_id.clone()
-            } else {
-                edge.from_id.clone()
-            };
-            edges.push(GraphEdgeDto {
-                from: edge.from_id.clone(),
-                to: edge.to_id.clone(),
-                relation: edge.relation.clone(),
-                confidence: edge.confidence,
-                scan_run: edge.scan_run.clone(),
-                module: edge.module.clone(),
-                evidence: truncate_bytes(&edge.evidence, 512),
-            });
-            if visited.insert(neighbor.clone()) && nodes.len() + frontier.len() < limit {
-                frontier.push((neighbor, current_depth + 1));
-            }
-        }
+    let options = crate::graph_view::ViewOptions {
+        seed: Some(node.to_owned()),
+        depth: 1,
+        limit_nodes: 500,
+        limit_edges: 1000,
+        ..crate::graph_view::ViewOptions::default()
     }
-    // Deduplicate edges (from/to pairs appear from both directions).
-    edges.sort_by(|a, b| (&a.from, &a.to, &a.relation).cmp(&(&b.from, &b.to, &b.relation)));
-    edges.dedup_by(|a, b| a.from == b.from && a.to == b.to && a.relation == b.relation);
-    edges.truncate(limit * 2);
+    .bounded();
+    let view = match crate::graph_view::build_from_db(&db, &options) {
+        Ok(view) => view,
+        Err(detail) => {
+            eprintln!("[rxscan-web] rid={rid:016x} graph node failed: {detail}");
+            error_response(
+                stream,
+                rid,
+                &ApiErrorBody::new("internal", "graph unavailable"),
+            );
+            return;
+        }
+    };
+    let observations: Vec<crate::graph_view::EvidenceLink> = db
+        .provenance_chain(node)
+        .unwrap_or_default()
+        .into_iter()
+        .take(32)
+        .map(|row| crate::graph_view::EvidenceLink {
+            summary: format!("observed by {} ({})", row.module, row.scan_run),
+            module: crate::exposure::scrub_text(&row.module),
+            scan_run: crate::exposure::scrub_text(&row.scan_run),
+            confidence: Some(row.confidence),
+            observed: None,
+        })
+        .collect();
+    match crate::graph_view::node_detail(&view, &crate::exposure::scrub_text(node), observations) {
+        Some(detail) => json_response(stream, rid, 200, &detail),
+        None => error_response(
+            stream,
+            rid,
+            &ApiErrorBody::new("not_found", "node not found"),
+        ),
+    }
+}
+
+/// Bounded neighbor expansion over stored data
+/// (`GET .../graph/neighbors?node=ID&limit=N`). Reads stored
+/// relationships only — never network activity, so no confirmation is
+/// needed. Anything that would contact the network stays behind the
+/// explicit, scope-gated bridge workflows.
+fn handle_project_graph_neighbors(
+    state: &Arc<ServerState>,
+    stream: &mut TcpStream,
+    rid: u64,
+    name: &str,
+    query: &BTreeMap<String, String>,
+) {
+    let node = query.get("node").map(String::as_str).unwrap_or("").trim();
+    if node.is_empty() || node.len() > 512 {
+        error_response(
+            stream,
+            rid,
+            &ApiErrorBody::new("bad_request", "node entity id is required"),
+        );
+        return;
+    }
+    let limit: usize = query
+        .get("limit")
+        .map(String::as_str)
+        .unwrap_or("50")
+        .parse()
+        .unwrap_or(0);
+    if limit == 0 || limit > 1024 {
+        error_response(
+            stream,
+            rid,
+            &ApiErrorBody::new("bad_request", "limit must be 1..=1024"),
+        );
+        return;
+    }
+    let (_, db) = match open_project(state, name) {
+        Ok(opened) => opened,
+        Err(error) => {
+            error_response(stream, rid, &error);
+            return;
+        }
+    };
+    if db.entity(node).map(|row| row.is_none()).unwrap_or(true) {
+        error_response(
+            stream,
+            rid,
+            &ApiErrorBody::new("not_found", "node not found"),
+        );
+        return;
+    }
+    let mut adjacent = db.edges_from(node).unwrap_or_default();
+    adjacent.extend(db.edges_to(node).unwrap_or_default());
+    adjacent.sort_by(|a, b| {
+        b.confidence
+            .cmp(&a.confidence)
+            .then((&a.from_id, &a.to_id, &a.relation).cmp(&(&b.from_id, &b.to_id, &b.relation)))
+    });
+    adjacent.truncate(limit);
+    let mut neighbors = Vec::new();
+    for edge in adjacent {
+        let neighbor = if edge.from_id == node {
+            edge.to_id.clone()
+        } else {
+            edge.from_id.clone()
+        };
+        let row = db.entity(&neighbor).unwrap_or(None);
+        let (kind, label) = row
+            .as_ref()
+            .map(|row| (row.kind.clone(), crate::exposure::scrub_text(&row.label)))
+            .unwrap_or(("unknown".to_owned(), neighbor.clone()));
+        let display_kind = row
+            .as_ref()
+            .and_then(|row| crate::graph::EntityKind::parse(&row.kind))
+            .map(|stored| {
+                crate::graph_view::display_kind_of(stored)
+                    .as_str()
+                    .to_owned()
+            })
+            .unwrap_or_else(|| "unknown".to_owned());
+        let (relation, observed) = crate::graph::EdgeRelation::parse(&edge.relation)
+            .map(crate::graph_view::display_rel_of)
+            .unwrap_or((crate::graph_view::DisplayRel::CorrelatedWith, false));
+        neighbors.push(serde_json::json!({
+            "id": crate::exposure::scrub_text(&neighbor),
+            "kind": kind,
+            "display_kind": display_kind,
+            "label": label,
+            "relation": relation.as_str(),
+            "stored_relation": edge.relation,
+            "observed": observed,
+            "confidence": edge.confidence,
+            "module": crate::exposure::scrub_text(&edge.module),
+            "scan_run": crate::exposure::scrub_text(&edge.scan_run),
+            "evidence": crate::exposure::scrub_text(&edge.evidence),
+        }));
+    }
     json_response(
         stream,
         rid,
         200,
-        &serde_json::json!({"nodes": nodes, "edges": edges}),
+        &serde_json::json!({ "neighbors": neighbors }),
     );
 }
 
@@ -3545,6 +3845,12 @@ fn route_request(state: &Arc<ServerState>, stream: &mut TcpStream, rid: u64, req
         }
         ("GET", ["", "api", "v1", "projects", name, "graph"]) => {
             handle_project_graph(state, stream, rid, name, &request.query);
+        }
+        ("GET", ["", "api", "v1", "projects", name, "graph", "node"]) => {
+            handle_project_graph_node(state, stream, rid, name, &request.query);
+        }
+        ("GET", ["", "api", "v1", "projects", name, "graph", "neighbors"]) => {
+            handle_project_graph_neighbors(state, stream, rid, name, &request.query);
         }
         ("GET", ["", "api", "v1", "projects", name, "timeline"]) => {
             handle_project_timeline(state, stream, rid, name, &request.query);

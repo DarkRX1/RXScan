@@ -406,3 +406,28 @@ tr.status-running td:nth-child(3) { color: var(--rx-cyan-bright); font-weight: 7
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
+
+/* Link-analysis Graph view: same tokens, no new palette. */
+.graph-canvas-wrap { position: relative; min-width: 0; }
+#graph-canvas { width: 100%; height: auto; min-height: 320px; background: radial-gradient(520px 260px at 50% 0%, rgba(7, 88, 255, 0.1), transparent 70%), #010813; border: 1px solid var(--rx-border); border-radius: var(--radius); cursor: grab; touch-action: pan-y pinch-zoom; }
+#graph-canvas:active { cursor: grabbing; }
+#graph-canvas:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.glink { stroke: #2e5a87; cursor: pointer; }
+.glink.inferred { stroke: #7a6a9a; stroke-dasharray: 6 4; }
+.glink.selected { stroke: var(--rx-cyan-bright); }
+.glink.dim, .gnode-wrap.dim { opacity: 0.25; }
+.gnode-wrap { cursor: pointer; }
+.gnode-wrap.selected .gnode-shape { stroke: #fff; stroke-width: 2.5; filter: drop-shadow(0 0 5px rgba(0, 239, 255, 0.9)); }
+.gnode-wrap.highlighted .gnode-shape { stroke: var(--warn); stroke-width: 2.5; }
+.gnode-wrap:focus-visible { outline: none; }
+.gnode-wrap:focus-visible .gnode-shape { stroke: var(--focus); stroke-width: 2.5; }
+.gnode-shape { stroke: #010813; stroke-width: 1.5; }
+#graph-canvas.labels-off .glabel { display: none; }
+.graph-box { fill: rgba(0, 239, 255, 0.08); stroke: var(--rx-cyan); stroke-dasharray: 4 3; }
+.ctx-menu { position: absolute; z-index: 20; background: var(--rx-surface-2); border: 1px solid var(--rx-border); border-radius: var(--radius); padding: 0.25rem; min-width: 12rem; box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5); }
+.ctx-menu button { display: block; width: 100%; text-align: left; background: transparent; color: var(--text); font-weight: 600; border: none; border-radius: 4px; padding: 0.45rem 0.6rem; }
+.ctx-menu button:hover, .ctx-menu button:focus-visible { background: #0a233d; }
+.ctx-menu .ctx-note { color: var(--muted); font-size: 0.78rem; padding: 0.35rem 0.6rem; }
+#graph-minconf { width: 8rem; }
+#graph-q { width: 12rem; }
+#graph-status { margin: 0.4rem 0; }

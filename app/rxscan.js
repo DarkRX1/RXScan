@@ -529,7 +529,7 @@
   }
 
   /* -- routing -------------------------------------------------------------- */
-  const VIEWS = ["dashboard", "scan", "search", "investigate", "projects", "jobs"];
+  const VIEWS = ["dashboard", "scan", "search", "investigate", "projects", "jobs", "graph"];
   function currentRoute() {
     const h = window.location.hash || "#/dashboard";
     const parts = h.replace(/^#\//, "").split("/");
@@ -1644,6 +1644,961 @@
     else if (kind === "username_search") window.location.hash = "#/search";
     else window.location.hash = "#/jobs";
   });
+
+  /* -- Graph view: Maltego-style link analysis over stored evidence --- */
+  /* Reads only the project graph endpoints (stored data, never network
+     expansion). Rust decides entities, links, confidence, and masking;
+     this file lays out and renders. Solid = observed, dashed = inferred,
+     width = confidence; shape + label always repeat what color shows. */
+  const GV_COLORS = {
+    network: "#078cff", ip: "#00efff", host: "#3ddc84", port_service: "#f0a04b",
+    software: "#b07cc4", certificate: "#e5488f", domain: "#19f4ff", url: "#8fa9c2",
+    username: "#e2e8f0", account: "#f4f8ff", exposure: "#f06666", evidence: "#6b7d94",
+    scope: "#4a9eff", cluster: "#2a4a6b",
+  };
+  const GV_SHAPES = {
+    network: "hexagon", ip: "circle", host: "square", port_service: "diamond",
+    software: "triangle", certificate: "pentagon", domain: "ellipse", url: "rounded_rect",
+    username: "ring", account: "double_square", exposure: "triangle_down", evidence: "parallelogram",
+    scope: "dashed_circle", cluster: "octagon",
+  };
+  const GV_KINDS = Object.keys(GV_COLORS).filter((k) => k !== "cluster");
+  const GV_RENDER_NODES = 1500;
+  const GV_RENDER_EDGES = 3000;
+
+  const gv = {
+    nodes: [], edges: [], byId: new Map(),
+    positions: new Map(), hidden: new Set(), pinned: new Set(),
+    collapsed: new Map(), selection: new Set(), layout: "organic",
+    undo: [], redo: [], collections: new Map(), groupSeq: 0,
+    clusterMembers: new Map(), loaded: false,
+  };
+  const GVNS = "http://www.w3.org/2000/svg";
+  const gvReducedMotion = () =>
+    window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  function gvStatus(text) {
+    $("graph-status").textContent = text;
+  }
+  function gvKindOf(n) {
+    return n.display_kind || n.kind || "unknown";
+  }
+  function gvColor(kind) {
+    return GV_COLORS[kind] || GV_COLORS.network;
+  }
+  function gvShape(kind) {
+    return GV_SHAPES[kind] || "hexagon";
+  }
+
+  function gvSnapshot() {
+    gv.undo.push(JSON.stringify({
+      hidden: Array.from(gv.hidden), pinned: Array.from(gv.pinned),
+      collapsed: Array.from(gv.collapsed.entries()), positions: Array.from(gv.positions.entries()),
+      selection: Array.from(gv.selection), layout: gv.layout,
+    }));
+    if (gv.undo.length > 50) gv.undo.shift();
+    gv.redo.length = 0;
+  }
+  function gvRestore(json) {
+    const s = JSON.parse(json);
+    gv.hidden = new Set(s.hidden); gv.pinned = new Set(s.pinned);
+    gv.collapsed = new Map(s.collapsed); gv.positions = new Map(s.positions);
+    gv.selection = new Set(s.selection); gv.layout = s.layout;
+    $("graph-layout").value = s.layout;
+    gvRender();
+  }
+  $("graph-undo").addEventListener("click", () => {
+    const cur = gv.undo.pop();
+    if (cur === undefined) { gvStatus("Nothing to undo."); return; }
+    gv.redo.push(JSON.stringify({
+      hidden: Array.from(gv.hidden), pinned: Array.from(gv.pinned),
+      collapsed: Array.from(gv.collapsed.entries()), positions: Array.from(gv.positions.entries()),
+      selection: Array.from(gv.selection), layout: gv.layout,
+    }));
+    gvRestore(cur);
+    gvStatus("Undone.");
+  });
+  $("graph-redo").addEventListener("click", () => {
+    const cur = gv.redo.pop();
+    if (cur === undefined) { gvStatus("Nothing to redo."); return; }
+    gv.undo.push(JSON.stringify({
+      hidden: Array.from(gv.hidden), pinned: Array.from(gv.pinned),
+      collapsed: Array.from(gv.collapsed.entries()), positions: Array.from(gv.positions.entries()),
+      selection: Array.from(gv.selection), layout: gv.layout,
+    }));
+    gvRestore(cur);
+    gvStatus("Redone.");
+  });
+
+  /* -- deterministic layouts (same math as the Rust exporters) ----------- */
+  function gvHash(text) {
+    let h = 0xcbf29ce484222325;
+    const s = String(text);
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 0x100000001b3) >>> 0 || (h * 0x100000001b3) % 4294967296;
+    }
+    return h >>> 0;
+  }
+  function gvAdjacency(ids, edges) {
+    const adj = new Map(ids.map((id) => [id, []]));
+    for (const e of edges) {
+      if (adj.has(e.from)) adj.get(e.from).push(e.to);
+      if (adj.has(e.to)) adj.get(e.to).push(e.from);
+    }
+    for (const list of adj.values()) list.sort();
+    return adj;
+  }
+  function gvBfsLayers(ids, edges, root) {
+    const adj = gvAdjacency(ids, edges);
+    const seen = new Set([root]);
+    const layers = [];
+    let frontier = [root];
+    while (frontier.length) {
+      frontier.sort();
+      layers.push(frontier.slice());
+      const next = [];
+      for (const cur of frontier) {
+        for (const nb of adj.get(cur) || []) {
+          if (!seen.has(nb)) { seen.add(nb); next.push(nb); }
+        }
+      }
+      frontier = next;
+      if (layers.length > ids.length + 1) break;
+    }
+    const rest = ids.filter((id) => !seen.has(id)).sort();
+    if (rest.length) {
+      if (layers.length) layers[layers.length - 1] = layers[layers.length - 1].concat(rest).sort();
+      else layers.push(rest);
+    }
+    return layers;
+  }
+  function gvRoot(ids, edges, seed) {
+    if (seed && ids.includes(seed)) return seed;
+    const adj = gvAdjacency(ids, edges);
+    let best = ids[0];
+    let bestDeg = -1;
+    for (const id of ids) {
+      const deg = (adj.get(id) || []).length;
+      if (deg > bestDeg || (deg === bestDeg && id < best)) { best = id; bestDeg = deg; }
+    }
+    return best;
+  }
+  function gvComputeLayout(ids, edges, kind, seed) {
+    const pos = new Map();
+    const W = 1000, H = 700;
+    if (!ids.length) return pos;
+    const sorted = ids.slice().sort();
+    if (kind === "circular") {
+      sorted.forEach((id, i) => {
+        const a = (2 * Math.PI * i) / sorted.length;
+        pos.set(id, [500 + 420 * Math.cos(a), 350 + 280 * Math.sin(a)]);
+      });
+      return pos;
+    }
+    if (kind === "block") {
+      const byKind = new Map();
+      for (const id of sorted) {
+        const n = gv.byId.get(id);
+        const k = n ? gvKindOf(n) : "unknown";
+        if (!byKind.has(k)) byKind.set(k, []);
+        byKind.get(k).push(id);
+      }
+      const blocks = Math.max(1, byKind.size);
+      const cols = Math.ceil(Math.sqrt(blocks));
+      const bw = W / cols, bh = H / Math.max(1, cols);
+      let bi = 0;
+      for (const list of byKind.values()) {
+        const inner = Math.max(1, Math.ceil(Math.sqrt(list.length)));
+        list.forEach((id, i) => {
+          pos.set(id, [
+            (bi % cols) * bw + ((i % inner) + 1) * bw / (inner + 1),
+            Math.floor(bi / cols) * bh + (Math.floor(i / inner) + 1) * bh / (inner + 1),
+          ]);
+        });
+        bi++;
+      }
+      return pos;
+    }
+    if (kind === "hierarchical" || kind === "radial") {
+      const root = gvRoot(sorted, edges, kind === "radial" ? seed : null);
+      const layers = gvBfsLayers(sorted, edges, root);
+      if (kind === "hierarchical") {
+        layers.forEach((layer, li) => {
+          layer.forEach((id, i) => {
+            pos.set(id, [(li + 1) * W / (layers.length + 1), (i + 1) * H / (layer.length + 1)]);
+          });
+        });
+      } else {
+        pos.set(root, [500, 350]);
+        const rings = Math.max(1, layers.length - 1);
+        layers.slice(1).forEach((layer, li) => {
+          const r = 460 * (0.46 * W / 1000 + 0.54) * (li + 1) / rings;
+          layer.forEach((id, i) => {
+            const a = (2 * Math.PI * i) / Math.max(1, layer.length);
+            pos.set(id, [500 + r * Math.cos(a), 350 + r * 0.7 * Math.sin(a)]);
+          });
+        });
+      }
+      return pos;
+    }
+    // Organic: deterministic start + bounded sampled-repulsion passes.
+    const cx = 500, cy = 350, radius = 266;
+    sorted.forEach((id, i) => {
+      const a = (2 * Math.PI * i) / sorted.length;
+      const j = (gvHash(id) % 1000) / 1000 - 0.5;
+      pos.set(id, [cx + radius * Math.cos(a + j * 0.2), cy + radius * Math.sin(a + j * 0.2)]);
+    });
+    if (sorted.length < 2) return pos;
+    if (gvReducedMotion()) return pos;
+    const index = new Map(sorted.map((id, i) => [id, i]));
+    const P = sorted.map((id) => pos.get(id).slice());
+    const iters = Math.min(100, Math.max(6, Math.floor(600000 / sorted.length)));
+    const SAMPLE = 48;
+    const stride = Math.max(1, Math.floor(sorted.length / SAMPLE));
+    const ideal = Math.sqrt((W * H) / sorted.length);
+    let temp = W / 10;
+    const cool = temp / iters;
+    const el = [];
+    for (const e of edges) {
+      const a = index.get(e.from), b = index.get(e.to);
+      if (a !== undefined && b !== undefined && a !== b) el.push([a, b]);
+    }
+    for (let it = 0; it < iters; it++) {
+      const D = P.map(() => [0, 0]);
+      for (let i = 0; i < P.length; i++) {
+        let j = (i * 2654435761) % P.length;
+        for (let s = 0; s < Math.min(SAMPLE, P.length - 1); s++) {
+          j = (j + stride) % P.length;
+          if (j === i) continue;
+          const dx = P[i][0] - P[j][0], dy = P[i][1] - P[j][1];
+          const d = Math.max(0.01, Math.hypot(dx, dy));
+          const f = (ideal * ideal) / d / d;
+          D[i][0] += dx * f; D[i][1] += dy * f;
+        }
+      }
+      for (const [a, b] of el) {
+        const dx = P[a][0] - P[b][0], dy = P[a][1] - P[b][1];
+        const d = Math.max(0.01, Math.hypot(dx, dy));
+        const f = (d * d) / ideal / d;
+        D[a][0] -= dx * f; D[a][1] -= dy * f;
+        D[b][0] += dx * f; D[b][1] += dy * f;
+      }
+      for (let i = 0; i < P.length; i++) {
+        const id = sorted[i];
+        if (gv.pinned.has(id)) continue;
+        const len = Math.max(0.01, Math.hypot(D[i][0], D[i][1]));
+        const c = Math.min(temp, len) / len;
+        P[i][0] = Math.min(980, Math.max(20, P[i][0] + D[i][0] * c));
+        P[i][1] = Math.min(680, Math.max(20, P[i][1] + D[i][1] * c));
+      }
+      temp = Math.max(0.5, temp - cool);
+    }
+    sorted.forEach((id, i) => {
+      if (!gv.pinned.has(id) || !pos.has(id)) pos.set(id, P[i]);
+    });
+    return pos;
+  }
+
+  /* -- visible graph: filters, search, hide, collapse -------------------- */
+  function gvRep(id) {
+    for (const [superId, entry] of gv.collapsed) {
+      if (entry.members.includes(id)) return superId;
+    }
+    return id;
+  }
+  function gvVisible() {
+    const kindFilter = $("graph-kind").value;
+    const minConf = Number($("graph-minconf").value || 0);
+    const nodes = [];
+    const seen = new Set();
+    for (const n of gv.nodes) {
+      const id = n.id;
+      if (gv.hidden.has(id)) continue;
+      if (kindFilter && gvKindOf(n) !== kindFilter) continue;
+      const rep = gvRep(id);
+      if (rep !== id) {
+        if (!seen.has(rep)) {
+          seen.add(rep);
+          const entry = gv.collapsed.get(rep);
+          nodes.push({
+            id: rep, display_kind: "cluster", kind: "cluster",
+            label: entry.label, link_confidence: entry.confidence,
+            member_count: entry.members.length,
+          });
+        }
+        continue;
+      }
+      nodes.push(n);
+    }
+    const ids = new Set(nodes.map((n) => n.id));
+    const edges = [];
+    const edgeSeen = new Set();
+    for (const e of gv.edges) {
+      if (e.confidence < minConf) continue;
+      const from = gvRep(e.from), to = gvRep(e.to);
+      if (from === to || !ids.has(from) || !ids.has(to)) continue;
+      const key = from + "|" + to + "|" + e.relation;
+      if (edgeSeen.has(key)) continue;
+      edgeSeen.add(key);
+      edges.push({ ...e, from, to });
+    }
+    return { nodes, edges };
+  }
+
+  function gvAutoCluster(visible) {
+    // Collapse dense components past the render budget (deterministic).
+    gv.clusterMembers = new Map();
+    for (const [superId, entry] of gv.collapsed) {
+      if (entry.auto) gv.collapsed.delete(superId);
+    }
+    if (visible.nodes.length <= GV_RENDER_NODES) return visible;
+    const parent = new Map(visible.nodes.map((n) => [n.id, n.id]));
+    const find = (x) => {
+      let r = x;
+      while (parent.get(r) !== r) r = parent.get(r);
+      return r;
+    };
+    const sorted = visible.edges.slice().sort((a, b) =>
+      (a.from < b.from ? -1 : a.from > b.from ? 1 : a.to < b.to ? -1 : a.to > b.to ? 1 : 0));
+    for (const e of sorted) {
+      const a = find(e.from), b = find(e.to);
+      if (a !== b) parent.set(a < b ? b : a, a < b ? a : b);
+    }
+    const members = new Map();
+    for (const n of visible.nodes) {
+      const r = find(n.id);
+      if (!members.has(r)) members.set(r, []);
+      members.get(r).push(n.id);
+    }
+    const minCluster = Math.max(4, Math.floor(visible.nodes.length / GV_RENDER_NODES));
+    const comps = Array.from(members.entries()).sort((a, b) => b[1].length - a[1].length || (a[0] < b[0] ? -1 : 1));
+    let shown = visible.nodes.length;
+    let seq = 0;
+    for (const [, ids] of comps) {
+      if (shown <= GV_RENDER_NODES) break;
+      if (ids.length < minCluster) continue;
+      seq++;
+      const superId = "cluster:" + seq;
+      const byKind = {};
+      let conf = null;
+      ids.forEach((id) => {
+        const n = gv.byId.get(id);
+        const k = n ? gvKindOf(n) : "unknown";
+        byKind[k] = (byKind[k] || 0) + 1;
+        const c = n && n.link_confidence !== undefined && n.link_confidence !== null ? n.link_confidence : null;
+        if (c !== null && (conf === null || c > conf)) conf = c;
+      });
+      const summary = Object.keys(byKind).sort().map((k) => k + "×" + byKind[k]).join(", ");
+      gv.collapsed.set(superId, {
+        auto: true, label: ids.length + " nodes (" + summary + ")",
+        members: ids.slice().sort(), confidence: conf,
+      });
+      shown = shown - ids.length + 1;
+    }
+    return gvVisible();
+  }
+
+  /* -- rendering ----------------------------------------------------------- */
+  const gvView = { x: 0, y: 0, k: 1 };
+  function gvApplyTransform() {
+    const g = $("graph-canvas").querySelector("g[data-root]");
+    if (g) g.setAttribute("transform", "translate(" + gvView.x + "," + gvView.y + ") scale(" + gvView.k + ")");
+    $("graph-canvas").classList.toggle("labels-off", gvView.k < 0.7);
+  }
+  function gvSvgEl(tag, attrs, parent) {
+    const e = document.createElementNS(GVNS, tag);
+    for (const k of Object.keys(attrs)) e.setAttribute(k, attrs[k]);
+    parent.appendChild(e);
+    return e;
+  }
+  function gvDrawShape(parent, shape, x, y, r, fill) {
+    const stroke = "#010813";
+    const pts = (n, rot) => {
+      const s = [];
+      for (let i = 0; i < n; i++) {
+        const a = rot + (2 * Math.PI * i) / n;
+        s.push((x + r * Math.cos(a)).toFixed(1) + "," + (y + r * Math.sin(a)).toFixed(1));
+      }
+      return s.join(" ");
+    };
+    const R = (v) => Math.round(v * 10) / 10;
+    if (shape === "circle") return gvSvgEl("circle", { cx: R(x), cy: R(y), r: R(r), fill, stroke, "stroke-width": 1.5, class: "gnode-shape" }, parent);
+    if (shape === "ring" || shape === "dashed_circle") {
+      const c = gvSvgEl("circle", { cx: R(x), cy: R(y), r: R(r), fill: "none", stroke: fill, "stroke-width": 2.5, class: "gnode-shape" }, parent);
+      if (shape === "dashed_circle") c.setAttribute("stroke-dasharray", "4 3");
+      return c;
+    }
+    if (shape === "square") return gvSvgEl("rect", { x: R(x - r * 0.85), y: R(y - r * 0.85), width: R(r * 1.7), height: R(r * 1.7), fill, stroke, "stroke-width": 1.5, class: "gnode-shape" }, parent);
+    if (shape === "double_square") {
+      gvSvgEl("rect", { x: R(x - r * 0.85), y: R(y - r * 0.85), width: R(r * 1.7), height: R(r * 1.7), fill, stroke, "stroke-width": 1.5, class: "gnode-shape" }, parent);
+      return gvSvgEl("rect", { x: R(x - r * 0.55), y: R(y - r * 0.55), width: R(r * 1.1), height: R(r * 1.1), fill: "none", stroke, "stroke-width": 1, class: "gnode-shape" }, parent);
+    }
+    if (shape === "rounded_rect") return gvSvgEl("rect", { x: R(x - r), y: R(y - r * 0.7), width: R(r * 2), height: R(r * 1.4), rx: 3, fill, stroke, "stroke-width": 1.5, class: "gnode-shape" }, parent);
+    if (shape === "diamond") return gvSvgEl("polygon", { points: R(x) + "," + R(y - r) + " " + R(x + r) + "," + R(y) + " " + R(x) + "," + R(y + r) + " " + R(x - r) + "," + R(y), fill, stroke, "stroke-width": 1.5, class: "gnode-shape" }, parent);
+    if (shape === "triangle") return gvSvgEl("polygon", { points: R(x) + "," + R(y - r) + " " + R(x - r) + "," + R(y + r * 0.8) + " " + R(x + r) + "," + R(y + r * 0.8), fill, stroke, "stroke-width": 1.5, class: "gnode-shape" }, parent);
+    if (shape === "triangle_down") return gvSvgEl("polygon", { points: R(x) + "," + R(y + r) + " " + R(x - r) + "," + R(y - r * 0.8) + " " + R(x + r) + "," + R(y - r * 0.8), fill, stroke, "stroke-width": 1.5, class: "gnode-shape" }, parent);
+    if (shape === "ellipse") return gvSvgEl("ellipse", { cx: R(x), cy: R(y), rx: R(r * 1.25), ry: R(r * 0.8), fill, stroke, "stroke-width": 1.5, class: "gnode-shape" }, parent);
+    if (shape === "parallelogram") return gvSvgEl("polygon", { points: R(x - r * 0.6) + "," + R(y - r * 0.8) + " " + R(x + r) + "," + R(y - r * 0.8) + " " + R(x + r * 0.6) + "," + R(y + r * 0.8) + " " + R(x - r) + "," + R(y + r * 0.8), fill, stroke, "stroke-width": 1.5, class: "gnode-shape" }, parent);
+    const sides = shape === "pentagon" ? 5 : shape === "octagon" ? 8 : 6;
+    return gvSvgEl("polygon", { points: pts(sides, -Math.PI / 2), fill, stroke, "stroke-width": 1.5, class: "gnode-shape" }, parent);
+  }
+
+  function gvRender() {
+    const svg = $("graph-canvas");
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    const g = gvSvgEl("g", { "data-root": "1" }, svg);
+    if (!gv.loaded) { gvStatus("No graph loaded."); return; }
+    let visible = gvVisible();
+    visible = gvAutoCluster(visible);
+    const nodes = visible.nodes.slice(0, GV_RENDER_NODES);
+    const edges = visible.edges.slice(0, GV_RENDER_EDGES);
+    const shownIds = new Set(nodes.map((n) => n.id));
+    const posOf = (id) => gv.positions.get(id) || [500, 350];
+    const query = $("graph-q").value.trim().toLowerCase();
+    for (const e of edges) {
+      if (!shownIds.has(e.from) || !shownIds.has(e.to)) continue;
+      const [x1, y1] = posOf(e.from), [x2, y2] = posOf(e.to);
+      const line = gvSvgEl("line", {
+        x1: x1.toFixed(1), y1: y1.toFixed(1), x2: x2.toFixed(1), y2: y2.toFixed(1),
+        class: "glink" + (e.observed === false ? " inferred" : "") + (gv.selection.has("e:" + e.from + "|" + e.to + "|" + e.relation) ? " selected" : ""),
+        "stroke-width": e.thickness || 1.5, tabindex: "0", role: "button",
+        "aria-label": "Relationship " + (e.display_relation || e.relation) + ", confidence " + e.confidence,
+      }, g);
+      line.addEventListener("click", (ev) => { ev.stopPropagation(); gvSelectEdge(e, ev.ctrlKey || ev.metaKey); });
+      line.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); gvSelectEdge(e, false); }
+      });
+    }
+    for (const n of nodes) {
+      const [x, y] = posOf(n.id);
+      const kind = gvKindOf(n);
+      const wrap = gvSvgEl("g", {
+        class: "gnode-wrap" + (gv.selection.has(n.id) ? " selected" : "") + (query && (n.label + " " + n.id).toLowerCase().includes(query) ? " highlighted" : ""),
+        tabindex: "0", role: "button",
+        "aria-label": "Entity " + kind + " " + n.label + ", confidence " + (n.link_confidence === null || n.link_confidence === undefined ? "unrated" : n.link_confidence),
+      }, g);
+      wrap.setAttribute("data-node", n.id);
+      const r = kind === "cluster" ? Math.min(20, 6 + Math.sqrt(n.member_count || 1) * 2) : 8;
+      const shape = gvDrawShape(wrap, gvShape(kind), x, y, r, gvColor(kind));
+      shape.addEventListener("click", (ev) => { ev.stopPropagation(); gvSelectNode(n.id, ev.ctrlKey || ev.metaKey); });
+      shape.addEventListener("dblclick", (ev) => { ev.stopPropagation(); gvExpandCluster(n.id); });
+      wrap.addEventListener("click", (ev) => { ev.stopPropagation(); gvSelectNode(n.id, ev.ctrlKey || ev.metaKey); });
+      wrap.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); gvSelectNode(n.id, false); }
+      });
+      wrap.addEventListener("pointerdown", (ev) => {
+        if (ev.button !== 0 || ev.shiftKey) return;
+        ev.stopPropagation();
+        gvDragNode(n.id, ev);
+      });
+      const label = String(n.label || n.id);
+      const t = gvSvgEl("text", { x: (x + r + 3).toFixed(1), y: (y + 4).toFixed(1), class: "glabel" }, wrap);
+      t.textContent = label.length > 24 ? label.slice(0, 23) + "…" : label;
+    }
+    gvRenderLegend(visible.nodes);
+    gvApplyTransform();
+    const total = gv.nodes.length;
+    gvStatus(
+      "Showing " + nodes.length + " of " + total + " nodes, " + edges.length + " relationships" +
+      (visible.nodes.length > nodes.length || visible.edges.length > edges.length ? " (render caps; filter or zoom to narrow)" : "") +
+      (gv.truncated ? " (server truncated; narrow filters or export via CLI)" : "") +
+      ". Shift-drag selects an area; right-click a node for actions."
+    );
+  }
+
+  function gvRenderLegend(nodes) {
+    const ul = $("graph-legend");
+    clear(ul);
+    const kinds = Array.from(new Set(nodes.map(gvKindOf))).sort();
+    for (const k of kinds) {
+      const li = document.createElement("li");
+      const sw = document.createElement("span");
+      sw.className = "swatch";
+      sw.style.background = gvColor(k);
+      li.append(sw, document.createTextNode(k + " (" + gvShape(k) + ")"));
+      ul.appendChild(li);
+    }
+    if (!kinds.length) ul.appendChild(el("li", "No entities — empty graph."));
+    const solid = document.createElement("li");
+    solid.textContent = "solid = observed · dashed = inferred · width = confidence";
+    ul.appendChild(solid);
+  }
+
+  /* -- selection + detail -------------------------------------------------- */
+  function gvKv(dl, k, v) {
+    const div = document.createElement("div");
+    const dt = document.createElement("dt");
+    dt.textContent = k;
+    const dd = document.createElement("dd");
+    dd.textContent = v === null || v === undefined || v === "" ? "—" : String(v);
+    div.append(dt, dd);
+    dl.appendChild(div);
+  }
+  function gvSelectNode(id, additive) {
+    if (!additive) gv.selection.clear();
+    if (gv.selection.has(id)) gv.selection.delete(id);
+    else gv.selection.add(id);
+    gvRender();
+    const single = gv.selection.size === 1 ? Array.from(gv.selection)[0] : null;
+    if (single && !single.startsWith("e:")) gvShowNode(single).catch(() => {});
+    else if (single) gvShowEdgeById(single);
+  }
+  function gvSelectEdge(e, additive) {
+    const id = "e:" + e.from + "|" + e.to + "|" + e.relation;
+    if (!additive) gv.selection.clear();
+    gv.selection.add(id);
+    gvRender();
+    gvShowEdge(e);
+  }
+  function gvShowEdgeById(id) {
+    const parts = id.slice(2).split("|");
+    const e = gv.edges.find((x) => x.from === parts[0] && x.to === parts[1] && String(x.relation) === parts[2]);
+    if (e) gvShowEdge(e);
+  }
+  async function gvShowNode(id) {
+    const box = $("graph-inspect"), empty = $("graph-inspect-empty");
+    const rep = gvRep(id);
+    if (rep !== id) {
+      empty.hidden = true; box.hidden = false; clear(box);
+      const entry = gv.collapsed.get(rep);
+      gvKv(box, "collection", entry.label);
+      gvKv(box, "members", entry.members.length);
+      gvKv(box, "hint", "Double-click or right-click to expand.");
+      return;
+    }
+    try {
+      const detail = await api("/api/v1/projects/" + encodeURIComponent(activeProject()) + "/graph/node?node=" + encodeURIComponent(id));
+      empty.hidden = true; box.hidden = false; clear(box);
+      const n = detail.node || {};
+      gvKv(box, "label", n.label);
+      gvKv(box, "kind", gvKindOf(n) + " (" + (n.stored_kind || "?") + ")");
+      gvKv(box, "confidence", n.link_confidence === null || n.link_confidence === undefined ? "unrated (no incident relationships)" : n.link_confidence + " (strongest linked relationship)");
+      gvKv(box, "scope", n.scope);
+      gvKv(box, "observations", n.observations);
+      Object.keys(n.attributes || {}).sort().forEach((k) => gvKv(box, "attr " + k, n.attributes[k]));
+      (detail.evidence_chain || []).slice(0, 16).forEach((link, i) => {
+        gvKv(box, "evidence " + (i + 1), link.summary + " — " + link.module);
+      });
+      gvKv(box, "explanation", detail.explanation);
+    } catch (err) {
+      gvStatus("Detail unavailable: " + err.message);
+    }
+  }
+  function gvShowEdge(e) {
+    const box = $("graph-inspect"), empty = $("graph-inspect-empty");
+    empty.hidden = true; box.hidden = false; clear(box);
+    gvKv(box, "relationship", (e.display_relation || e.relation) + " (" + (e.stored_relation || e.relation) + ")");
+    gvKv(box, "style", e.observed === false ? "dashed (inferred)" : "solid (directly observed)");
+    gvKv(box, "confidence", e.confidence);
+    gvKv(box, "from", e.from);
+    gvKv(box, "to", e.to);
+    gvKv(box, "module", e.module);
+    gvKv(box, "scan run", e.scan_run);
+    (e.evidence || []).forEach((x, i) => gvKv(box, "evidence " + (i + 1), x));
+  }
+
+  /* -- data ---------------------------------------------------------------- */
+  async function gvLoad() {
+    const project = activeProject();
+    const minConf = Number($("graph-minconf").value || 0);
+    gvStatus("Loading graph for project " + project + "…");
+    try {
+      const data = await api("/api/v1/projects/" + encodeURIComponent(project) + "/graph?limit=5000&min_confidence=" + minConf);
+      gv.nodes = data.nodes || [];
+      gv.edges = data.edges || [];
+      gv.byId = new Map(gv.nodes.map((n) => [n.id, n]));
+      gv.truncated = !!data.truncated;
+      gv.hidden.clear(); gv.pinned.clear(); gv.selection.clear();
+      for (const [superId, entry] of gv.collapsed) {
+        if (entry.auto) gv.collapsed.delete(superId);
+      }
+      gv.undo.length = 0; gv.redo.length = 0;
+      gv.layout = $("graph-layout").value;
+      gvRelayout();
+      gv.loaded = true;
+      gvRender();
+    } catch (err) {
+      gv.loaded = false;
+      gvRender();
+      gvStatus("Graph unavailable: " + err.message);
+    }
+  }
+  function gvRelayout() {
+    const visible = gvVisible();
+    const ids = visible.nodes.map((n) => n.id);
+    const seed = gv.selection.size === 1 ? Array.from(gv.selection)[0] : null;
+    const computed = gvComputeLayout(ids, visible.edges, gv.layout, seed);
+    for (const [id, p] of computed) {
+      if (!gv.pinned.has(id) || !gv.positions.has(id)) gv.positions.set(id, p);
+    }
+  }
+  $("graph-load").addEventListener("click", gvLoad);
+  $("graph-layout").addEventListener("change", () => {
+    gvSnapshot();
+    gv.layout = $("graph-layout").value;
+    gvRelayout();
+    gvRender();
+  });
+  $("graph-kind").addEventListener("change", gvRender);
+  $("graph-minconf").addEventListener("input", () => {
+    $("graph-minconf-val").textContent = $("graph-minconf").value;
+  });
+  $("graph-minconf").addEventListener("change", gvLoad);
+  $("graph-q").addEventListener("input", gvRender);
+  // Kind options mirror the Rust DisplayKind vocabulary.
+  for (const k of GV_KINDS) {
+    const o = document.createElement("option");
+    o.value = k;
+    o.textContent = k;
+    $("graph-kind").appendChild(o);
+  }
+
+  /* -- pan / zoom / box select / drag -------------------------------------- */
+  const gvSvg = () => $("graph-canvas");
+  function gvScreenToWorld(clientX, clientY) {
+    const r = gvSvg().getBoundingClientRect();
+    const vb = gvSvg().viewBox.baseVal;
+    const sx = (clientX - r.left) * (vb.width / r.width);
+    const sy = (clientY - r.top) * (vb.height / r.height);
+    return [(sx - gvView.x) / gvView.k, (sy - gvView.y) / gvView.k];
+  }
+  function gvZoom(f) {
+    gvView.k = Math.min(4, Math.max(0.4, gvView.k * f));
+    gvApplyTransform();
+  }
+  $("graph-zin").addEventListener("click", () => gvZoom(1.25));
+  $("graph-zout").addEventListener("click", () => gvZoom(0.8));
+  $("graph-zreset").addEventListener("click", () => { gvView.x = 0; gvView.y = 0; gvView.k = 1; gvApplyTransform(); });
+  gvSvg().addEventListener("wheel", (ev) => {
+    ev.preventDefault();
+    gvZoom(ev.deltaY < 0 ? 1.1 : 0.9);
+  }, { passive: false });
+
+  let gvPan = null, gvBox = null;
+  gvSvg().addEventListener("pointerdown", (ev) => {
+    hideCtxMenu();
+    if (ev.button !== 0) return;
+    gvSvg().setPointerCapture(ev.pointerId);
+    if (ev.shiftKey) {
+      const [wx, wy] = gvScreenToWorld(ev.clientX, ev.clientY);
+      gvBox = { x0: wx, y0: wy, x1: wx, y1: wy, el: null };
+    } else {
+      gvPan = { x: ev.clientX, y: ev.clientY, vx: gvView.x, vy: gvView.y, moved: false };
+    }
+  });
+  gvSvg().addEventListener("pointermove", (ev) => {
+    if (gvBox) {
+      const [wx, wy] = gvScreenToWorld(ev.clientX, ev.clientY);
+      gvBox.x1 = wx; gvBox.y1 = wy;
+      drawBox();
+    } else if (gvPan) {
+      const dx = ev.clientX - gvPan.x, dy = ev.clientY - gvPan.y;
+      if (Math.abs(dx) + Math.abs(dy) > 3) gvPan.moved = true;
+      gvView.x = gvPan.vx + dx; gvView.y = gvPan.vy + dy;
+      gvApplyTransform();
+    }
+  });
+  gvSvg().addEventListener("pointerup", (ev) => {
+    if (gvBox) {
+      boxSelect();
+      gvBox = null;
+    } else if (gvPan && !gvPan.moved) {
+      gv.selection.clear();
+      gvRender();
+    }
+    gvPan = null;
+  });
+  function drawBox() {
+    const svg = gvSvg();
+    let rect = svg.querySelector("rect.graph-box");
+    if (!rect) {
+      const g = svg.querySelector("g[data-root]");
+      rect = gvSvgEl("rect", { class: "graph-box" }, g);
+      gvBox.el = rect;
+    }
+    const x = Math.min(gvBox.x0, gvBox.x1), y = Math.min(gvBox.y0, gvBox.y1);
+    rect.setAttribute("x", x); rect.setAttribute("y", y);
+    rect.setAttribute("width", Math.abs(gvBox.x1 - gvBox.x0));
+    rect.setAttribute("height", Math.abs(gvBox.y1 - gvBox.y0));
+  }
+  function boxSelect() {
+    const x = Math.min(gvBox.x0, gvBox.x1), y = Math.min(gvBox.y0, gvBox.y1);
+    const w = Math.abs(gvBox.x1 - gvBox.x0), h = Math.abs(gvBox.y1 - gvBox.y0);
+    gv.selection.clear();
+    for (const [id, p] of gv.positions) {
+      if (p[0] >= x && p[0] <= x + w && p[1] >= y && p[1] <= y + h) gv.selection.add(id);
+    }
+    gvRender();
+    gvStatus(gv.selection.size + " selected.");
+  }
+  let gvDrag = null;
+  function gvDragNode(id, ev) {
+    gvSnapshot();
+    const start = gvScreenToWorld(ev.clientX, ev.clientY);
+    const orig = gv.positions.get(id) || [500, 350];
+    const dx = orig[0] - start[0], dy = orig[1] - start[1];
+    const move = (me) => {
+      const [wx, wy] = gvScreenToWorld(me.clientX, me.clientY);
+      gv.positions.set(id, [wx + dx, wy + dy]);
+      gvApplyPositions();
+    };
+    const up = () => {
+      gvSvg().removeEventListener("pointermove", move);
+      gvSvg().removeEventListener("pointerup", up);
+      if (gvDrag && gvDrag.moved) { gv.pinned.add(id); }
+      gvDrag = null;
+    };
+    gvDrag = { moved: true };
+    gvSvg().addEventListener("pointermove", move);
+    gvSvg().addEventListener("pointerup", up);
+  }
+  function gvApplyPositions() {
+    // Move rendered nodes without a full re-render (drag stays smooth).
+    const svg = gvSvg();
+    const g = svg.querySelector("g[data-root]");
+    if (!g) return;
+    gvRender();
+  }
+
+  /* -- context menu: stored-data actions only ------------------------------ */
+  function hideCtxMenu() {
+    const m = $("graph-menu");
+    m.hidden = true;
+    clear(m);
+  }
+  function gvCopy(text) {
+    const done = () => gvStatus("Copied (masked where required).");
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, () => gvStatus("Copy failed."));
+    } else {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand("copy"); done(); } catch (_) { gvStatus("Copy failed."); }
+      document.body.removeChild(ta);
+    }
+  }
+  gvSvg().addEventListener("contextmenu", (ev) => {
+    ev.preventDefault();
+    const target = ev.target.closest ? ev.target.closest(".gnode-wrap") : null;
+    const m = $("graph-menu");
+    clear(m);
+    m.hidden = false;
+    const wrap = gvSvg().parentElement;
+    m.style.left = Math.min(ev.clientX - wrap.getBoundingClientRect().left, wrap.clientWidth - 200) + "px";
+    m.style.top = (ev.clientY - wrap.getBoundingClientRect().top) + "px";
+    const add = (label, fn) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.setAttribute("role", "menuitem");
+      b.textContent = label;
+      b.addEventListener("click", () => { hideCtxMenu(); fn(); });
+      m.appendChild(b);
+    };
+    const note = document.createElement("p");
+    note.className = "ctx-note";
+    note.textContent = "Stored evidence only — no network activity.";
+    m.appendChild(note);
+    // Resolve the node under the pointer via its data attribute.
+    let id = null;
+    if (target && target.getAttribute("data-node")) {
+      id = target.getAttribute("data-node");
+      if (!gv.selection.has(id)) {
+        gv.selection.clear();
+        gv.selection.add(id);
+        gvRender();
+      }
+    }
+    if (!id || id.startsWith("e:")) {
+      add("Clear selection", () => { gv.selection.clear(); gvRender(); });
+      m.querySelector("button").focus();
+      return;
+    }
+    const nodeId = id;
+    add("Show detail", () => gvShowNode(nodeId).catch(() => {}));
+    add("Expand neighbors (stored)", () => gvExpand(nodeId).catch(() => {}));
+    add(gv.pinned.has(nodeId) ? "Unpin" : "Pin position", () => {
+      gvSnapshot();
+      if (gv.pinned.has(nodeId)) gv.pinned.delete(nodeId);
+      else gv.pinned.add(nodeId);
+      gvRender();
+    });
+    add("Hide node", () => {
+      gvSnapshot();
+      gv.hidden.add(nodeId);
+      gv.selection.delete(nodeId);
+      gvRender();
+    });
+    if (gv.collapsed.has(nodeId)) {
+      add("Expand collection", () => {
+        gvSnapshot();
+        gv.collapsed.delete(nodeId);
+        gvRelayout();
+        gvRender();
+      });
+    }
+    add("Copy value (masked)", () => {
+      const n = gv.byId.get(nodeId);
+      gvCopy(n ? n.label + " [" + gvKindOf(n) + "]" : nodeId);
+    });
+    m.querySelector("button").focus();
+  });
+  document.addEventListener("click", (ev) => {
+    const m = $("graph-menu");
+    if (!m.hidden && !m.contains(ev.target)) hideCtxMenu();
+  });
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape") hideCtxMenu();
+  });
+
+  async function gvExpand(nodeId) {
+    gvStatus("Expanding stored neighbors of " + nodeId + "…");
+    try {
+      const data = await api("/api/v1/projects/" + encodeURIComponent(activeProject()) + "/graph/neighbors?node=" + encodeURIComponent(nodeId) + "&limit=100");
+      gvSnapshot();
+      let added = 0;
+      for (const nb of data.neighbors || []) {
+        if (!gv.byId.has(nb.id)) {
+          gv.nodes.push({
+            id: nb.id, kind: nb.kind, display_kind: nb.display_kind || nb.kind,
+            label: nb.label, link_confidence: nb.confidence,
+          });
+          gv.byId.set(nb.id, gv.nodes[gv.nodes.length - 1]);
+          added++;
+        }
+        if (!gv.edges.some((e) => e.from === nodeId && e.to === nb.id && String(e.relation) === nb.stored_relation)) {
+          gv.edges.push({
+            from: nodeId, to: nb.id, relation: nb.stored_relation,
+            display_relation: nb.relation, observed: nb.observed,
+            confidence: nb.confidence, thickness: 1 + 3 * nb.confidence / 100,
+            module: nb.module, scan_run: nb.scan_run,             evidence: nb.evidence ? [nb.evidence] : [],
+          });
+        }
+      }
+      gvRelayout();
+      gvRender();
+      gvStatus("Added " + added + " stored neighbors (no network).");
+    } catch (err) {
+      gvStatus("Expand failed: " + err.message);
+    }
+  }
+
+  /* -- manual groups -------------------------------------------------------- */
+  $("graph-group").addEventListener("click", () => {
+    const members = Array.from(gv.selection).filter((id) => !id.startsWith("e:") && gvRep(id) === id);
+    if (members.length < 2) { gvStatus("Select two or more nodes to group."); return; }
+    gvSnapshot();
+    gv.groupSeq++;
+    const gid = "group:" + gv.groupSeq;
+    let conf = null;
+    members.forEach((id) => {
+      const n = gv.byId.get(id);
+      const c = n && n.link_confidence !== undefined && n.link_confidence !== null ? n.link_confidence : null;
+      if (c !== null && (conf === null || c > conf)) conf = c;
+    });
+    gv.collapsed.set(gid, { auto: false, label: "Group of " + members.length, members: members.slice().sort(), confidence: conf });
+    gv.selection.clear();
+    gv.selection.add(gid);
+    gvRelayout();
+    gvRender();
+    gvStatus("Grouped " + members.length + " nodes.");
+  });
+  $("graph-ungroup").addEventListener("click", () => {
+    const groups = Array.from(gv.selection).filter((id) => gv.collapsed.has(id));
+    if (!groups.length) { gvStatus("Select a group or collection to expand."); return; }
+    gvSnapshot();
+    groups.forEach((g) => gv.collapsed.delete(g));
+    gvRelayout();
+    gvRender();
+    gvStatus("Expanded.");
+  });
+  function gvExpandCluster(id) {
+    if (!gv.collapsed.has(id)) return;
+    gvSnapshot();
+    gv.collapsed.delete(id);
+    gvRelayout();
+    gvRender();
+    gvStatus("Expanded collection.");
+  }
+
+  /* -- collections ----------------------------------------------------------- */
+  function gvRefreshCollections() {
+    const sel = $("graph-collection");
+    clear(sel);
+    const none = document.createElement("option");
+    none.value = "";
+    none.textContent = "none";
+    sel.appendChild(none);
+    for (const name of Array.from(gv.collections.keys()).sort()) {
+      const o = document.createElement("option");
+      o.value = name;
+      o.textContent = name + " (" + gv.collections.get(name).length + ")";
+      sel.appendChild(o);
+    }
+  }
+  $("graph-col-save").addEventListener("click", () => {
+    const name = $("graph-col-name").value.trim();
+    const members = Array.from(gv.selection).filter((id) => !id.startsWith("e:"));
+    if (!name) { gvStatus("Type a collection name first."); return; }
+    if (!members.length) { gvStatus("Select nodes to save into the collection."); return; }
+    gv.collections.set(name, members.slice().sort());
+    gvRefreshCollections();
+    $("graph-collection").value = name;
+    gvStatus("Saved collection " + name + " (" + members.length + " nodes).");
+  });
+  $("graph-col-apply").addEventListener("click", () => {
+    const name = $("graph-collection").value;
+    const members = gv.collections.get(name);
+    if (!members) { gvStatus("No such collection."); return; }
+    gv.selection.clear();
+    members.forEach((id) => gv.selection.add(id));
+    gvRender();
+    gvStatus("Applied collection " + name + ".");
+  });
+  $("graph-col-delete").addEventListener("click", () => {
+    const name = $("graph-collection").value;
+    if (gv.collections.delete(name)) {
+      gvRefreshCollections();
+      gvStatus("Deleted collection " + name + ".");
+    } else {
+      gvStatus("No such collection.");
+    }
+  });
+
+  /* -- keyboard -------------------------------------------------------------- */
+  gvSvg().addEventListener("keydown", (ev) => {
+    const visible = gvVisible().nodes.map((n) => n.id).sort();
+    if (!visible.length) return;
+    const current = Array.from(gv.selection).filter((id) => !id.startsWith("e:"))[0] || null;
+    const idx = current ? visible.indexOf(current) : -1;
+    if (ev.key === "ArrowRight" || ev.key === "ArrowDown") {
+      ev.preventDefault();
+      gvSelectNode(visible[(idx + 1 + visible.length) % visible.length], false);
+    } else if (ev.key === "ArrowLeft" || ev.key === "ArrowUp") {
+      ev.preventDefault();
+      gvSelectNode(visible[(idx - 1 + visible.length) % visible.length], false);
+    } else if (ev.key === "+" || ev.key === "=") {
+      ev.preventDefault();
+      gvZoom(1.25);
+    } else if (ev.key === "-") {
+      ev.preventDefault();
+      gvZoom(0.8);
+    } else if (ev.key === "Delete" || ev.key === "Backspace") {
+      ev.preventDefault();
+      if (current) {
+        gvSnapshot();
+        gv.hidden.add(current);
+        gv.selection.delete(current);
+        gvRender();
+        gvStatus("Hidden. Undo restores it.");
+      }
+    }
+  });
+
+  /* -- init ------------------------------------------------------------------ */
+  gvRefreshCollections();
 
   /* -- init: slow heartbeat only, never aggressive health/project polling --- */
   /* Health heartbeat is slow (60s) and skips when hidden. Projects refresh

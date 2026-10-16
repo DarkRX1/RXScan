@@ -27,6 +27,7 @@ pub mod extract;
 pub mod fingerprints;
 pub mod fuzz;
 pub mod graph;
+pub mod graph_view;
 pub mod host_discovery;
 pub mod hypothesis;
 pub mod icmp;

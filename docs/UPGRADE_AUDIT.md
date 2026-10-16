@@ -32,7 +32,7 @@ prompt snapshot. Where the snapshot was wrong it is called out.
   evidence (`graph.rs:551-569`). Self-edges dropped; edges to missing
   entities dropped.
 
-**Node types — `EntityKind` (`graph.rs:31-65`, 33 variants).** The prompt's
+**Node types — `EntityKind` (`graph.rs:31-65`, 32 variants).** The prompt's
 Phase-1 list (Network, IP, Host, Port/Service, Software/Version, Certificate,
 Domain, URL, Username, Account/Profile, Exposure Finding, Evidence, Scope)
 does NOT match the code 1:1. Actual variants: `Username, EmailAddress,
@@ -45,10 +45,10 @@ dedicated `Evidence`, `Scope`, or `Url` kind (`WebEndpoint` covers URLs;
 scope state rides on edge attributes, e.g. `HasSan` edges carry
 `contacted=false` + `scope=in-scope-uncontacted|outside-scope|scope-unknown`,
 `graph.rs:1192-1195`). `graph_view.rs` must therefore define a *view* mapping
-(lens) from these 33 stored kinds to the 14 upgrade-spec display entities
+(lens) from these 32 stored kinds to the 13 upgrade-spec display entities
 rather than renaming the stored model (renames would break DB compat).
 
-**Edge types — `EdgeRelation` (`graph.rs:153-223`, 42 variants):**
+**Edge types — `EdgeRelation` (`graph.rs:153-223`, 43 variants):**
 `HasAccount, UsesUsername, LinksTo, ReverseResolvesTo, BelongsToAsn,
 AnnouncesPrefix, FoundBy, HasAddress, ResolvesTo, ListensOn, RunsService,
 PresentsCertificate, PresentsSshHostKey, HasSan, RedirectsTo, IdentifiedBy,
@@ -149,7 +149,7 @@ ramp + shape/label redundancy (contract: never color-alone).
 ## 4. Per-phase: exists / missing / plan
 
 ### Phase 1 — Maltego-style graph (priority)
-- **Exists:** 33-kind/42-relation bounded evidence graph (`graph.rs`);
+- **Exists:** 32-kind/43-relation bounded evidence graph (`graph.rs`);
   `certificate_reuse`/`ssh_key_reuse` correlation; `find_path` explain
   primitive; SQLite persistence + seed-BFS API DTOs; `rxscan project graph |
   neighbors | related | path | show | explain` CLI (`main.rs:~2055-2343`);

@@ -42,6 +42,7 @@
         <a href="#/investigate" data-nav="investigate">Investigate</a>
         <a href="#/projects" data-nav="projects">Projects</a>
         <a href="#/jobs" data-nav="jobs">Jobs</a>
+        <a href="#/graph" data-nav="graph">Graph</a>
         <p class="sidebar-note">Local-only. Loopback API at <span class="mono">/api/v1</span>.</p>
       </nav>
 
@@ -541,6 +542,58 @@
             <h3>Result</h3>
             <pre class="result" id="d-result">—</pre>
           </article>
+        </section>
+
+        <!-- GRAPH -->
+        <section id="view-graph" aria-labelledby="graph-title" hidden>
+          <h1 id="graph-title">Graph</h1>
+          <p class="muted">Link analysis over stored project evidence. Solid lines are directly observed; dashed lines are inferred. Width grows with confidence. Expansion reads stored data only — never the network.</p>
+          <div class="graph-toolbar" role="toolbar" aria-label="Graph controls">
+            <button type="button" id="graph-load">Load graph</button>
+            <label for="graph-layout">Layout</label>
+            <select id="graph-layout">
+              <option value="organic" selected>organic</option>
+              <option value="hierarchical">hierarchical</option>
+              <option value="circular">circular</option>
+              <option value="block">block</option>
+              <option value="radial">radial from selection</option>
+            </select>
+            <label for="graph-kind">Type</label>
+            <select id="graph-kind"><option value="">all types</option></select>
+            <label for="graph-minconf">Min confidence <output id="graph-minconf-val" for="graph-minconf">0</output></label>
+            <input id="graph-minconf" type="range" min="0" max="100" step="5" value="0" />
+            <label for="graph-q">Search</label>
+            <input id="graph-q" type="text" value="" autocomplete="off" spellcheck="false" aria-label="Search and highlight nodes" />
+          </div>
+          <div class="graph-toolbar" role="toolbar" aria-label="Graph selection and history">
+            <button type="button" id="graph-zin">Zoom in</button>
+            <button type="button" id="graph-zout">Zoom out</button>
+            <button type="button" id="graph-zreset">Reset view</button>
+            <button type="button" id="graph-undo">Undo</button>
+            <button type="button" id="graph-redo">Redo</button>
+            <button type="button" id="graph-group">Group selection</button>
+            <button type="button" id="graph-ungroup">Ungroup</button>
+            <label for="graph-collection">Collection</label>
+            <select id="graph-collection"><option value="">none</option></select>
+            <label for="graph-col-name">Name</label>
+            <input id="graph-col-name" type="text" value="" autocomplete="off" spellcheck="false" aria-label="Collection name" />
+            <button type="button" id="graph-col-save">Save selection</button>
+            <button type="button" id="graph-col-apply">Apply</button>
+            <button type="button" id="graph-col-delete">Delete</button>
+          </div>
+          <p class="muted" id="graph-status" role="status" aria-live="polite">No graph loaded.</p>
+          <div class="graph-split">
+            <div class="graph-canvas-wrap">
+              <svg id="graph-canvas" viewBox="0 0 1000 700" role="application" aria-label="Project evidence graph. Arrow keys move selection, Enter shows detail." tabindex="0"></svg>
+              <div id="graph-menu" class="ctx-menu" hidden role="menu" aria-label="Node actions"></div>
+            </div>
+            <aside class="inspector" aria-labelledby="graph-inspect-t" aria-live="polite">
+              <h3 id="graph-inspect-t">Detail</h3>
+              <p class="muted" id="graph-inspect-empty">Select a node or relationship.</p>
+              <dl class="kv" id="graph-inspect" hidden></dl>
+            </aside>
+          </div>
+          <ul class="legend" id="graph-legend"></ul>
         </section>
       </main>
     </div>

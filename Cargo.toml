@@ -69,6 +69,11 @@ x509-parser = "0.16"
 [dev-dependencies]
 rcgen = "0.13"
 
+# Graph scale bench: stable-compatible manual harness (no criterion).
+[[bench]]
+name = "graph_scale"
+harness = false
+
 # Android embedding reuses the same library: the APK loads librxscan.so
 # (cdylib) and starts the loopback server via the narrow `android` JNI
 # module. rlib stays for the desktop binary and tests.

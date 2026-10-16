@@ -1424,6 +1424,365 @@ pub fn to_graph_items(
 }
 
 // ---------------------------------------------------------------------------
+// Display masking: graph views, exports, reports, API payloads, webhooks.
+//
+// Unlike `normalize_record` (which drops secrets at the provider boundary),
+// these helpers sanitize *already-stored* strings before they reach any
+// human- or machine-readable artifact. Scan evidence, URLs, and attributes
+// can legitimately contain secret-shaped material (userinfo passwords,
+// `?token=` query strings, pasted key blocks); every graph/CLI/API/export
+// path must pass display strings through here.
+//
+// Rules: secret-keyed attribute values become `[redacted]` wholesale;
+// free text is scrubbed for assignment-shaped secrets, URL userinfo,
+// secret query parameters, bearer tokens, and PEM armor blocks.
+// Bounded: inputs over 8 KiB are truncated before scanning so hostile
+// field sizes cannot drive unbounded work.
+// ---------------------------------------------------------------------------
+
+/// Replacement shown wherever secret material was removed.
+pub const MASK_REPLACEMENT: &str = "[redacted]";
+
+/// Maximum display string scanned for secret shapes (bounded work).
+pub const MAX_SCRUB_BYTES: usize = 8192;
+
+/// Short secret names for *display* scrubbing. Broader than the provider
+/// classifier above (which must stay byte-stable for accounting): bare
+/// `token`/`secret` names can carry usable material in URLs and labels.
+const DISPLAY_SECRET_NAMES: &[&str] = &[
+    "password",
+    "passwd",
+    "pwd",
+    "secret",
+    "token",
+    "apikey",
+    "api_key",
+    "auth",
+    "credential",
+    "cookie",
+    "session",
+    "private_key",
+    "card",
+    "cvv",
+];
+
+/// Display-side secret-name test: provider classifier plus the short
+/// display names (exact match after normalization).
+pub fn is_display_secret_name(name: &str) -> bool {
+    if is_secret_key(name) {
+        return true;
+    }
+    let normalized: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect::<String>()
+        .to_ascii_lowercase();
+    DISPLAY_SECRET_NAMES.contains(&normalized.as_str())
+}
+
+/// True when an attribute *name* marks its value as usable secret material.
+/// Same classifier as provider-response normalization, reused for display.
+pub fn is_secret_key_name(key: &str) -> bool {
+    is_secret_key(key)
+}
+
+/// Mask one attribute value for display: secret-keyed values are replaced
+/// wholesale, other values are scrubbed for embedded secret shapes.
+pub fn mask_value_for_key(key: &str, value: &str) -> String {
+    if is_display_secret_name(key) {
+        return MASK_REPLACEMENT.to_owned();
+    }
+    scrub_text(value)
+}
+
+/// Mask a whole attribute map for display (labels, exports, API payloads).
+pub fn mask_attributes(attrs: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    attrs
+        .iter()
+        .map(|(key, value)| (key.clone(), mask_value_for_key(key, value)))
+        .collect()
+}
+
+/// Scrub secret shapes from free display text: URL userinfo passwords,
+/// secret query parameters, `key=value`/`key: value` assignments with
+/// secret-like keys, bearer tokens, and PEM armor blocks.
+pub fn scrub_text(text: &str) -> String {
+    let bounded = truncate_bytes(text, MAX_SCRUB_BYTES);
+    let scrubbed = scrub_pem_blocks(&bounded);
+    let scrubbed = scrub_userinfo(&scrubbed);
+    let scrubbed = scrub_query_params(&scrubbed);
+    let scrubbed = scrub_assignments(&scrubbed);
+    scrub_bearer(&scrubbed)
+}
+
+fn truncate_bytes(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_owned();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_owned()
+}
+
+/// `-----BEGIN X----- ... -----END X-----` becomes one `[redacted]` token
+/// (armor headers included: the block is secret material as a whole).
+fn scrub_pem_blocks(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("-----BEGIN ") {
+        let Some(header_end) = rest[start..].find("-----").map(|i| start + i + 5) else {
+            break;
+        };
+        let Some(end) = rest[header_end..].find("-----END ") else {
+            break;
+        };
+        let end = header_end + end;
+        let Some(close) = rest[end..].find("-----").map(|i| end + i + 5) else {
+            break;
+        };
+        out.push_str(&rest[..start]);
+        out.push_str(MASK_REPLACEMENT);
+        rest = &rest[close..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `scheme://user:password@host` keeps the user, drops the password.
+fn scrub_userinfo(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if let Some(scheme) = find_scheme_at(bytes, i) {
+            let after_scheme = i + scheme;
+            let tail = &text[after_scheme..];
+            if let Some(at) = tail.find('@') {
+                let host_part = &tail[at + 1..];
+                // Only treat as userinfo when what follows looks like a
+                // host (stops at first space or slash end): avoids eating
+                // prose containing '@'.
+                let host_end = host_part
+                    .find(|c: char| c.is_whitespace())
+                    .unwrap_or(host_part.len());
+                let host_candidate = &host_part[..host_end];
+                if host_candidate.contains('.')
+                    || host_candidate.contains(':')
+                    || host_candidate == "localhost"
+                {
+                    let userinfo = &tail[..at];
+                    out.push_str(&text[i..after_scheme]);
+                    if let Some(colon) = userinfo.find(':') {
+                        out.push_str(&userinfo[..colon + 1]);
+                        out.push_str(MASK_REPLACEMENT);
+                    } else {
+                        out.push_str(userinfo);
+                    }
+                    out.push('@');
+                    i = after_scheme + at + 1;
+                    continue;
+                }
+            }
+            out.push_str(&text[i..after_scheme]);
+            i = after_scheme;
+        } else {
+            // Copy one char (boundary-safe).
+            let ch = text[i..].chars().next().unwrap_or(' ');
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
+/// Length of `scheme://` at `bytes[i..]` when present, else `None`.
+fn find_scheme_at(bytes: &[u8], i: usize) -> Option<usize> {
+    let mut j = i;
+    while j < bytes.len() && bytes[j].is_ascii_alphanumeric() {
+        j += 1;
+    }
+    if j > i && j + 3 <= bytes.len() && &bytes[j..j + 3] == b"://" {
+        Some(j + 3 - i)
+    } else {
+        None
+    }
+}
+
+/// `?api_key=XYZ`, `&token=XYZ`, `;session=XYZ` values become `[redacted]`.
+/// Only the value is replaced; names and structure stay for debuggability.
+fn scrub_query_params(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    loop {
+        let next = rest
+            .find('?')
+            .or_else(|| rest.find('&'))
+            .or_else(|| rest.find(';'));
+        let Some(pos) = next else {
+            out.push_str(rest);
+            break;
+        };
+        let after = &rest[pos + 1..];
+        let name_end = after
+            .find(|c: char| c == '=' || c == '&' || c == ';' || c == '#' || c.is_whitespace())
+            .unwrap_or(after.len());
+        if after.as_bytes().get(name_end) == Some(&b'=') {
+            let name = &after[..name_end];
+            if is_display_secret_name(name) {
+                out.push_str(&rest[..pos + 1 + name_end + 1]);
+                out.push_str(MASK_REPLACEMENT);
+                // Skip the original value.
+                let value = &after[name_end + 1..];
+                let value_end = value
+                    .find(|c: char| {
+                        c == '&' || c == ';' || c == '#' || c == '"' || c.is_whitespace()
+                    })
+                    .unwrap_or(value.len());
+                rest = &value[value_end..];
+                continue;
+            }
+        }
+        out.push_str(&rest[..pos + 1]);
+        rest = &rest[pos + 1..];
+    }
+    out
+}
+
+/// `password=XYZ`, `api_key: XYZ`, `"secret" = "XYZ"` assignments with
+/// secret-like names have their values replaced. Matching is deliberately
+/// narrow (name, optional quotes/brackets, `=`/`:`) to avoid mangling
+/// prose; `scrub_query_params` already covers URLs.
+fn scrub_assignments(text: &str) -> String {
+    const SECRET_NAMES: &[&str] = DISPLAY_SECRET_NAMES;
+    let mut out = String::with_capacity(text.len());
+    let lower = text.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut i = 0;
+    while i < text.len() {
+        // Our own replacement token is atomic: never re-scan it (keeps
+        // masking idempotent across layered view/export paths).
+        if text[i..].starts_with(MASK_REPLACEMENT) {
+            out.push_str(MASK_REPLACEMENT);
+            i += MASK_REPLACEMENT.len();
+            continue;
+        }
+        let mut matched: Option<usize> = None;
+        for name in SECRET_NAMES {
+            if lower[i..].starts_with(name) {
+                // Left boundary: start, whitespace, quote, bracket, comma.
+                let left_ok = i == 0
+                    || matches!(
+                        bytes[i - 1],
+                        b' ' | b'\t' | b'\n' | b'"' | b'\'' | b'{' | b'[' | b',' | b'('
+                    );
+                if !left_ok {
+                    continue;
+                }
+                let mut j = i + name.len();
+                // Optional closing quote/bracket.
+                while j < text.len() && matches!(bytes[j], b'"' | b'\'' | b']') {
+                    j += 1;
+                }
+                while j < text.len() && matches!(bytes[j], b' ' | b'\t') {
+                    j += 1;
+                }
+                if j < text.len() && (bytes[j] == b'=' || bytes[j] == b':') {
+                    // `==` (equality) is prose/code, not assignment.
+                    if bytes[j] == b'=' && text.as_bytes().get(j + 1) == Some(&b'=') {
+                        continue;
+                    }
+                    matched = Some(j + 1);
+                    break;
+                }
+            }
+        }
+        if let Some(value_at) = matched {
+            // Re-emit `name` + separator verbatim, then redact the value.
+            out.push_str(&text[i..value_at]);
+            out.push_str(MASK_REPLACEMENT);
+            // Skip the original value: an already-masked token is
+            // consumed whole; an optional opening quote, then up to a
+            // delimiter (bounded so hostile runs cannot spin).
+            let tail = &text[value_at..];
+            let mut skip = 0usize;
+            if tail.starts_with(MASK_REPLACEMENT) {
+                skip = MASK_REPLACEMENT.len();
+            } else {
+                let mut chars = tail.chars();
+                if matches!(chars.clone().next(), Some('"') | Some('\'')) {
+                    skip += chars.next().map(|c| c.len_utf8()).unwrap_or(0);
+                }
+                for ch in chars {
+                    if matches!(
+                        ch,
+                        '"' | '\'' | ',' | '}' | ']' | ' ' | '\t' | '\n' | ';' | '&'
+                    ) {
+                        break;
+                    }
+                    skip += ch.len_utf8();
+                    if skip > 1024 {
+                        break;
+                    }
+                }
+            }
+            i = value_at + skip;
+            continue;
+        }
+        let ch = text[i..].chars().next().unwrap_or(' ');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// `Bearer <token>` / `Basic <secret>` credentials become
+/// `Bearer [redacted]`. Case-insensitive scheme, bounded value run.
+fn scrub_bearer(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let lower = text.to_ascii_lowercase();
+    let mut i = 0;
+    while i < text.len() {
+        let mut matched: Option<usize> = None;
+        for scheme in ["bearer ", "basic "] {
+            if lower[i..].starts_with(scheme) {
+                let left_ok = i == 0
+                    || matches!(
+                        text.as_bytes()[i - 1],
+                        b' ' | b'\t' | b'\n' | b'"' | b'\'' | b':' | b'('
+                    );
+                if left_ok {
+                    matched = Some(i + scheme.len());
+                    break;
+                }
+            }
+        }
+        if let Some(value_at) = matched {
+            out.push_str(&text[i..value_at]);
+            out.push_str(MASK_REPLACEMENT);
+            let tail = &text[value_at..];
+            let mut skip = 0usize;
+            for ch in tail.chars() {
+                if ch.is_whitespace() || matches!(ch, '"' | '\'' | ',' | '}' | ';') {
+                    break;
+                }
+                skip += ch.len_utf8();
+                if skip > 1024 {
+                    break;
+                }
+            }
+            i = value_at + skip;
+            continue;
+        }
+        let ch = text[i..].chars().next().unwrap_or(' ');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Capabilities.
 // ---------------------------------------------------------------------------
 
@@ -1581,5 +1940,55 @@ mod tests {
         let mail = crate::investigate::EmailToMailInfra;
         use crate::investigate::Transform;
         assert_eq!(mail.contact_class(), crate::search::ContactClass::DnsQuery);
+    }
+
+    #[test]
+    fn display_masking_redacts_secret_keyed_values() {
+        assert_eq!(mask_value_for_key("password", "hunter2"), MASK_REPLACEMENT);
+        assert_eq!(
+            mask_value_for_key("session_cookie", "abc"),
+            MASK_REPLACEMENT
+        );
+        assert_eq!(mask_value_for_key("source", "fixture"), "fixture");
+    }
+
+    #[test]
+    fn display_masking_scrubs_secret_shapes_in_text() {
+        // URL userinfo.
+        let scrubbed = scrub_text("https://admin:s3cret@example.test/path");
+        assert!(!scrubbed.contains("s3cret"));
+        assert!(scrubbed.contains("admin:"));
+        // Secret query parameters (structure preserved).
+        let scrubbed = scrub_text("https://example.test/cb?code=1&token=abc123&x=2");
+        assert!(!scrubbed.contains("abc123"));
+        assert!(scrubbed.contains("code=1"));
+        // Assignment shapes.
+        let scrubbed = scrub_text("login failed password=hunter2 for user");
+        assert!(!scrubbed.contains("hunter2"));
+        // Bearer tokens.
+        let scrubbed = scrub_text("Authorization: Bearer eyJhbGciOiJIUzI1NiJ9");
+        assert!(!scrubbed.contains("eyJhbGciOiJIUzI1NiJ9"));
+        // PEM blocks.
+        let scrubbed =
+            scrub_text("key -----BEGIN PRIVATE KEY-----\nQUJD\n-----END PRIVATE KEY----- done");
+        assert!(!scrubbed.contains("QUJD"));
+        assert!(scrubbed.contains("done"));
+        // Ordinary prose is untouched.
+        let prose = "service identified as http (protocol tcp)";
+        assert_eq!(scrub_text(prose), prose);
+        assert_eq!(
+            scrub_text("endpoint maps to observed network endpoint"),
+            "endpoint maps to observed network endpoint"
+        );
+    }
+
+    #[test]
+    fn display_masking_is_bounded_and_idempotent() {
+        let big = "x".repeat(MAX_SCRUB_BYTES + 100);
+        assert!(scrub_text(&big).len() <= MAX_SCRUB_BYTES + MASK_REPLACEMENT.len() + 64);
+        let once = scrub_text("token=abc password=def https://u:p@example.test/");
+        let twice = scrub_text(&once);
+        assert_eq!(once, twice);
+        assert!(!once.contains("abc"));
     }
 }
