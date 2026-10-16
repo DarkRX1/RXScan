@@ -54,6 +54,7 @@ pub mod ports;
 pub mod probes;
 pub mod project;
 pub mod project_db;
+pub mod project_diff;
 pub mod rdap;
 pub mod repo_intel;
 pub mod report;

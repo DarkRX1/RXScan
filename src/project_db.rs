@@ -1154,6 +1154,25 @@ impl ProjectDb {
             .map_err(ProjectDbError::from)
     }
 
+    /// Run-diff support: bounded observations for one scan, stable order.
+    /// `limit` caps rows (callers page or cap at a small multiple of it).
+    pub fn observations_for_scan(
+        &self,
+        scan_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ObservationRow>, ProjectDbError> {
+        validate_id(scan_id, "scan")?;
+        let limit = limit.min(100_000) as i64;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, scan_run, entity_id, kind, label, attrs_json, confidence,
+                    evidence_excerpt, module, task_id, timestamp_ms
+             FROM observations WHERE scan_run=?1 ORDER BY entity_id, id LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![scan_id, limit], row_to_observation)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(ProjectDbError::from)
+    }
+
     /// Web/API support: `(entities, observations, relationships, runs)`.
     pub fn counts(&self) -> Result<(u64, u64, u64, u64), ProjectDbError> {
         let count = |sql: &str| -> Result<u64, ProjectDbError> {

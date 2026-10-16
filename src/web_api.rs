@@ -3060,6 +3060,55 @@ fn handle_project_timeline(
     }
 }
 
+/// Run-to-run diff for the GUI timeline (`GET .../diff?old=A&new=B`).
+/// Coverage gaps surface as `not_covered`, never as removals. Masked.
+fn handle_project_diff(
+    state: &Arc<ServerState>,
+    stream: &mut TcpStream,
+    rid: u64,
+    name: &str,
+    query: &BTreeMap<String, String>,
+) {
+    let old = query.get("old").map(String::as_str).unwrap_or("").trim();
+    let new = query.get("new").map(String::as_str).unwrap_or("").trim();
+    if old.is_empty() || new.is_empty() || old.len() > 256 || new.len() > 256 {
+        error_response(
+            stream,
+            rid,
+            &ApiErrorBody::new("bad_request", "old and new scan ids are required"),
+        );
+        return;
+    }
+    let limit: usize = query
+        .get("limit")
+        .map(String::as_str)
+        .unwrap_or("500")
+        .parse()
+        .unwrap_or(0);
+    if limit == 0 || limit > crate::project_diff::MAX_DIFF_ROWS {
+        error_response(
+            stream,
+            rid,
+            &ApiErrorBody::new(
+                "bad_request",
+                format!("limit must be 1..={}", crate::project_diff::MAX_DIFF_ROWS),
+            ),
+        );
+        return;
+    }
+    let (_, db) = match open_project(state, name) {
+        Ok(opened) => opened,
+        Err(error) => {
+            error_response(stream, rid, &error);
+            return;
+        }
+    };
+    match crate::project_diff::diff_scans(&db, old, new, limit) {
+        Ok(diff) => json_response(stream, rid, 200, &diff),
+        Err(detail) => error_response(stream, rid, &ApiErrorBody::new("not_found", detail)),
+    }
+}
+
 fn handle_scan_create(state: &Arc<ServerState>, stream: &mut TcpStream, rid: u64, body: &[u8]) {
     let request: ScanRequest = match serde_json::from_slice(body) {
         Ok(request) => request,
@@ -3854,6 +3903,9 @@ fn route_request(state: &Arc<ServerState>, stream: &mut TcpStream, rid: u64, req
         }
         ("GET", ["", "api", "v1", "projects", name, "timeline"]) => {
             handle_project_timeline(state, stream, rid, name, &request.query);
+        }
+        ("GET", ["", "api", "v1", "projects", name, "diff"]) => {
+            handle_project_diff(state, stream, rid, name, &request.query);
         }
         ("POST", ["", "api", "v1", "scans"]) => {
             handle_scan_create(state, stream, rid, &request.body);

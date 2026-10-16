@@ -1,8 +1,27 @@
 # Changelog
 
-## Unreleased (master, newer than v1.1.0)
+## Unreleased (master, newer than v1.2.0)
 
 (nothing yet)
+
+## v1.2.0
+
+Graph visualization and intelligence upgrade. Backward compatible: CLI
+flags, JSON/JSONL schemas, and project databases from v1.1.0 keep
+working (no schema migration required).
+
+- Link-analysis graph: typed entities/links with evidence and
+  confidence, five layouts (organic, hierarchical, circular, block,
+  radial), clustering for large projects, and masked PNG/SVG/GraphML/
+  JSON/HTML exports via `rxscan graph` and the GUI Graph view.
+- Standalone offline HTML reports (`rxscan report --format html`,
+  executive/technical templates) with embedded interactive graph,
+  sortable findings, evidence chains, and methodology.
+- Run-to-run diff timeline in the Projects view (added/removed/changed/
+  not-covered; coverage gaps are never shown as removals) with
+  `GET /api/v1/projects/:name/diff`.
+- Secret-safe display masking across graph, exports, API, and reports;
+  scope-gated stored-data expansion; bounded resources throughout.
 
 ## v1.1.0
 

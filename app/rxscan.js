@@ -123,6 +123,16 @@
     let edges = [];
     let selected = null;
     let kindFilter = "";
+    // Run-diff overlay: entity id -> added|removed|changed|not_covered.
+    // Gray (not covered) is never red (removed); every state also carries
+    // a text label, never color alone.
+    let statusColors = new Map();
+    const STATUS_STYLE = {
+      added: "#3ddc84",
+      removed: "#f06666",
+      changed: "#f0a04b",
+      not_covered: "#6b7d94",
+    };
 
     function applyTransform(g) {
       g.setAttribute("transform", "translate(" + view.x + "," + view.y + ") scale(" + view.k + ")");
@@ -194,7 +204,12 @@
         c.setAttribute("fill", kindColor(n.kind));
         c.setAttribute("tabindex", "0");
         c.setAttribute("role", "button");
-        c.setAttribute("aria-label", "Entity " + n.kind + " " + n.label);
+        const status = statusColors.get(n.id);
+        c.setAttribute("aria-label", "Entity " + n.kind + " " + n.label + (status ? ", " + status.replace("_", " ") : ""));
+        if (status && STATUS_STYLE[status]) {
+          c.setAttribute("stroke", STATUS_STYLE[status]);
+          c.setAttribute("stroke-width", "3");
+        }
         c.addEventListener("click", () => selectNode(n));
         c.addEventListener("keydown", (ev) => {
           if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); selectNode(n); }
@@ -268,6 +283,16 @@
         legendNode.appendChild(li);
       }
       if (!kinds.length) legendNode.appendChild(el("li", "No entities — empty graph."));
+      if (statusColors.size) {
+        for (const [state, label] of [["added", "added (new)"], ["removed", "removed (confirmed)"], ["changed", "changed"], ["not_covered", "not covered (inconclusive)"]]) {
+          const li = document.createElement("li");
+          const sw = document.createElement("span");
+          sw.className = "swatch";
+          sw.style.background = STATUS_STYLE[state];
+          li.append(sw, document.createTextNode(label));
+          legendNode.appendChild(li);
+        }
+      }
     }
 
     function setData(nextNodes, nextEdges) {
@@ -357,6 +382,8 @@
       },
       setKindFilter(v) { kindFilter = String(v || "").toLowerCase(); render(); },
       kinds() { return Array.from(new Set(nodes.map((n) => String(n.kind || "unknown")))).sort(); },
+      setStatusColors(map) { statusColors = new Map(Object.entries(map || {})); render(); },
+      clearStatusColors() { statusColors = new Map(); render(); },
     };
   }
 
@@ -1489,6 +1516,8 @@
       div.append(dt, dd);
       dl.appendChild(div);
     }
+    projRuns = summary.run_ids || [];
+    refreshDiffRuns();
     const entities = await api("/api/v1/projects/" + encodeURIComponent(name) + "/entities?limit=30");
     const eu = $("p-entities");
     clear(eu);
@@ -1559,6 +1588,76 @@
     timelineOffset += events.length;
   }
   $("project-timeline-more").addEventListener("click", () => loadProjectTimeline().catch(() => {}));
+
+  /* -- run-to-run diff timeline: slider moves between runs ----------------- */
+  /* Statuses come from the server (coverage-gated): added = green,
+     removed = red (confirmed only), changed = amber, not covered = gray.
+     Gray is never red; every state also shows a text label. */
+  let projRuns = [];
+  function refreshDiffRuns() {
+    for (const id of ["p-diff-old", "p-diff-new"]) {
+      const sel = $(id);
+      clear(sel);
+      for (const run of projRuns) {
+        const o = document.createElement("option");
+        o.value = run;
+        o.textContent = run;
+        sel.appendChild(o);
+      }
+    }
+    const slider = $("p-diff-slider");
+    slider.max = Math.max(0, projRuns.length - 1);
+    slider.value = Math.max(0, projRuns.length - 1);
+    if (projRuns.length >= 2) {
+      $("p-diff-old").value = projRuns[projRuns.length - 2];
+      $("p-diff-new").value = projRuns[projRuns.length - 1];
+      $("p-diff-summary").textContent = projRuns.length + " runs. Move the slider, then Compare runs.";
+    } else {
+      $("p-diff-summary").textContent = projRuns.length < 1 ? "No runs yet." : "One run: import another scan to compare.";
+    }
+    clear($("p-diff-list"));
+    projGraph.clearStatusColors();
+  }
+  $("p-diff-slider").addEventListener("input", () => {
+    const idx = Number($("p-diff-slider").value || 0);
+    if (projRuns[idx] !== undefined) $("p-diff-new").value = projRuns[idx];
+    if ($("p-diff-new").value === $("p-diff-old").value && idx > 0) {
+      $("p-diff-old").value = projRuns[idx - 1];
+    }
+  });
+  $("p-diff-apply").addEventListener("click", async () => {
+    const old = $("p-diff-old").value, cur = $("p-diff-new").value;
+    if (!selectedProject || !old || !cur) { $("p-diff-summary").textContent = "Pick two runs to compare."; return; }
+    if (old === cur) { $("p-diff-summary").textContent = "Baseline and current must differ."; return; }
+    $("p-diff-summary").textContent = "Comparing " + old + " → " + cur + "…";
+    try {
+      const diff = await api("/api/v1/projects/" + encodeURIComponent(selectedProject) + "/diff?old=" + encodeURIComponent(old) + "&new=" + encodeURIComponent(cur) + "&limit=500");
+      const s = diff.summary || {};
+      $("p-diff-summary").textContent =
+        "added " + (s.added || 0) + " · removed " + (s.removed || 0) + " (confirmed only)" +
+        " · changed " + (s.changed || 0) + " · not covered " + (s.not_covered || 0) +
+        " · unchanged " + (s.unchanged || 0) + (diff.truncated ? " · truncated" : "") +
+        ". Highlight applied to the Graph tab.";
+      const list = $("p-diff-list");
+      clear(list);
+      const overlay = {};
+      for (const row of (diff.rows || []).slice(0, 200)) {
+        overlay[row.entity_id] = row.status;
+        const li = document.createElement("li");
+        li.textContent = row.status.replace("_", " ") + " · " + row.kind + " · " + row.label + " — " + row.detail;
+        list.appendChild(li);
+      }
+      if (!(diff.rows || []).length) list.appendChild(el("li", "No differences between these runs."));
+      projGraph.setStatusColors(overlay);
+    } catch (err) {
+      $("p-diff-summary").textContent = "Compare failed: " + err.message;
+    }
+  });
+  $("p-diff-clear").addEventListener("click", () => {
+    clear($("p-diff-list"));
+    projGraph.clearStatusColors();
+    $("p-diff-summary").textContent = "Highlight cleared.";
+  });
 
   /* -- jobs: SSE primary, slow fallback list refresh -------------------------- */
   let jobsAuto = null;

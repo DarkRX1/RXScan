@@ -498,6 +498,20 @@
                   <ul class="entities" id="p-edges"></ul>
                 </div>
                 <div data-proj-panel="timeline" hidden>
+                  <div class="diff-controls">
+                    <label for="p-diff-old">Baseline run</label>
+                    <select id="p-diff-old"></select>
+                    <label for="p-diff-new">Current run</label>
+                    <select id="p-diff-new"></select>
+                    <label for="p-diff-slider">Move through runs</label>
+                    <input id="p-diff-slider" type="range" min="0" max="0" value="0" />
+                    <div class="actions">
+                      <button type="button" id="p-diff-apply">Compare runs</button>
+                      <button type="button" id="p-diff-clear">Clear highlight</button>
+                    </div>
+                    <p class="muted" id="p-diff-summary" role="status" aria-live="polite">Pick two runs to compare.</p>
+                  </div>
+                  <ul class="entities" id="p-diff-list"></ul>
                   <div class="actions"><button type="button" id="project-timeline-more">Load more</button></div>
                   <ol class="timeline" id="p-timeline"></ol>
                 </div>

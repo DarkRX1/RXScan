@@ -431,3 +431,10 @@ tr.status-running td:nth-child(3) { color: var(--rx-cyan-bright); font-weight: 7
 #graph-minconf { width: 8rem; }
 #graph-q { width: 12rem; }
 #graph-status { margin: 0.4rem 0; }
+
+/* Run-diff timeline controls: same tokens, stacked labels. */
+.diff-controls { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: end; margin: 0.5rem 0; }
+.diff-controls label { margin: 0; }
+.diff-controls select { width: auto; min-width: 10rem; }
+#p-diff-slider { width: 14rem; }
+#p-diff-summary { flex-basis: 100%; margin: 0.2rem 0; }
