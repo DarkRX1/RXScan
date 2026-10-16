@@ -2823,12 +2823,14 @@ fn run_report(args: &[String]) {
     let mut output_path: Option<String> = None;
     let mut top = report::DEFAULT_REPORT_TOP_N;
     let mut checkpoint: Option<String> = None;
+    let mut template = rxscan::report_html::ReportTemplate::Technical;
+    let mut include_graph = true;
     let mut iter = args[2..].iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--help" | "-h" => {
                 out_line!(
-                    "rxscan report [--format human|json|jsonl|raw] [--summary-only] [--top N] [--diff <old.rxscan>] [--analysis] [--output <path>] <scan.rxscan>"
+                    "rxscan report [--format human|json|jsonl|raw|html] [--template executive|technical] [--no-graph] [--summary-only] [--top N] [--diff <old.rxscan>] [--analysis] [--output <path>] <scan.rxscan>"
                 );
                 return;
             }
@@ -2850,6 +2852,20 @@ fn run_report(args: &[String]) {
             "--raw" => format = report::ReportFormat::Raw,
             "--summary-only" => summary_only = true,
             "--analysis" => analysis = true,
+            "--no-graph" => include_graph = false,
+            "--template" => {
+                let Some(value) = iter.next() else {
+                    err!("rxscan report: --template requires executive|technical");
+                    std::process::exit(2);
+                };
+                match rxscan::report_html::ReportTemplate::parse(value) {
+                    Some(parsed) => template = parsed,
+                    None => {
+                        err!("rxscan report: unknown template '{value}' (executive|technical)");
+                        std::process::exit(2);
+                    }
+                }
+            }
             "--diff" => {
                 let Some(path) = iter.next() else {
                     err!("rxscan report: --diff requires a baseline checkpoint path");
@@ -2883,7 +2899,7 @@ fn run_report(args: &[String]) {
             value if checkpoint.is_none() => checkpoint = Some(value.to_owned()),
             _ => {
                 err!(
-                    "rxscan report: usage: rxscan report [--format human|json|jsonl|raw] [--summary-only] [--top N] [--diff <old.rxscan>] [--analysis] [--output <path>] <scan.rxscan>"
+                    "rxscan report: usage: rxscan report [--format human|json|jsonl|raw|html] [--template executive|technical] [--no-graph] [--summary-only] [--top N] [--diff <old.rxscan>] [--analysis] [--output <path>] <scan.rxscan>"
                 );
                 std::process::exit(2);
             }
@@ -2891,10 +2907,52 @@ fn run_report(args: &[String]) {
     }
     let Some(current) = checkpoint else {
         err!(
-            "rxscan report: usage: rxscan report [--format human|json|jsonl|raw] [--summary-only] [--top N] [--diff <old.rxscan>] [--analysis] [--output <path>] <scan.rxscan>"
+            "rxscan report: usage: rxscan report [--format human|json|jsonl|raw|html] [--template executive|technical] [--no-graph] [--summary-only] [--top N] [--diff <old.rxscan>] [--analysis] [--output <path>] <scan.rxscan>"
         );
         std::process::exit(2);
     };
+    // HTML is a standalone offline document rendered from checkpoint
+    // state (findings, evidence chains, embedded graph).
+    if format == report::ReportFormat::Html {
+        let current_path = std::path::Path::new(&current);
+        let diff_path_ref = diff_path.as_deref().map(std::path::Path::new);
+        let bytes = match rxscan::report_html::render_html_file(
+            current_path,
+            diff_path_ref,
+            analysis,
+            rxscan::report_html::HtmlReportOptions {
+                template,
+                include_graph,
+                ..rxscan::report_html::HtmlReportOptions::default()
+            },
+        ) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                err!("rxscan report: {error}");
+                std::process::exit(1);
+            }
+        };
+        if let Some(path) = output_path {
+            let mut inputs = vec![current_path];
+            if let Some(diff_path) = diff_path_ref {
+                inputs.push(diff_path);
+            }
+            if let Err(error) = report::write_output(std::path::Path::new(&path), &bytes, &inputs) {
+                err!("rxscan report: {error}");
+                std::process::exit(1);
+            }
+            out_line!(
+                "report written: {path} format=html template={} network_requests=0",
+                template.as_str(),
+            );
+        } else if let Err(error) = std::io::Write::write_all(&mut std::io::stdout(), &bytes) {
+            if error.kind() != std::io::ErrorKind::BrokenPipe {
+                err!("rxscan report: {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     let options = report::ReportOptions {
         format,
         summary_only,

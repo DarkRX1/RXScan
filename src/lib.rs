@@ -57,6 +57,7 @@ pub mod project_db;
 pub mod rdap;
 pub mod repo_intel;
 pub mod report;
+pub mod report_html;
 pub mod routing;
 pub mod run;
 pub mod scan_mode;

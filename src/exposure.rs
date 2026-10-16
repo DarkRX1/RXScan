@@ -1782,6 +1782,48 @@ fn scrub_bearer(text: &str) -> String {
     out
 }
 
+/// Mask a JSON value recursively for display artifacts (reports,
+/// webhook payloads, exports). Object keys that are secret-named have
+/// their values replaced wholesale; all other strings are scrubbed for
+/// embedded secret shapes. Bounded: depth capped at 16, strings capped
+/// at [`MAX_SCRUB_BYTES`].
+pub fn mask_json(value: &serde_json::Value) -> serde_json::Value {
+    mask_json_depth(value, 0)
+}
+
+fn mask_json_depth(value: &serde_json::Value, depth: usize) -> serde_json::Value {
+    if depth > 16 {
+        return serde_json::Value::String(MASK_REPLACEMENT.to_owned());
+    }
+    match value {
+        serde_json::Value::String(text) => {
+            serde_json::Value::String(scrub_text(&truncate_bytes(text, MAX_SCRUB_BYTES)))
+        }
+        serde_json::Value::Array(items) => serde_json::Value::Array(
+            items
+                .iter()
+                .take(1024)
+                .map(|item| mask_json_depth(item, depth + 1))
+                .collect(),
+        ),
+        serde_json::Value::Object(map) => {
+            let mut out = serde_json::Map::with_capacity(map.len().min(1024));
+            for (key, item) in map.iter().take(1024) {
+                if is_display_secret_name(key) {
+                    out.insert(
+                        key.clone(),
+                        serde_json::Value::String(MASK_REPLACEMENT.to_owned()),
+                    );
+                } else {
+                    out.insert(key.clone(), mask_json_depth(item, depth + 1));
+                }
+            }
+            serde_json::Value::Object(out)
+        }
+        _ => value.clone(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Capabilities.
 // ---------------------------------------------------------------------------
@@ -1990,5 +2032,26 @@ mod tests {
         let twice = scrub_text(&once);
         assert_eq!(once, twice);
         assert!(!once.contains("abc"));
+    }
+
+    #[test]
+    fn mask_json_redacts_recursively() {
+        let value = serde_json::json!({
+            "source": "fixture",
+            "api_key": "LIVE",
+            "nested": {"password": "hunter2", "note": "login token=abc ok"},
+            "list": [{"secret": "s"}, "plain"],
+        });
+        let masked = mask_json(&value);
+        let flat = masked.to_string();
+        assert!(!flat.contains("LIVE"));
+        assert!(!flat.contains("hunter2"));
+        assert!(!flat.contains("token=abc"));
+        assert!(flat.contains("fixture"));
+        assert!(flat.contains("plain"));
+        assert_eq!(
+            masked["source"],
+            serde_json::Value::String("fixture".to_owned())
+        );
     }
 }

@@ -50,6 +50,7 @@ pub enum ReportFormat {
     Json,
     Jsonl,
     Raw,
+    Html,
 }
 
 impl ReportFormat {
@@ -59,6 +60,7 @@ impl ReportFormat {
             "json" => Ok(Self::Json),
             "jsonl" => Ok(Self::Jsonl),
             "raw" => Ok(Self::Raw),
+            "html" => Ok(Self::Html),
             other => Err(ReportError::UnsupportedFormat(other.to_owned())),
         }
     }
@@ -599,6 +601,11 @@ pub fn render_to_bytes(
             render_jsonl(model, &mut bytes)?;
             Ok(bytes)
         }
+        // HTML needs checkpoint state plus graph context; the CLI routes
+        // it through `report_html::render_html_file` before reaching here.
+        ReportFormat::Html => Err(ReportError::UnsupportedFormat(
+            "html reports require checkpoint state (use report_html::render_html_file)".to_owned(),
+        )),
     }
 }
 
