@@ -121,9 +121,101 @@ pub fn monitor_diff(
     out
 }
 
+/// Alert thresholds over a checkpoint diff summary (Phase 6 scheduled
+/// monitoring). Only *confirmed* transitions alert: inconclusive
+/// (not-covered) records are reported for context but can never trigger
+/// an alert on their own — absence without coverage is not a finding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlertThresholds {
+    /// Minimum confirmed additions (assets + relationships + findings).
+    pub min_added: usize,
+    /// Minimum confirmed removals (coverage-gated only).
+    pub min_removed: usize,
+    /// Minimum confirmed modifications.
+    pub min_changed: usize,
+}
+
+impl Default for AlertThresholds {
+    fn default() -> Self {
+        Self {
+            min_added: 1,
+            min_removed: 1,
+            min_changed: 1,
+        }
+    }
+}
+
+/// Evaluate a diff summary against thresholds. Returns human reason
+/// lines for each met threshold (empty = no meaningful change, no
+/// alert). Inconclusive records never appear here.
+pub fn meaningful_changes(
+    summary: &crate::diff::DiffSummary,
+    thresholds: &AlertThresholds,
+) -> Vec<String> {
+    let added = summary.assets_added + summary.relationships_added + summary.findings_added;
+    let removed = summary.assets_removed_confirmed
+        + summary.relationships_removed_confirmed
+        + summary.findings_removed_confirmed;
+    let changed = summary.assets_modified + summary.findings_modified;
+    let mut reasons = Vec::new();
+    if thresholds.min_added > 0 && added >= thresholds.min_added {
+        reasons.push(format!(
+            "{added} confirmed addition(s) (threshold {})",
+            thresholds.min_added
+        ));
+    }
+    if thresholds.min_removed > 0 && removed >= thresholds.min_removed {
+        reasons.push(format!(
+            "{removed} confirmed removal(s) (threshold {})",
+            thresholds.min_removed
+        ));
+    }
+    if thresholds.min_changed > 0 && changed >= thresholds.min_changed {
+        reasons.push(format!(
+            "{changed} confirmed change(s) (threshold {})",
+            thresholds.min_changed
+        ));
+    }
+    reasons
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inconclusive_records_never_trigger_alerts() {
+        let summary = crate::diff::DiffSummary {
+            assets_missing_inconclusive: 9,
+            relationships_missing_inconclusive: 4,
+            findings_missing_inconclusive: 2,
+            ..crate::diff::DiffSummary::default()
+        };
+        assert!(meaningful_changes(&summary, &AlertThresholds::default()).is_empty());
+    }
+
+    #[test]
+    fn thresholds_gate_confirmed_changes() {
+        let summary = crate::diff::DiffSummary {
+            assets_added: 2,
+            assets_removed_confirmed: 1,
+            ..crate::diff::DiffSummary::default()
+        };
+        let reasons = meaningful_changes(&summary, &AlertThresholds::default());
+        assert_eq!(reasons.len(), 2);
+        let strict = AlertThresholds {
+            min_added: 5,
+            min_removed: 5,
+            min_changed: 5,
+        };
+        assert!(meaningful_changes(&summary, &strict).is_empty());
+        let off = AlertThresholds {
+            min_added: 0,
+            min_removed: 0,
+            min_changed: 0,
+        };
+        assert!(meaningful_changes(&summary, &off).is_empty());
+    }
 
     #[test]
     fn blocked_provider_yields_unknown_not_removed() {

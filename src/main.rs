@@ -129,6 +129,10 @@ fn main() {
         run_graph(&args);
         return;
     }
+    if args.get(1).is_some_and(|arg| arg == "monitor") {
+        run_monitor(&args);
+        return;
+    }
     if args.get(1).is_some_and(|arg| arg == "analyze") {
         run_analyze(&args);
         return;
@@ -385,6 +389,7 @@ fn suggest_command(input: &str) -> Option<String> {
         "analyze",
         "diff",
         "graph",
+        "monitor",
         "unknown",
         "scan",
         "web",
@@ -3550,6 +3555,227 @@ fn render_graph_summary(view: &rxscan::graph_view::ViewGraph) -> String {
         );
     }
     out
+}
+
+/// Scheduled monitoring (`rxscan monitor ...`).
+///
+/// Re-scans targets on a bounded schedule through the identical CLI
+/// parsing and execution path as manual runs (same scope gates, same
+/// budgets), diffs each checkpoint against its predecessor with diff.rs,
+/// and alerts (console, file, webhook) only on threshold-meeting
+/// confirmed changes. Inconclusive records never alert. The first
+/// iteration establishes the baseline and never alerts.
+///
+/// Usage:
+/// `rxscan monitor <target>... [--scope S] [--exclude E] [--ports P|--all-ports] [--level N] [--goal G] [--max-tasks N] [--max-hosts N] [--max-concurrency N] [--deadline S] --state-dir DIR [--repeat N] [--interval S] [--min-added N] [--min-removed N] [--min-changed N] [--alert-file PATH] [--webhook URL] [--json]`
+fn run_monitor(args: &[String]) {
+    use rxscan::monitor_run as mon;
+    const USAGE: &str = "rxscan monitor <target>... [--scope S] [--exclude E] [--ports P|--all-ports] [--level N] [--goal G] [--max-tasks N] [--max-hosts N] [--max-concurrency N] [--deadline S] --state-dir DIR [--repeat N] [--interval S] [--min-added N] [--min-removed N] [--min-changed N] [--alert-file PATH] [--webhook URL] [--json]";
+    let mut targets: Vec<String> = Vec::new();
+    let mut scope: Vec<String> = Vec::new();
+    let mut exclude: Vec<String> = Vec::new();
+    let mut ports: Option<String> = None;
+    let mut all_ports = false;
+    let mut level: Option<u8> = None;
+    let mut goal: Option<String> = None;
+    let mut max_tasks: Option<u64> = None;
+    let mut max_hosts: Option<u64> = None;
+    let mut max_concurrency: Option<u64> = None;
+    let mut deadline: Option<u64> = None;
+    let mut state_dir: Option<String> = None;
+    let mut repeat = 1usize;
+    let mut interval = 0u64;
+    let mut min_added = 1usize;
+    let mut min_removed = 1usize;
+    let mut min_changed = 1usize;
+    let mut alert_file: Option<String> = None;
+    let mut webhook: Option<String> = None;
+    let mut json = false;
+    let mut iter = args[2..].iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                out_line!(
+                    "RXScan scheduled monitoring (bounded re-scans, threshold alerts)\n\nUSAGE\n  {USAGE}\n\nBEHAVIOR\n  Each iteration runs the same scan path as a manual run (scope gates and budgets identical), checkpoints to --state-dir, diffs against the previous checkpoint, and alerts only on confirmed changes meeting thresholds.\n  The first iteration establishes the baseline and never alerts.\n  Sinks: console (always), --alert-file (JSONL), --webhook (masked JSON POST).\n  Exit codes: 0 no alerts, 1 error, 2 usage, 3 alert(s) fired, 130 cancelled."
+                );
+                return;
+            }
+            "--scope" => {
+                let Some(value) = iter.next() else {
+                    err!("rxscan monitor: --scope requires a value");
+                    std::process::exit(2);
+                };
+                scope.push(value.to_owned());
+            }
+            "--exclude" => {
+                let Some(value) = iter.next() else {
+                    err!("rxscan monitor: --exclude requires a value");
+                    std::process::exit(2);
+                };
+                exclude.push(value.to_owned());
+            }
+            "--ports" => {
+                let Some(value) = iter.next() else {
+                    err!("rxscan monitor: --ports requires a value");
+                    std::process::exit(2);
+                };
+                ports = Some(value.to_owned());
+            }
+            "--all-ports" => all_ports = true,
+            "--level" => {
+                let Some(value) = iter.next() else {
+                    err!("rxscan monitor: --level requires 1-5");
+                    std::process::exit(2);
+                };
+                match value.parse::<u8>() {
+                    Ok(value) if (1..=5).contains(&value) => level = Some(value),
+                    _ => {
+                        err!("rxscan monitor: --level must be 1-5");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "--goal" => {
+                let Some(value) = iter.next() else {
+                    err!("rxscan monitor: --goal requires a value");
+                    std::process::exit(2);
+                };
+                goal = Some(value.to_owned());
+            }
+            "--max-tasks" | "--max-hosts" | "--max-concurrency" | "--deadline" | "--repeat"
+            | "--interval" | "--min-added" | "--min-removed" | "--min-changed" => {
+                let name = arg.clone();
+                let Some(value) = iter.next() else {
+                    err!("rxscan monitor: {name} requires a value");
+                    std::process::exit(2);
+                };
+                let parsed: u64 = match value.parse() {
+                    Ok(parsed) => parsed,
+                    Err(_) => {
+                        err!("rxscan monitor: {name} must be a non-negative integer");
+                        std::process::exit(2);
+                    }
+                };
+                match name.as_str() {
+                    "--max-tasks" => max_tasks = Some(parsed),
+                    "--max-hosts" => max_hosts = Some(parsed),
+                    "--max-concurrency" => max_concurrency = Some(parsed),
+                    "--deadline" => deadline = Some(parsed),
+                    "--repeat" => {
+                        repeat = parsed as usize;
+                    }
+                    "--interval" => interval = parsed,
+                    "--min-added" => min_added = parsed as usize,
+                    "--min-removed" => min_removed = parsed as usize,
+                    "--min-changed" => min_changed = parsed as usize,
+                    _ => {}
+                }
+            }
+            "--state-dir" => {
+                let Some(value) = iter.next() else {
+                    err!("rxscan monitor: --state-dir requires a directory");
+                    std::process::exit(2);
+                };
+                state_dir = Some(value.to_owned());
+            }
+            "--alert-file" => {
+                let Some(value) = iter.next() else {
+                    err!("rxscan monitor: --alert-file requires a path");
+                    std::process::exit(2);
+                };
+                alert_file = Some(value.to_owned());
+            }
+            "--webhook" => {
+                let Some(value) = iter.next() else {
+                    err!("rxscan monitor: --webhook requires a URL");
+                    std::process::exit(2);
+                };
+                webhook = Some(value.to_owned());
+            }
+            "--json" => json = true,
+            value if !value.starts_with("--") => targets.push(value.to_owned()),
+            _ => {
+                err!("rxscan monitor: usage: {USAGE}");
+                std::process::exit(2);
+            }
+        }
+    }
+    let Some(state_dir) = state_dir else {
+        err!("rxscan monitor: --state-dir DIR is required");
+        std::process::exit(2);
+    };
+    let config = mon::MonitorConfig {
+        targets,
+        scope,
+        exclude,
+        ports,
+        all_ports,
+        level,
+        goal,
+        max_tasks,
+        max_hosts,
+        max_concurrency,
+        deadline_secs: deadline,
+        state_dir: std::path::PathBuf::from(state_dir),
+        interval_secs: interval,
+        repeat,
+        thresholds: rxscan::monitoring::AlertThresholds {
+            min_added,
+            min_removed,
+            min_changed,
+        },
+        alert_file: alert_file.map(std::path::PathBuf::from),
+        webhook_url: webhook,
+    };
+    let cancelled = rxscan::platform::process::process_cancel_flag();
+    match mon::run_schedule(&config, cancelled) {
+        Ok(outcomes) => {
+            let mut alerts = 0usize;
+            for outcome in &outcomes {
+                match outcome {
+                    mon::IterationOutcome::BaselineEstablished { scan } => {
+                        if json {
+                            emit_json_pretty(
+                                &serde_json::json!({"status": "baseline", "scan": scan}),
+                            );
+                        } else {
+                            out_line!("monitor baseline established: {scan} network_requests=0");
+                        }
+                    }
+                    mon::IterationOutcome::NoChange { scan } => {
+                        if json {
+                            emit_json_pretty(
+                                &serde_json::json!({"status": "no_change", "scan": scan}),
+                            );
+                        } else {
+                            out_line!("monitor no meaningful change: {scan} network_requests=0");
+                        }
+                    }
+                    mon::IterationOutcome::Alerted { alert } => {
+                        alerts += 1;
+                        if json {
+                            emit_json_pretty(&mon::webhook_payload(alert));
+                        } else {
+                            out_line!("{}", mon::format_alert_console(alert));
+                        }
+                    }
+                    mon::IterationOutcome::ScanFailed { detail } => {
+                        err!("rxscan monitor: {detail}");
+                    }
+                }
+            }
+            if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                std::process::exit(130);
+            }
+            if alerts > 0 {
+                std::process::exit(3);
+            }
+        }
+        Err(error) => {
+            err!("rxscan monitor: {error}");
+            std::process::exit(1);
+        }
+    }
 }
 
 /// Passive investigation workflow (`rxscan investigate ...`).
