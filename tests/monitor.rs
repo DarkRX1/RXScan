@@ -105,7 +105,9 @@ fn loopback_baseline_then_no_change() {
     let second = monitor(&dir, &args);
     assert!(
         second.status.success(),
-        "stderr: {}",
+        "code={:?} stdout={} stderr={}",
+        second.status.code(),
+        String::from_utf8_lossy(&second.stdout),
         String::from_utf8_lossy(&second.stderr)
     );
     assert_eq!(

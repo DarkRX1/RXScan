@@ -3770,6 +3770,7 @@ fn run_monitor(args: &[String]) {
                 }
             }
             if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                err!("rxscan monitor: cancelled");
                 std::process::exit(130);
             }
             if alerts > 0 {
