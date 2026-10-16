@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "fingerprints": [
+    {"id": "ext-demo-synctest", "protocol": "http", "probe": "http",
+     "matcher": {"kind": "contains", "pattern": "SynctestServer", "case_insensitive": true},
+     "product": "SynctestServer", "vendor": "rxscan-extension-fixture", "confidence": 70, "source": "extension:demo-rdss"}
+  ]
+}

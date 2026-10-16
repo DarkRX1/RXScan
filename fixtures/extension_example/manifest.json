@@ -1,0 +1,12 @@
+{
+  "sdk_version": 1,
+  "id": "demo-rdss",
+  "version": "0.1.0",
+  "kind": "public_transform",
+  "description": "Demonstration extension: fetches a bounded JSON document from a granted host and derives technology entities.",
+  "requires": {
+    "contact": "public_http",
+    "hosts": ["127.0.0.1"],
+    "max_requests": 4
+  }
+}

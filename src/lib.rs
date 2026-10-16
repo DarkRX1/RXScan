@@ -23,6 +23,7 @@ pub mod entity_search;
 pub mod execution;
 pub mod explain;
 pub mod exposure;
+pub mod extension_sdk;
 pub mod extensions;
 pub mod extract;
 pub mod fingerprints;

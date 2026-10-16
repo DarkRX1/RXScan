@@ -154,6 +154,38 @@ pub fn validate_pack_dir(
     (metas, errors)
 }
 
+// ---------------------------------------------------------------------------
+// Extension SDK manifests (Phase 8): versioned, scope-declaring extension
+// descriptors validated through the same bounded-loading discipline as
+// packs. See `extension_sdk` for the permission model and `docs/EXTENSIONS.md`
+// for the author guide.
+// ---------------------------------------------------------------------------
+
+/// Current extension SDK interface version (mirrors
+/// [`crate::extension_sdk::EXTENSION_SDK_VERSION`]).
+pub const EXTENSION_SDK_VERSION: u32 = crate::extension_sdk::EXTENSION_SDK_VERSION;
+
+/// Maximum manifest file accepted by the loader.
+pub const MAX_EXTENSION_MANIFEST_FILE_BYTES: usize = crate::extension_sdk::MAX_MANIFEST_BYTES;
+
+/// Load and validate one extension manifest file (bounded read, strict
+/// schema). Returns the parsed manifest or a deterministic error.
+pub fn load_extension_manifest(
+    path: &Path,
+) -> Result<crate::extension_sdk::ExtensionManifest, crate::extension_sdk::ExtensionError> {
+    use crate::extension_sdk::ExtensionError;
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| ExtensionError::Malformed(format!("cannot read manifest: {error}")))?;
+    if metadata.len() > MAX_EXTENSION_MANIFEST_FILE_BYTES as u64 {
+        return Err(ExtensionError::TooLarge(format!(
+            "manifest exceeds {MAX_EXTENSION_MANIFEST_FILE_BYTES} bytes"
+        )));
+    }
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| ExtensionError::Malformed(format!("cannot read manifest: {error}")))?;
+    crate::extension_sdk::parse_manifest(&text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
