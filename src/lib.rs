@@ -21,6 +21,7 @@ pub mod dns;
 pub mod document;
 pub mod entity_search;
 pub mod execution;
+pub mod explain;
 pub mod exposure;
 pub mod extensions;
 pub mod extract;

@@ -133,6 +133,10 @@ fn main() {
         run_monitor(&args);
         return;
     }
+    if args.get(1).is_some_and(|arg| arg == "explain") {
+        run_explain(&args);
+        return;
+    }
     if args.get(1).is_some_and(|arg| arg == "analyze") {
         run_analyze(&args);
         return;
@@ -390,6 +394,7 @@ fn suggest_command(input: &str) -> Option<String> {
         "diff",
         "graph",
         "monitor",
+        "explain",
         "unknown",
         "scan",
         "web",
@@ -3774,6 +3779,109 @@ fn run_monitor(args: &[String]) {
         Err(error) => {
             err!("rxscan monitor: {error}");
             std::process::exit(1);
+        }
+    }
+}
+
+/// Evidence-chain explanations (`rxscan explain ...`).
+///
+/// Prints what was observed, how it was interpreted, the confidence, and
+/// what would raise or lower it — from the same chain objects the GUI
+/// detail panel renders.
+///
+/// Usage:
+/// `rxscan explain finding <id> --checkpoint <scan.rxscan> [--json]`
+/// `rxscan explain node <id> --project-db <project.db> [--json]`
+fn run_explain(args: &[String]) {
+    use rxscan::explain as ex;
+    const USAGE: &str = "rxscan explain finding <id> --checkpoint <scan.rxscan> [--json]\nrxscan explain node <id> --project-db <project.db> [--json]";
+    let mut kind: Option<String> = None;
+    let mut id: Option<String> = None;
+    let mut checkpoint: Option<String> = None;
+    let mut project_db: Option<String> = None;
+    let mut json = false;
+    let mut iter = args[2..].iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                out_line!(
+                    "RXScan evidence explanations (offline, secret-masked)\n\nUSAGE\n  {USAGE}\n\nThe GUI detail panel renders the same chains from the same code path."
+                );
+                return;
+            }
+            "--checkpoint" => {
+                let Some(value) = iter.next() else {
+                    err!("rxscan explain: --checkpoint requires a path");
+                    std::process::exit(2);
+                };
+                checkpoint = Some(value.to_owned());
+            }
+            "--project-db" => {
+                let Some(value) = iter.next() else {
+                    err!("rxscan explain: --project-db requires a path");
+                    std::process::exit(2);
+                };
+                project_db = Some(value.to_owned());
+            }
+            "--json" => json = true,
+            value if kind.is_none() && !value.starts_with("--") => {
+                kind = Some(value.to_owned());
+            }
+            value if id.is_none() && !value.starts_with("--") => {
+                id = Some(value.to_owned());
+            }
+            _ => {
+                err!("rxscan explain: usage:\n  {USAGE}");
+                std::process::exit(2);
+            }
+        }
+    }
+    let (Some(kind), Some(id)) = (kind, id) else {
+        err!("rxscan explain: usage:\n  {USAGE}");
+        std::process::exit(2);
+    };
+    match kind.as_str() {
+        "finding" => {
+            let Some(checkpoint) = checkpoint else {
+                err!("rxscan explain finding: --checkpoint <scan.rxscan> is required");
+                std::process::exit(2);
+            };
+            match ex::explain_finding(std::path::Path::new(&checkpoint), &id) {
+                Ok(explained) => {
+                    if json {
+                        emit_json_pretty(&ex::finding_json(&explained));
+                    } else {
+                        out!("{}", ex::render_finding(&explained));
+                    }
+                }
+                Err(error) => {
+                    err!("rxscan explain: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "node" => {
+            let Some(project_db) = project_db else {
+                err!("rxscan explain node: --project-db <project.db> is required");
+                std::process::exit(2);
+            };
+            match ex::explain_node(std::path::Path::new(&project_db), &id) {
+                Ok(detail) => {
+                    if json {
+                        emit_json_pretty(&detail);
+                    } else {
+                        out!("{}", ex::render_node(&detail));
+                    }
+                }
+                Err(error) => {
+                    err!("rxscan explain: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        _ => {
+            err!("rxscan explain: usage:\n  {USAGE}");
+            std::process::exit(2);
         }
     }
 }
