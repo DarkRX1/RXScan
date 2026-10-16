@@ -3175,16 +3175,18 @@ fn run_diff(args: &[String]) {
     }
 }
 
-/// Maltego-style link-analysis graph over a project database
-/// (`rxscan graph ...`). Offline and read-only: walks stored entities and
-/// relationships only, never contacts anything. Output is secret-masked.
+/// Maltego-style link-analysis graph over a project database or an Nmap
+/// XML import (`rxscan graph ...`). Offline and read-only: walks stored
+/// entities and relationships only, never contacts anything. Output is
+/// secret-masked. Imports are origin-labeled with capped confidence.
 ///
 /// Usage:
-/// `rxscan graph <project.db> [--format png|svg|graphml|json|html] [--out PATH] [--min-confidence N] [--types a,b,c] [--layout organic|hierarchical|circular|block|radial] [--limit N] [--seed ID] [--depth N]`
+/// `rxscan graph <project.db> [--format png|svg|graphml|json|html|sarif|stix|csv] [--out PATH] [--min-confidence N] [--types a,b,c] [--layout organic|hierarchical|circular|block|radial] [--limit N] [--seed ID] [--depth N]`
+/// `rxscan graph --import-nmap <scan.xml> [--format ...] [same filters]`
 fn run_graph(args: &[String]) {
     use rxscan::graph_view as gv;
-    const USAGE: &str = "rxscan graph <project.db> [--format png|svg|graphml|json|html] [--out PATH] [--min-confidence N] [--types a,b,c] [--layout organic|hierarchical|circular|block|radial] [--limit N] [--seed ID] [--depth N]";
-    let mut format: Option<gv::GraphFormat> = None;
+    const USAGE: &str = "rxscan graph <project.db> [--format png|svg|graphml|json|html|sarif|stix|csv] [--out PATH] [--min-confidence N] [--types a,b,c] [--layout organic|hierarchical|circular|block|radial] [--limit N] [--seed ID] [--depth N] [--import-nmap scan.xml]";
+    let mut format: Option<GraphOutput> = None;
     let mut output_path: Option<String> = None;
     let mut min_confidence = 0u8;
     let mut types: Option<String> = None;
@@ -3193,12 +3195,13 @@ fn run_graph(args: &[String]) {
     let mut seed: Option<String> = None;
     let mut depth = 2usize;
     let mut project: Option<String> = None;
+    let mut import_nmap: Option<String> = None;
     let mut iter = args[2..].iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--help" | "-h" => {
                 out_line!(
-                    "RXScan link-analysis graph (offline, read-only, secret-masked)\n\nUSAGE\n  {USAGE}\n\nFORMATS\n  json     typed nodes/edges with evidence + confidence (default to stdout)\n  graphml  directed GraphML with data keys\n  svg      standalone vector scene (shape = kind, dash = inference, width = confidence)\n  html     standalone interactive page (offline, no external requests)\n  png      raster overview (binary; requires --out)\n\nFILTERS\n  --min-confidence N   drop relationships below N (0-100)\n  --types a,b,c        one or more of: network ip host port_service software certificate domain url username account exposure evidence scope\n  --seed ID --depth N  bounded neighborhood instead of the full graph\n  --limit N            node cap (1-50000; exports report truncation honestly)\n\nEXAMPLES\n  rxscan graph scan.db --format html --out graph.html\n  rxscan graph scan.db --types ip,host,port_service --min-confidence 70"
+                    "RXScan link-analysis graph (offline, read-only, secret-masked)\n\nUSAGE\n  {USAGE}\n\nFORMATS\n  json     typed nodes/edges with evidence + confidence (default to stdout)\n  graphml  directed GraphML with data keys\n  svg      standalone vector scene (shape = kind, dash = inference, width = confidence)\n  html     standalone interactive page (offline, no external requests)\n  png      raster overview (binary; requires --out)\n  sarif    SARIF 2.1.0 exposure findings\n  stix     STIX 2.1 bundle (observables + relationships)\n  csv      nodes and edges as CSV rows\n\nFILTERS\n  --min-confidence N   drop relationships below N (0-100)\n  --types a,b,c        one or more of: network ip host port_service software certificate domain url username account exposure evidence scope\n  --seed ID --depth N  bounded neighborhood instead of the full graph\n  --limit N            node cap (1-50000; exports report truncation honestly)\n  --import-nmap FILE   build the graph from an Nmap XML import instead of a project database (origin-labeled, capped confidence)\n\nEXAMPLES\n  rxscan graph scan.db --format html --out graph.html\n  rxscan graph scan.db --types ip,host,port_service --min-confidence 70\n  rxscan graph --import-nmap scan.xml --format sarif --out findings.sarif"
                 );
                 return;
             }
@@ -3207,13 +3210,26 @@ fn run_graph(args: &[String]) {
                     err!("rxscan graph: --format requires a value");
                     std::process::exit(2);
                 };
-                match gv::GraphFormat::parse(value) {
+                match gv::GraphFormat::parse(value)
+                    .map(GraphOutput::View)
+                    .or_else(|| {
+                        rxscan::interop::InteropFormat::parse(value).map(GraphOutput::Interop)
+                    }) {
                     Some(parsed) => format = Some(parsed),
                     None => {
-                        err!("rxscan graph: unknown format '{value}' (png|svg|graphml|json|html)");
+                        err!(
+                            "rxscan graph: unknown format '{value}' (png|svg|graphml|json|html|sarif|stix|csv)"
+                        );
                         std::process::exit(2);
                     }
                 }
+            }
+            "--import-nmap" => {
+                let Some(path) = iter.next() else {
+                    err!("rxscan graph: --import-nmap requires a file path");
+                    std::process::exit(2);
+                };
+                import_nmap = Some(path.to_owned());
             }
             "--out" | "--output" => {
                 let Some(path) = iter.next() else {
@@ -3302,10 +3318,6 @@ fn run_graph(args: &[String]) {
             }
         }
     }
-    let Some(project) = project else {
-        err!("rxscan graph: usage: {USAGE}");
-        std::process::exit(2);
-    };
     let type_set = match types {
         Some(list) => {
             let mut set = std::collections::BTreeSet::new();
@@ -3328,13 +3340,6 @@ fn run_graph(args: &[String]) {
         }
         None => None,
     };
-    let db = match rxscan::project_db::ProjectDb::open(std::path::Path::new(&project)) {
-        Ok(db) => db,
-        Err(error) => {
-            err!("rxscan graph: could not open project database: {error}");
-            std::process::exit(1);
-        }
-    };
     let options = gv::ViewOptions {
         types: type_set,
         min_confidence,
@@ -3345,11 +3350,53 @@ fn run_graph(args: &[String]) {
         ..gv::ViewOptions::default()
     }
     .bounded();
-    let view = match gv::build_from_db(&db, &options) {
-        Ok(view) => view,
-        Err(error) => {
-            err!("rxscan graph: {error}");
-            std::process::exit(1);
+    // Source: project database, or a bounded Nmap XML import.
+    let (source_label, view) = match (project, import_nmap) {
+        (Some(_), Some(_)) => {
+            err!("rxscan graph: pass either <project.db> or --import-nmap, not both");
+            std::process::exit(2);
+        }
+        (None, None) => {
+            err!("rxscan graph: usage: {USAGE}");
+            std::process::exit(2);
+        }
+        (Some(project), None) => {
+            let db = match rxscan::project_db::ProjectDb::open(std::path::Path::new(&project)) {
+                Ok(db) => db,
+                Err(error) => {
+                    err!("rxscan graph: could not open project database: {error}");
+                    std::process::exit(1);
+                }
+            };
+            let view = match gv::build_from_db(&db, &options) {
+                Ok(view) => view,
+                Err(error) => {
+                    err!("rxscan graph: {error}");
+                    std::process::exit(1);
+                }
+            };
+            (project, view)
+        }
+        (None, Some(path)) => {
+            let text = match read_bounded_text(std::path::Path::new(&path)) {
+                Ok(text) => text,
+                Err(error) => {
+                    err!("rxscan graph: {error}");
+                    std::process::exit(1);
+                }
+            };
+            let import = match rxscan::interop::import_nmap_xml(&text) {
+                Ok(import) => import,
+                Err(error) => {
+                    err!("rxscan graph: {error}");
+                    std::process::exit(1);
+                }
+            };
+            let graph = rxscan::interop::import_to_graph(&import, &path);
+            (
+                format!("import:{path}"),
+                gv::build_from_scan_graph(&graph, &options),
+            )
         }
     };
     // Default: human summary to stdout; --out without --format infers
@@ -3359,44 +3406,17 @@ fn run_graph(args: &[String]) {
         (None, Some(path)) => infer_graph_format(&path),
         (None, None) => None,
     };
-    if output_path.is_none() && resolved == Some(gv::GraphFormat::Png) {
+    if output_path.is_none() && resolved == Some(GraphOutput::View(gv::GraphFormat::Png)) {
         err!("rxscan graph: --format png is binary and requires --out PATH");
         std::process::exit(2);
     }
     match resolved {
         None => out_line!("{}", render_graph_summary(&view)),
-        Some(format) => {
+        Some(GraphOutput::View(format)) => {
             let positions = gv::layout(&view, layout, options.seed.as_deref());
-            match gv::render_export(&view, format, &positions, &project) {
+            match gv::render_export(&view, format, &positions, &source_label) {
                 Ok(bytes) => {
-                    if let Some(path) = output_path {
-                        if let Some(parent) = std::path::Path::new(&path).parent() {
-                            if !parent.as_os_str().is_empty() {
-                                if let Err(error) = std::fs::create_dir_all(parent) {
-                                    err!("rxscan graph: could not create output dir: {error}");
-                                    std::process::exit(1);
-                                }
-                            }
-                        }
-                        if let Err(error) = std::fs::write(&path, &bytes) {
-                            err!("rxscan graph: could not write {path}: {error}");
-                            std::process::exit(1);
-                        }
-                        out_line!(
-                            "graph exported: {path} format={} nodes={} edges={} truncated={} network_requests=0",
-                            format.as_str(),
-                            view.nodes.len(),
-                            view.edges.len(),
-                            view.truncated,
-                        );
-                    } else if let Err(error) =
-                        std::io::Write::write_all(&mut std::io::stdout(), &bytes)
-                    {
-                        if error.kind() != std::io::ErrorKind::BrokenPipe {
-                            err!("rxscan graph: {error}");
-                            std::process::exit(1);
-                        }
-                    }
+                    write_graph_bytes(&bytes, output_path.as_deref(), &view, format.as_str());
                 }
                 Err(error) => {
                     err!("rxscan graph: {error}");
@@ -3404,22 +3424,87 @@ fn run_graph(args: &[String]) {
                 }
             }
         }
+        Some(GraphOutput::Interop(format)) => {
+            let bytes = rxscan::interop::render_export(&view, format);
+            write_graph_bytes(&bytes, output_path.as_deref(), &view, format.as_str());
+        }
+    }
+}
+
+/// Graph export format families (view formats share layout/positions;
+/// interop formats render straight from the masked view).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GraphOutput {
+    View(rxscan::graph_view::GraphFormat),
+    Interop(rxscan::interop::InteropFormat),
+}
+
+/// Read a text file with a hard size cap (fail closed before parsing).
+fn read_bounded_text(path: &std::path::Path) -> Result<String, String> {
+    let size = std::fs::metadata(path)
+        .map_err(|error| format!("could not read {}: {error}", path.display()))?
+        .len();
+    if size > rxscan::interop::MAX_IMPORT_BYTES as u64 {
+        return Err(format!(
+            "import too large: {} bytes exceeds {} bytes",
+            size,
+            rxscan::interop::MAX_IMPORT_BYTES
+        ));
+    }
+    std::fs::read_to_string(path)
+        .map_err(|error| format!("could not read {}: {error}", path.display()))
+}
+
+/// Write export bytes to a file (with confirmation line) or stdout.
+fn write_graph_bytes(
+    bytes: &[u8],
+    output_path: Option<&str>,
+    view: &rxscan::graph_view::ViewGraph,
+    format: &str,
+) {
+    if let Some(path) = output_path {
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            if !parent.as_os_str().is_empty() {
+                if let Err(error) = std::fs::create_dir_all(parent) {
+                    err!("rxscan graph: could not create output dir: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        if let Err(error) = std::fs::write(path, bytes) {
+            err!("rxscan graph: could not write {path}: {error}");
+            std::process::exit(1);
+        }
+        out_line!(
+            "graph exported: {path} format={format} nodes={} edges={} truncated={} network_requests=0",
+            view.nodes.len(),
+            view.edges.len(),
+            view.truncated,
+        );
+    } else if let Err(error) = std::io::Write::write_all(&mut std::io::stdout(), bytes) {
+        if error.kind() != std::io::ErrorKind::BrokenPipe {
+            err!("rxscan graph: {error}");
+            std::process::exit(1);
+        }
     }
 }
 
 /// Infer an export format from an output file extension.
-fn infer_graph_format(path: &str) -> Option<rxscan::graph_view::GraphFormat> {
+fn infer_graph_format(path: &str) -> Option<GraphOutput> {
     let ext = std::path::Path::new(path)
         .extension()
         .and_then(|ext| ext.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
     match ext.as_str() {
-        "png" => Some(rxscan::graph_view::GraphFormat::Png),
-        "svg" => Some(rxscan::graph_view::GraphFormat::Svg),
-        "graphml" => Some(rxscan::graph_view::GraphFormat::Graphml),
-        "html" | "htm" => Some(rxscan::graph_view::GraphFormat::Html),
-        "json" => Some(rxscan::graph_view::GraphFormat::Json),
+        "png" => Some(GraphOutput::View(rxscan::graph_view::GraphFormat::Png)),
+        "svg" => Some(GraphOutput::View(rxscan::graph_view::GraphFormat::Svg)),
+        "graphml" => Some(GraphOutput::View(rxscan::graph_view::GraphFormat::Graphml)),
+        "html" | "htm" => Some(GraphOutput::View(rxscan::graph_view::GraphFormat::Html)),
+        "json" => Some(GraphOutput::View(rxscan::graph_view::GraphFormat::Json)),
+        "sarif" => Some(GraphOutput::Interop(rxscan::interop::InteropFormat::Sarif)),
+        "stix" => Some(GraphOutput::Interop(rxscan::interop::InteropFormat::Stix)),
+        "csv" => Some(GraphOutput::Interop(rxscan::interop::InteropFormat::Csv)),
         _ => None,
     }
 }

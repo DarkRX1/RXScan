@@ -285,14 +285,16 @@ line rasterizer — decision recorded here to avoid review surprise).
 Benchmarks use existing dev-dependency patterns (`examples/phase*_bench.rs`
 precedent; add `benches/graph_scale.rs` with the repo's harness style).
 
-**Phase 5 XML only: `quick-xml` (MIT, streaming, `no_std`-capable,
-no entity expansion by default).** Justification: Nmap XML needs a
-spec-correct pull parser; hand-rolling XML invites entity-expansion and
-encoding bugs that violate the hostile-input contract. Alternatives
-rejected: `serde-xml-rs` (builds full DOM → unbounded allocation), `xml-rs`
-(less maintained). If `quick-xml` review fails, fallback is a byte-level
-`<tag attr="">` scanner limited to the Nmap schema subset, documented here
-first. No other new crates are proposed.
+**Phase 5 XML: hand-rolled narrow pull parser, no new crate.** Decision
+taken during implementation: the Nmap subset (elements, quoted
+attributes, five predefined entities) is small enough to parse with a
+~200-line bounded tokenizer whose security properties are directly
+auditable (DTDs rejected fail-closed, no entity expansion by
+construction, hard caps on input/depth/attributes/hosts). `quick-xml`
+was evaluated and rejected: a general parser would need the same
+subset-restriction and cap layer on top, adding dependency surface for
+no safety gain. Exports (SARIF/STIX/CSV) are hand-rolled text;
+GraphML delegates to the Phase 1 view exporter (one code path).
 
 **Phase 4 addition (Unix only): `libc` (MIT/Apache-2.0, already in the
 dependency tree transitively).** Justification: the dashboard cancel key

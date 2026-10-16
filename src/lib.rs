@@ -31,6 +31,7 @@ pub mod graph_view;
 pub mod host_discovery;
 pub mod hypothesis;
 pub mod icmp;
+pub mod interop;
 pub mod investigate;
 pub mod level;
 pub mod lowering;
