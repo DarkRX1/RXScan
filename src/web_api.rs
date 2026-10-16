@@ -1981,6 +1981,7 @@ fn spawn_username_search_worker(
                 &validated.categories,
                 &cancel,
                 Some(&progress_hook),
+                None,
             )
             .map_err(|e| e.to_string())
         };

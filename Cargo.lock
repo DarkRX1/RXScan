@@ -1166,6 +1166,7 @@ dependencies = [
  "clap",
  "curve25519-dalek",
  "ipnet",
+ "libc",
  "rcgen",
  "reqwest",
  "rusqlite",

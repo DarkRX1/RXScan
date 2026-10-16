@@ -265,10 +265,15 @@ fn scheduler_completes_thousands_with_bounded_concurrency() {
     );
     let hook_totals = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let hook_totals_inner = hook_totals.clone();
-    let (results, accounting) =
-        scheduler.run_with_progress(&providers, &entity, &cancelled, &|completed, total| {
+    let (results, accounting) = scheduler.run_with_progress(
+        &providers,
+        &entity,
+        &cancelled,
+        &|completed, total| {
             hook_totals_inner.lock().unwrap().push((completed, total));
-        });
+        },
+        None,
+    );
     // Exact accounting at scale.
     assert_eq!(accounting.providers_requested, SCALE_VECTORS);
     assert_eq!(accounting.accounted(), SCALE_VECTORS);

@@ -74,6 +74,7 @@ pub mod tcp_probe;
 pub mod tcp_scanner;
 pub mod temporal;
 pub mod terminal;
+pub mod terminal_dashboard;
 pub mod tls;
 pub mod udp_discovery;
 pub mod udp_probes;

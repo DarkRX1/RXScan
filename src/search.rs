@@ -2240,7 +2240,7 @@ impl SearchScheduler {
         entity: &SearchEntity,
         cancelled: &AtomicBool,
     ) -> (Vec<SearchObservation>, SearchAccounting) {
-        self.run_with_progress(providers, entity, cancelled, &|_, _| {})
+        self.run_with_progress(providers, entity, cancelled, &|_, _| {}, None)
     }
 
     /// Scheduler with a real progress hook `(completed, total)`.
@@ -2248,12 +2248,16 @@ impl SearchScheduler {
     /// The hook fires after each wave with honest counts (completed providers
     /// vs requested). Frontends use it for restrained TTY progress or SSE;
     /// the hook never affects scheduling, evidence, or accounting.
+    /// `on_observation` (optional, Phase 4) streams each recorded
+    /// observation as it lands so live dashboards can show a findings feed;
+    /// `None` keeps the call identical to before.
     pub fn run_with_progress(
         &mut self,
         providers: &[Box<dyn SearchProvider>],
         entity: &SearchEntity,
         cancelled: &AtomicBool,
         progress: &dyn Fn(usize, usize),
+        on_observation: Option<&dyn Fn(&SearchObservation)>,
     ) -> (Vec<SearchObservation>, SearchAccounting) {
         let mut accounting = SearchAccounting {
             providers_requested: providers.len(),
@@ -2352,6 +2356,11 @@ impl SearchScheduler {
                 accounting.providers_completed += 1;
                 *accounting.counts.entry(observation.status).or_default() += 1;
                 observations.push(observation);
+                if let Some(feed) = on_observation {
+                    if let Some(latest) = observations.last() {
+                        feed(latest);
+                    }
+                }
                 // Record rate limit request after successful/completed execution
                 self.rate_limiter.record_request(&provider.host_key());
             }
@@ -3289,6 +3298,7 @@ pub fn execute_username_search(
         &BTreeSet::new(),
         cancelled,
         None,
+        None,
     )
 }
 
@@ -3300,6 +3310,8 @@ pub fn execute_username_search(
 /// this so the same query yields the same plan. `progress` is an optional
 /// real progress hook `(completed, total)` invoked after each scheduler wave;
 /// frontends use it for restrained TTY progress or SSE, never faked.
+/// `on_observation` optionally streams each recorded observation (live
+/// dashboard findings feed); `None` keeps behavior identical.
 #[allow(clippy::too_many_arguments)]
 pub fn execute_username_search_full(
     username: &str,
@@ -3311,6 +3323,7 @@ pub fn execute_username_search_full(
     categories: &BTreeSet<String>,
     cancelled: &AtomicBool,
     progress: Option<&dyn Fn(usize, usize)>,
+    on_observation: Option<&dyn Fn(&SearchObservation)>,
 ) -> Result<UsernameSearchReport, SearchError> {
     let started_at = unix_timestamp();
     let seed = SearchEntity::username(username, started_at)?;
@@ -3339,8 +3352,10 @@ pub fn execute_username_search_full(
         deadline: Instant::now() + deadline,
         rate_limiter,
     };
-    let (results, accounting) = if let Some(hook) = progress {
-        scheduler.run_with_progress(&providers, &seed, cancelled, hook)
+    let noop = |_: usize, _: usize| {};
+    let hook = progress.unwrap_or(&noop);
+    let (results, accounting) = if progress.is_some() || on_observation.is_some() {
+        scheduler.run_with_progress(&providers, &seed, cancelled, hook, on_observation)
     } else {
         scheduler.run(&providers, &seed, cancelled)
     };

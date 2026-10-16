@@ -1800,24 +1800,43 @@ fn run_search(args: &[String]) {
     // Restrained TTY progress (never into pipes/machine output, never faked).
     let progress_caps = resolve_human_caps(args);
     let show_progress = progress_caps.tty && progress_caps.color && !json && !jsonl;
-    let username_owned = username.clone();
+    // Live dashboard (Phase 4): same visibility gate as the legacy
+    // progress line, so pipes/NO_COLOR/JSON/JSONL stay byte-identical.
+    let session = show_progress.then(|| {
+        rxscan::terminal_dashboard::SearchDashboardSession::begin(
+            username.clone(),
+            rxscan::search::DEFAULT_SEARCH_CONCURRENCY,
+            deadline,
+            progress_caps,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+    });
+    let session = session.flatten();
+    // Cancel key watcher (Unix TTY stdin only; SIGINT always works).
+    let watcher = session
+        .as_ref()
+        .map(|session| std::sync::Arc::clone(session.feed()))
+        .and_then(rxscan::terminal_dashboard::spawn_cancel_watcher);
     let progress_hook = |completed: usize, total: usize| {
-        if show_progress {
-            use std::io::Write as _;
-            let _ = write!(
-                std::io::stderr(),
-                "\rSEARCHING  {}  {}/{} complete",
-                username_owned,
-                completed,
-                total
-            );
-            let _ = std::io::stderr().flush();
+        let Some(session) = session.as_deref() else {
+            return;
+        };
+        // Cancel key takes effect at the next scheduler wave boundary.
+        if session.feed().is_cancelled() {
+            cancelled.store(true, std::sync::atomic::Ordering::Release);
         }
+        session.on_wave(completed, total, &mut std::io::stderr());
     };
-    if show_progress {
-        use std::io::Write as _;
-        let _ = writeln!(std::io::stderr(), "SEARCHING  {username}");
-    }
+    let observation_hook = |observation: &rxscan::search::SearchObservation| {
+        let Some(session) = session.as_deref() else {
+            return;
+        };
+        session.on_observation(
+            format!("{:?}", observation.status).to_ascii_lowercase(),
+            rxscan::exposure::scrub_text(&observation.provider_id),
+            format!("conf {}", observation.confidence),
+        );
+    };
     let report = match rxscan::search::execute_username_search_full(
         &username,
         rxscan::search::DEFAULT_SEARCH_CONCURRENCY,
@@ -1828,6 +1847,9 @@ fn run_search(args: &[String]) {
         &categories,
         cancelled,
         Some(&progress_hook),
+        session
+            .as_deref()
+            .map(|_| &observation_hook as &dyn Fn(&rxscan::search::SearchObservation)),
     ) {
         Ok(report) => report,
         Err(error) => {
@@ -1838,6 +1860,12 @@ fn run_search(args: &[String]) {
     if show_progress {
         use std::io::Write as _;
         let _ = writeln!(std::io::stderr());
+    }
+    if let Some(session) = session.as_deref() {
+        session.finish(&mut std::io::stderr());
+    }
+    if let Some(watcher) = watcher {
+        let _ = watcher.join();
     }
     let was_cancelled = cancelled.load(std::sync::atomic::Ordering::Acquire);
     if let Some(path) = project_db {

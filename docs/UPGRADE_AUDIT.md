@@ -294,6 +294,14 @@ rejected: `serde-xml-rs` (builds full DOM → unbounded allocation), `xml-rs`
 `<tag attr="">` scanner limited to the Nmap schema subset, documented here
 first. No other new crates are proposed.
 
+**Phase 4 addition (Unix only): `libc` (MIT/Apache-2.0, already in the
+dependency tree transitively).** Justification: the dashboard cancel key
+needs stdin termios raw mode + `poll(2)`; `std` exposes neither, and
+hand-rolled FFI would be worse than the standard binding. Scope is
+`[target.'cfg(unix)'.dependencies]` only; other platforms fall back to
+SIGINT cancellation (documented platform difference). No other new crates
+are added by Phase 4.
+
 ---
 
 ## 6. Risks

@@ -66,6 +66,11 @@ toml = "0.8"
 url = "2.5"
 x509-parser = "0.16"
 
+# Phase 4 only: Unix stdin raw mode for the dashboard cancel key
+# (termios/poll; already in the tree transitively, MIT/Apache-2.0).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 rcgen = "0.13"
 
