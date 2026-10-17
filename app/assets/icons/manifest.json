@@ -1,0 +1,446 @@
+{
+  "domain": {
+    "glyph": "domain",
+    "ramp": "purple",
+    "shape": "circle",
+    "category": "infrastructure"
+  },
+  "ip": {
+    "glyph": "ip",
+    "ramp": "teal",
+    "shape": "circle",
+    "category": "infrastructure"
+  },
+  "network": {
+    "glyph": "network",
+    "ramp": "teal",
+    "shape": "circle",
+    "category": "infrastructure"
+  },
+  "host": {
+    "glyph": "host",
+    "ramp": "teal",
+    "shape": "circle",
+    "category": "infrastructure"
+  },
+  "service": {
+    "glyph": "service",
+    "ramp": "coral",
+    "shape": "square",
+    "category": "infrastructure"
+  },
+  "service-https": {
+    "glyph": "https",
+    "ramp": "coral",
+    "shape": "square",
+    "category": "infrastructure"
+  },
+  "service-ssh": {
+    "glyph": "ssh",
+    "ramp": "coral",
+    "shape": "square",
+    "category": "infrastructure"
+  },
+  "service-database": {
+    "glyph": "database",
+    "ramp": "coral",
+    "shape": "square",
+    "category": "infrastructure"
+  },
+  "software": {
+    "glyph": "software",
+    "ramp": "gray",
+    "shape": "square",
+    "category": "infrastructure"
+  },
+  "certificate": {
+    "glyph": "certificate",
+    "ramp": "blue",
+    "shape": "square",
+    "category": "infrastructure"
+  },
+  "username": {
+    "glyph": "username",
+    "ramp": "pink",
+    "shape": "circle",
+    "category": "identity"
+  },
+  "account": {
+    "glyph": "account",
+    "ramp": "pink",
+    "shape": "square",
+    "category": "identity"
+  },
+  "url": {
+    "glyph": "url",
+    "ramp": "purple",
+    "shape": "square",
+    "category": "infrastructure"
+  },
+  "finding": {
+    "glyph": "finding",
+    "ramp": "red",
+    "shape": "square",
+    "category": "threat"
+  },
+  "evidence": {
+    "glyph": "evidence",
+    "ramp": "amber",
+    "shape": "square",
+    "category": "investigation"
+  },
+  "scope": {
+    "glyph": "scope",
+    "ramp": "green",
+    "shape": "square",
+    "category": "investigation"
+  },
+  "person": {
+    "glyph": "person",
+    "ramp": "pink",
+    "shape": "circle",
+    "category": "identity"
+  },
+  "organization": {
+    "glyph": "organization",
+    "ramp": "pink",
+    "shape": "square",
+    "category": "identity"
+  },
+  "social": {
+    "glyph": "social",
+    "ramp": "pink",
+    "shape": "square",
+    "category": "identity"
+  },
+  "email": {
+    "glyph": "email",
+    "ramp": "blue",
+    "shape": "square",
+    "category": "contact-and-asset"
+  },
+  "phone": {
+    "glyph": "phone",
+    "ramp": "blue",
+    "shape": "square",
+    "category": "contact-and-asset"
+  },
+  "location": {
+    "glyph": "location",
+    "ramp": "green",
+    "shape": "circle",
+    "category": "contact-and-asset"
+  },
+  "file": {
+    "glyph": "file",
+    "ramp": "gray",
+    "shape": "square",
+    "category": "investigation"
+  },
+  "image": {
+    "glyph": "image",
+    "ramp": "gray",
+    "shape": "square",
+    "category": "investigation"
+  },
+  "wallet": {
+    "glyph": "wallet",
+    "ramp": "amber",
+    "shape": "square",
+    "category": "contact-and-asset"
+  },
+  "darkweb": {
+    "glyph": "darkweb",
+    "ramp": "purple",
+    "shape": "circle",
+    "category": "infrastructure"
+  },
+  "watchlist": {
+    "glyph": "watchlist",
+    "ramp": "amber",
+    "shape": "square",
+    "category": "investigation"
+  },
+  "case": {
+    "glyph": "case",
+    "ramp": "blue",
+    "shape": "square",
+    "category": "investigation"
+  },
+  "timeline": {
+    "glyph": "timeline",
+    "ramp": "gray",
+    "shape": "circle",
+    "category": "investigation"
+  },
+  "router": {
+    "glyph": "router",
+    "ramp": "teal",
+    "shape": "square",
+    "category": "infrastructure"
+  },
+  "device": {
+    "glyph": "device",
+    "ramp": "teal",
+    "shape": "square",
+    "category": "infrastructure"
+  },
+  "cloud": {
+    "glyph": "cloud",
+    "ramp": "teal",
+    "shape": "circle",
+    "category": "infrastructure"
+  },
+  "subdomain": {
+    "glyph": "subdomain",
+    "ramp": "purple",
+    "shape": "square",
+    "category": "infrastructure"
+  },
+  "hacker": {
+    "glyph": "hacker",
+    "ramp": "red",
+    "shape": "circle",
+    "category": "threat"
+  },
+  "law-enforcement": {
+    "glyph": "law-enforcement",
+    "ramp": "blue",
+    "shape": "circle",
+    "category": "investigation"
+  },
+  "terrorist": {
+    "glyph": "terrorist",
+    "ramp": "red",
+    "shape": "circle",
+    "category": "threat"
+  },
+  "threat-group": {
+    "glyph": "threat-group",
+    "ramp": "red",
+    "shape": "square",
+    "category": "threat"
+  },
+  "malware": {
+    "glyph": "malware",
+    "ramp": "red",
+    "shape": "square",
+    "category": "threat"
+  },
+  "vulnerability": {
+    "glyph": "vulnerability",
+    "ramp": "red",
+    "shape": "square",
+    "category": "threat"
+  },
+  "credential": {
+    "glyph": "credential",
+    "ramp": "amber",
+    "shape": "square",
+    "category": "threat"
+  },
+  "asn": {
+    "glyph": "asn",
+    "ramp": "teal",
+    "shape": "circle",
+    "category": "infrastructure"
+  },
+  "botnet": {
+    "glyph": "botnet",
+    "ramp": "red",
+    "shape": "circle",
+    "category": "threat"
+  },
+  "ransomware": {
+    "glyph": "ransomware",
+    "ramp": "red",
+    "shape": "square",
+    "category": "threat"
+  },
+  "phishing": {
+    "glyph": "phishing",
+    "ramp": "red",
+    "shape": "square",
+    "category": "threat"
+  },
+  "cctv": {
+    "glyph": "cctv",
+    "ramp": "gray",
+    "shape": "square",
+    "category": "source-and-media"
+  },
+  "drone": {
+    "glyph": "drone",
+    "ramp": "gray",
+    "shape": "circle",
+    "category": "source-and-media"
+  },
+  "satellite": {
+    "glyph": "satellite",
+    "ramp": "blue",
+    "shape": "circle",
+    "category": "source-and-media"
+  },
+  "firewall": {
+    "glyph": "firewall",
+    "ramp": "coral",
+    "shape": "square",
+    "category": "infrastructure"
+  },
+  "vpn": {
+    "glyph": "vpn",
+    "ramp": "teal",
+    "shape": "circle",
+    "category": "infrastructure"
+  },
+  "proxy": {
+    "glyph": "proxy",
+    "ramp": "teal",
+    "shape": "square",
+    "category": "infrastructure"
+  },
+  "dns-record": {
+    "glyph": "dns-record",
+    "ramp": "purple",
+    "shape": "square",
+    "category": "infrastructure"
+  },
+  "port": {
+    "glyph": "port",
+    "ramp": "coral",
+    "shape": "square",
+    "category": "infrastructure"
+  },
+  "packet": {
+    "glyph": "packet",
+    "ramp": "teal",
+    "shape": "square",
+    "category": "infrastructure"
+  },
+  "honeypot": {
+    "glyph": "honeypot",
+    "ramp": "amber",
+    "shape": "square",
+    "category": "infrastructure"
+  },
+  "api": {
+    "glyph": "api",
+    "ramp": "coral",
+    "shape": "square",
+    "category": "infrastructure"
+  },
+  "container": {
+    "glyph": "container",
+    "ramp": "teal",
+    "shape": "square",
+    "category": "infrastructure"
+  },
+  "leak": {
+    "glyph": "leak",
+    "ramp": "red",
+    "shape": "circle",
+    "category": "threat"
+  },
+  "forum": {
+    "glyph": "forum",
+    "ramp": "pink",
+    "shape": "square",
+    "category": "source-and-media"
+  },
+  "marketplace": {
+    "glyph": "marketplace",
+    "ramp": "amber",
+    "shape": "square",
+    "category": "source-and-media"
+  },
+  "chat": {
+    "glyph": "chat",
+    "ramp": "pink",
+    "shape": "square",
+    "category": "source-and-media"
+  },
+  "news": {
+    "glyph": "news",
+    "ramp": "gray",
+    "shape": "square",
+    "category": "source-and-media"
+  },
+  "id-document": {
+    "glyph": "id-document",
+    "ramp": "pink",
+    "shape": "square",
+    "category": "identity"
+  },
+  "vehicle": {
+    "glyph": "vehicle",
+    "ramp": "green",
+    "shape": "square",
+    "category": "contact-and-asset"
+  },
+  "aircraft": {
+    "glyph": "aircraft",
+    "ramp": "blue",
+    "shape": "circle",
+    "category": "contact-and-asset"
+  },
+  "vessel": {
+    "glyph": "vessel",
+    "ramp": "blue",
+    "shape": "circle",
+    "category": "contact-and-asset"
+  },
+  "bank": {
+    "glyph": "bank",
+    "ramp": "amber",
+    "shape": "square",
+    "category": "contact-and-asset"
+  },
+  "court": {
+    "glyph": "court",
+    "ramp": "blue",
+    "shape": "square",
+    "category": "investigation"
+  },
+  "sanctions": {
+    "glyph": "sanctions",
+    "ramp": "red",
+    "shape": "circle",
+    "category": "investigation"
+  },
+  "wifi": {
+    "glyph": "wifi",
+    "ramp": "teal",
+    "shape": "circle",
+    "category": "infrastructure"
+  },
+  "mobile": {
+    "glyph": "mobile",
+    "ramp": "gray",
+    "shape": "square",
+    "category": "infrastructure"
+  },
+  "os": {
+    "glyph": "os",
+    "ramp": "gray",
+    "shape": "square",
+    "category": "infrastructure"
+  },
+  "exploit": {
+    "glyph": "exploit",
+    "ramp": "red",
+    "shape": "circle",
+    "category": "threat"
+  },
+  "bitcoin": {
+    "glyph": "bitcoin",
+    "ramp": "amber",
+    "shape": "circle",
+    "category": "contact-and-asset"
+  },
+  "hash": {
+    "glyph": "hash",
+    "ramp": "gray",
+    "shape": "circle",
+    "category": "investigation"
+  }
+}
