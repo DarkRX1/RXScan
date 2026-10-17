@@ -1638,13 +1638,38 @@ pub fn render_export(
 }
 
 /// Canonical JSON graph: every node/edge carries evidence + confidence.
+/// Nodes additionally carry `icon` and `category` from the icon manifest
+/// (additive; existing fields are unchanged).
 pub fn to_json(view: &ViewGraph) -> String {
+    let nodes: Vec<serde_json::Value> = view
+        .nodes
+        .iter()
+        .map(|node| {
+            let icon =
+                crate::graph_icons::node_icon(node.kind, &node.stored_kind, &node.attributes);
+            let category = icon.and_then(crate::graph_icons::category_of);
+            serde_json::json!({
+                "id": node.id,
+                "kind": node.kind.as_str(),
+                "stored_kind": node.stored_kind,
+                "label": node.label,
+                "link_confidence": node.link_confidence,
+                "scope": node.scope.as_str(),
+                "observations": node.observations,
+                "attributes": node.attributes,
+                "evidence": node.evidence,
+                "member_count": node.member_count,
+                "icon": icon,
+                "category": category,
+            })
+        })
+        .collect();
     let payload = serde_json::json!({
         "graph_schema_version": VIEW_SCHEMA_VERSION,
         "truncated": view.truncated,
         "total_nodes": view.total_nodes,
         "total_edges": view.total_edges,
-        "nodes": view.nodes,
+        "nodes": nodes,
         "edges": view.edges,
     });
     serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_owned())
@@ -1681,6 +1706,8 @@ pub fn to_graphml(view: &ViewGraph) -> String {
         ("kind", "node", "string"),
         ("stored_kind", "node", "string"),
         ("label", "node", "string"),
+        ("icon", "node", "string"),
+        ("category", "node", "string"),
         ("confidence", "node", "int"),
         ("scope", "node", "string"),
         ("observations", "node", "int"),
@@ -1709,6 +1736,13 @@ pub fn to_graphml(view: &ViewGraph) -> String {
             "<data key=\"stored_kind\">{}</data>\n",
             xml_escape(&node.stored_kind)
         ));
+        let icon = crate::graph_icons::node_icon(node.kind, &node.stored_kind, &node.attributes);
+        if let Some(icon) = icon {
+            out.push_str(&format!("<data key=\"icon\">{icon}</data>\n"));
+            if let Some(category) = crate::graph_icons::category_of(icon) {
+                out.push_str(&format!("<data key=\"category\">{category}</data>\n"));
+            }
+        }
         out.push_str(&format!(
             "<data key=\"label\">{}</data>\n",
             xml_escape(&node.label)
