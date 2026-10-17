@@ -320,6 +320,19 @@ pub struct ObservationRow {
     pub timestamp_ms: u64,
 }
 
+/// One masked evidence item exported into a tamper-evident bundle.
+/// `details_json` is the raw stored excerpt; callers mask it before writing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceItem {
+    pub id: i64,
+    pub scan_run: String,
+    pub source: String,
+    pub asset_id: String,
+    pub confidence: u8,
+    pub details_json: String,
+    pub timestamp_ms: u64,
+}
+
 /// Change categories: confirmed transitions vs newly-observed additions.
 /// Absence without coverage never produces a removal record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1173,6 +1186,18 @@ impl ProjectDb {
             .map_err(ProjectDbError::from)
     }
 
+    /// All evidence items stored in the project, in stable id order. Used by
+    /// the tamper-evident evidence bundle; callers mask details before export.
+    pub fn evidence_items(&self) -> Result<Vec<EvidenceItem>, ProjectDbError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, scan_run, source, asset_id, confidence, details_json, timestamp_ms
+             FROM evidence_store ORDER BY id",
+        )?;
+        let rows = stmt.query_map([], row_to_evidence_item)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(ProjectDbError::from)
+    }
+
     /// Web/API support: `(entities, observations, relationships, runs)`.
     pub fn counts(&self) -> Result<(u64, u64, u64, u64), ProjectDbError> {
         let count = |sql: &str| -> Result<u64, ProjectDbError> {
@@ -1837,6 +1862,19 @@ fn row_to_observation(row: &rusqlite::Row<'_>) -> rusqlite::Result<ObservationRo
         module: row.get(8)?,
         task_id: row.get(9)?,
         timestamp_ms: row.get(10)?,
+    })
+}
+
+fn row_to_evidence_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<EvidenceItem> {
+    let confidence: i64 = row.get(5)?;
+    Ok(EvidenceItem {
+        id: row.get(0)?,
+        scan_run: row.get(1)?,
+        source: row.get(2)?,
+        asset_id: row.get(3)?,
+        confidence: confidence.clamp(0, 100) as u8,
+        details_json: row.get(6)?,
+        timestamp_ms: row.get(7)?,
     })
 }
 

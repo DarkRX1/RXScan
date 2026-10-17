@@ -3,6 +3,7 @@ use rxscan::{
     analysis, capabilities, cli::Cli, diff, plan::ScanPlan, project, report, run,
     search::SearchStatus, unknown,
 };
+use std::path::PathBuf;
 
 /// Phase 20 stdio contract.
 ///
@@ -227,6 +228,14 @@ fn main() {
         run_exposure_cli(&args);
         return;
     }
+    if args.get(1).is_some_and(|arg| arg == "evidence-bundle") {
+        run_evidence_bundle(&args);
+        return;
+    }
+    if args.get(1).is_some_and(|arg| arg == "verify-bundle") {
+        run_verify_bundle(&args);
+        return;
+    }
     if args.get(1).is_some_and(|arg| arg == "os-lab") {
         run_os_lab(&args);
         return;
@@ -398,6 +407,8 @@ fn suggest_command(input: &str) -> Option<String> {
         "unknown",
         "scan",
         "web",
+        "evidence-bundle",
+        "verify-bundle",
     ];
     // Fast path for the most common singular/plural mistake.
     if input == "capability" {
@@ -2633,6 +2644,273 @@ fn run_project(args: &[String]) {
 ///
 /// Read-only except `diff`, which persists computed changes for the scan
 /// pair. Never touches the network; scope already enforced at scan time.
+fn run_evidence_bundle(args: &[String]) {
+    use rxscan::exposure::{mask_json, scrub_text};
+    use rxscan::project_db::ProjectDb;
+    use std::path::Path;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let usage = "rxscan evidence-bundle <project> --case-id ID [--operator NAME] --out <path>";
+    if args
+        .get(2)
+        .map(String::as_str)
+        .map(|s| s == "--help" || s == "-h")
+        .unwrap_or(false)
+    {
+        out_line!("{}", usage);
+        return;
+    }
+    let project: Option<&str> = args.get(2).map(String::as_str);
+    let mut case_id: Option<&str> = None;
+    let mut operator: Option<&str> = None;
+    let mut out_dir: Option<&str> = None;
+    let mut iter = args[3..].iter().peekable();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--case-id" => case_id = iter.next().map(String::as_str),
+            "--operator" => operator = iter.next().map(String::as_str),
+            "--out" => out_dir = iter.next().map(String::as_str),
+            _ => {
+                err!("rxscan evidence-bundle: unexpected argument '{arg}' ({usage})");
+                std::process::exit(2);
+            }
+        }
+    }
+    let project = match project {
+        Some(p) => p,
+        None => {
+            err!("rxscan evidence-bundle: missing <project> ({usage})");
+            std::process::exit(2);
+        }
+    };
+    let case_id = match case_id {
+        Some(c) => c,
+        None => {
+            err!("rxscan evidence-bundle: missing --case-id ({usage})");
+            std::process::exit(2);
+        }
+    };
+    let out_dir = match out_dir {
+        Some(o) => o,
+        None => {
+            err!("rxscan evidence-bundle: missing --out ({usage})");
+            std::process::exit(2);
+        }
+    };
+
+    let db = match ProjectDb::open(Path::new(project)) {
+        Ok(db) => db,
+        Err(error) => {
+            err!("rxscan evidence-bundle: cannot open project '{project}': {error}");
+            std::process::exit(1);
+        }
+    };
+    let evidence_items = db.evidence_items().unwrap_or_default();
+    let run_ids = db.scan_ids().unwrap_or_default();
+
+    let created = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let created_iso = format_utc(created);
+
+    let out_path = PathBuf::from(out_dir);
+    let _ = std::fs::create_dir_all(&out_path);
+
+    let mut evidence_jsonl = String::new();
+    let mut evidence_ids: Vec<String> = Vec::new();
+    for item in &evidence_items {
+        evidence_ids.push(item.id.to_string());
+        let details: serde_json::Value = serde_json::from_str(&item.details_json)
+            .unwrap_or(serde_json::json!(item.details_json));
+        let masked_details = mask_json(&details);
+        let record = serde_json::json!({
+            "id": item.id,
+            "scan_run": scrub_text(&item.scan_run),
+            "source": scrub_text(&item.source),
+            "asset_id": scrub_text(&item.asset_id),
+            "confidence": item.confidence,
+            "details": masked_details,
+            "timestamp_ms": item.timestamp_ms,
+        });
+        evidence_jsonl.push_str(&serde_json::to_string(&record).unwrap_or_default());
+        evidence_jsonl.push('\n');
+    }
+
+    let bundle = serde_json::json!({
+        "bundle_schema_version": 1,
+        "tool": "rxscan",
+        "tool_version": "1.2.0",
+        "created_at": created_iso,
+        "created_at_epoch": created,
+        "case_id": case_id,
+        "operator": operator,
+        "scope": {"runs": run_ids},
+        "run_ids": run_ids,
+        "evidence_count": evidence_items.len(),
+        "evidence_ids": evidence_ids,
+        "files": ["bundle.json", "evidence.jsonl"],
+        "note": "masked redacted copy of stored evidence; originals remain in the project database. RXScan does not claim legal admissibility, signing, or operator authentication."
+    });
+    let bundle_json = serde_json::to_string_pretty(&bundle).unwrap_or_default();
+
+    let evidence_path = out_path.join("evidence.jsonl");
+    let _ = std::fs::write(&evidence_path, &evidence_jsonl);
+    let _ = std::fs::write(out_path.join("bundle.json"), &bundle_json);
+
+    // SHA-256 manifest over every file in the bundle directory.
+    let mut entries: Vec<(String, String)> = Vec::new();
+    for entry in ["bundle.json", "evidence.jsonl"] {
+        let p = out_path.join(entry);
+        if let Ok(hash) = sha256_file(&p) {
+            entries.push((hash, entry.to_owned()));
+        }
+    }
+    entries.sort();
+    let mut manifest = String::new();
+    for (hash, name) in &entries {
+        manifest.push_str(&format!("{hash}  {name}\n"));
+    }
+    let _ = std::fs::write(out_path.join("manifest.txt"), &manifest);
+
+    out_line!(
+        "evidence bundle written to {} ({} evidence items, {} runs)",
+        out_path.display(),
+        evidence_items.len(),
+        run_ids.len()
+    );
+}
+
+fn run_verify_bundle(args: &[String]) {
+    use std::collections::BTreeSet;
+
+    let usage = "rxscan verify-bundle <path>";
+    let help = args
+        .get(2)
+        .map(String::as_str)
+        .map(|s| s == "--help" || s == "-h")
+        .unwrap_or(false);
+    let bundle_path = match args.get(2).map(String::as_str) {
+        Some(p) if !help => PathBuf::from(p),
+        _ => {
+            if help {
+                out_line!("{}", usage);
+                return;
+            }
+            err!("rxscan verify-bundle: missing <path> ({usage})");
+            std::process::exit(2);
+        }
+    };
+
+    let manifest_path = bundle_path.join("manifest.txt");
+    let manifest = match std::fs::read_to_string(&manifest_path) {
+        Ok(m) => m,
+        Err(_) => {
+            err!("rxscan verify-bundle: manifest.txt missing in {bundle_path:?}");
+            std::process::exit(1);
+        }
+    };
+
+    let mut expected: Vec<(String, String)> = Vec::new();
+    for line in manifest.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.splitn(2, char::is_whitespace);
+        let hash = parts.next().unwrap_or("").to_owned();
+        let name = parts.next().unwrap_or("").trim().to_owned();
+        if hash.is_empty() || name.is_empty() {
+            err!("rxscan verify-bundle: malformed manifest line: {line}");
+            std::process::exit(1);
+        }
+        expected.push((hash, name));
+    }
+
+    let mut actual: Vec<String> = Vec::new();
+    if let Ok(read_dir) = std::fs::read_dir(&bundle_path) {
+        for entry in read_dir.flatten() {
+            let p = entry.path();
+            if p.is_file() {
+                if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                    if name == "manifest.txt" {
+                        continue;
+                    }
+                    actual.push(name.to_owned());
+                }
+            }
+        }
+    }
+    actual.sort();
+
+    let mut ok = true;
+    let expected_names: BTreeSet<&str> = expected.iter().map(|(_, n)| n.as_str()).collect();
+    for (hash, name) in &expected {
+        let p = bundle_path.join(name);
+        let actual_hash = match sha256_file(&p) {
+            Ok(h) => h,
+            Err(_) => {
+                err!("rxscan verify-bundle: missing file '{name}'");
+                ok = false;
+                continue;
+            }
+        };
+        if actual_hash != *hash {
+            err!("rxscan verify-bundle: hash mismatch for '{name}'");
+            ok = false;
+        }
+    }
+    for name in &actual {
+        if !expected_names.contains(name.as_str()) {
+            err!("rxscan verify-bundle: extra file '{name}'");
+            ok = false;
+        }
+    }
+
+    if ok {
+        out_line!("verify-bundle: {} file(s) verified OK", expected.len());
+    } else {
+        err!("rxscan verify-bundle: verification FAILED");
+        std::process::exit(1);
+    }
+}
+
+fn format_utc(epoch_secs: u64) -> String {
+    let days = (epoch_secs / 86_400) as i64;
+    let rem = epoch_secs % 86_400;
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u64;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u64;
+    let year = year + i64::from(month <= 2);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year,
+        month,
+        day,
+        rem / 3_600,
+        (rem % 3_600) / 60,
+        rem % 60
+    )
+}
+
+fn sha256_file(path: &PathBuf) -> Result<String, std::io::Error> {
+    let data = std::fs::read(path)?;
+    Ok(sha256_bytes(&data))
+}
+
+fn sha256_bytes(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    format!("{:x}", hasher.finalize())
+}
+
 fn run_project_db(args: &[String]) {
     use rxscan::project_db::ProjectDb;
     let usage = "rxscan project-db scans|summary|changes|diff|explain --db <path> ...";

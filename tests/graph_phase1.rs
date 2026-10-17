@@ -323,6 +323,86 @@ fn graph_exports_contain_expected_icon() {
 }
 
 #[test]
+fn evidence_bundle_verify_roundtrip_and_tamper() {
+    use std::process::Command;
+    let (path, _db) = tmp_db("bundle");
+    let dir = path.parent().unwrap();
+    let out_dir = dir.join("bundle-out");
+    let bundle = Command::new(bin())
+        .arg("evidence-bundle")
+        .arg(path.to_str().unwrap())
+        .arg("--case-id")
+        .arg("CASE-1")
+        .arg("--operator")
+        .arg("analyst")
+        .arg("--out")
+        .arg(out_dir.to_str().unwrap())
+        .output()
+        .expect("evidence-bundle runs");
+    assert!(
+        bundle.status.success(),
+        "evidence-bundle: {}",
+        String::from_utf8_lossy(&bundle.stderr)
+    );
+    assert!(out_dir.join("bundle.json").exists(), "bundle.json written");
+    assert!(
+        out_dir.join("evidence.jsonl").exists(),
+        "evidence.jsonl written"
+    );
+    assert!(
+        out_dir.join("manifest.txt").exists(),
+        "manifest.txt written"
+    );
+    let bundle_text = std::fs::read_to_string(out_dir.join("bundle.json")).unwrap();
+    assert!(bundle_text.contains("CASE-1"), "case id recorded");
+    assert!(bundle_text.contains("1.2.0"), "tool version recorded");
+    assert!(
+        bundle_text.contains("Z"),
+        "UTC timestamp recorded (ISO8601)"
+    );
+    assert!(
+        bundle_text.contains("analyst") || bundle_text.contains("operator"),
+        "operator recorded"
+    );
+    // valid bundle verifies OK
+    let good = Command::new(bin())
+        .arg("verify-bundle")
+        .arg(out_dir.to_str().unwrap())
+        .output()
+        .expect("verify-bundle runs");
+    assert!(
+        good.status.success(),
+        "verify-bundle good bundle: {}",
+        String::from_utf8_lossy(&good.stderr)
+    );
+    // tampered evidence fails verification
+    let ev_path = out_dir.join("evidence.jsonl");
+    let mut ev = std::fs::read_to_string(&ev_path).unwrap();
+    ev.push_str("tampered-append\n");
+    std::fs::write(&ev_path, &ev).unwrap();
+    let bad = Command::new(bin())
+        .arg("verify-bundle")
+        .arg(out_dir.to_str().unwrap())
+        .output()
+        .expect("verify-bundle runs");
+    assert!(
+        !bad.status.success(),
+        "verify-bundle should fail on tampered bundle"
+    );
+    // extra file fails verification
+    let _ = std::fs::write(out_dir.join("extra.txt"), "extra");
+    let extra = Command::new(bin())
+        .arg("verify-bundle")
+        .arg(out_dir.to_str().unwrap())
+        .output()
+        .expect("verify-bundle runs");
+    assert!(
+        !extra.status.success(),
+        "verify-bundle should fail on extra file"
+    );
+}
+
+#[test]
 fn cli_filters_layouts_and_errors() {
     let (path, _db) = tmp_db("filters");
     // Type filter narrows to requested kinds.
