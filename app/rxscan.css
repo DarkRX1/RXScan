@@ -454,3 +454,35 @@ tr.status-running td:nth-child(3) { color: var(--rx-cyan-bright); font-weight: 7
 @media (prefers-reduced-motion: reduce) {
   .gnode-wrap.selected .gnode-shape.gicon { filter: none; }
 }
+
+/* Mobile: safe-area insets, no horizontal scroll at 360px, and 44px touch
+   targets. Stacked cards / bottom-sheet behaviour is handled by the existing
+   breakpoint stack; these rules keep the narrow viewport usable. */
+body { overflow-x: hidden; }
+@media (max-width: 360px) {
+  body { overflow-x: hidden; }
+  .shell { grid-template-columns: 1fr; min-width: 0; }
+  .workspace {
+    padding-left: max(0.75rem, env(safe-area-inset-left));
+    padding-right: max(0.75rem, env(safe-area-inset-right));
+  }
+  .workspace section { max-width: 100%; }
+  .table-wrap {
+    margin-left: max(-0.5rem, calc(-1 * env(safe-area-inset-left)));
+    margin-right: max(-0.5rem, calc(-1 * env(safe-area-inset-right)));
+  }
+  /* Larger node touch targets on narrow viewports (≥44px). */
+  #graph-canvas, #inv-graph, #p-graph { min-height: 260px; }
+  .gnode-wrap { padding: 6px; box-sizing: border-box; }
+  .gnode-shape { stroke-width: 3; }
+  button, .sidebar a, .tabs button, .graph-toolbar button {
+    min-height: 44px; min-width: 44px;
+  }
+}
+@media (max-width: 420px) {
+  body { overflow-x: hidden; }
+  .table-wrap {
+    margin-left: max(-0.5rem, calc(-1 * env(safe-area-inset-left)));
+    margin-right: max(-0.5rem, calc(-1 * env(safe-area-inset-right)));
+  }
+}

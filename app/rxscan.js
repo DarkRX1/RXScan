@@ -2111,6 +2111,14 @@
 
   /* -- rendering ----------------------------------------------------------- */
   const gvView = { x: 0, y: 0, k: 1 };
+  /* Narrow-viewport render budget (mobile): at most 200 nodes by default,
+     with an explicit "show more" control to raise the cap. */
+  let gvBudgetCap = window.innerWidth <= 760 ? 200 : GV_RENDER_NODES;
+  window.addEventListener("resize", () => {
+    const next = window.innerWidth <= 760 ? 200 : GV_RENDER_NODES;
+    if (next !== gvBudgetCap) { gvBudgetCap = next; gvRender(); }
+  });
+  function gvBudget() { return gvBudgetCap; }
   function gvApplyTransform() {
     const g = $("graph-canvas").querySelector("g[data-root]");
     if (g) g.setAttribute("transform", "translate(" + gvView.x + "," + gvView.y + ") scale(" + gvView.k + ")");
@@ -2208,7 +2216,7 @@
     if (!gv.loaded) { gvStatus("No graph loaded."); return; }
     let visible = gvVisible();
     visible = gvAutoCluster(visible);
-    const nodes = visible.nodes.slice(0, GV_RENDER_NODES);
+    const nodes = visible.nodes.slice(0, gvBudget());
     const edges = visible.edges.slice(0, GV_RENDER_EDGES);
     const shownIds = new Set(nodes.map((n) => n.id));
     const posOf = (id) => gv.positions.get(id) || [500, 350];
@@ -2461,16 +2469,48 @@
   $("graph-zin").addEventListener("click", () => gvZoom(1.25));
   $("graph-zout").addEventListener("click", () => gvZoom(0.8));
   $("graph-zreset").addEventListener("click", () => { gvView.x = 0; gvView.y = 0; gvView.k = 1; gvApplyTransform(); });
+  /* "Show more" raises the narrow-viewport node budget (mobile). */
+  (function () {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = "Show more";
+    btn.title = "Raise the narrow-viewport node budget";
+    const toolbar = $("graph-zreset").closest(".graph-toolbar");
+    if (toolbar) toolbar.appendChild(btn);
+    btn.addEventListener("click", () => {
+      gvBudgetCap = GV_RENDER_NODES;
+      btn.hidden = true;
+      gvRender();
+    });
+    if (window.innerWidth > 760) btn.hidden = true;
+  })();
   gvSvg().addEventListener("wheel", (ev) => {
     ev.preventDefault();
     gvZoom(ev.deltaY < 0 ? 1.1 : 0.9);
   }, { passive: false });
 
   let gvPan = null, gvBox = null;
+  let gvLastTap = 0, gvLastTapX = 0, gvLastTapY = 0;
   gvSvg().addEventListener("pointerdown", (ev) => {
     hideCtxMenu();
     if (ev.button !== 0) return;
     gvSvg().setPointerCapture(ev.pointerId);
+    const now = Date.now();
+    const dx = ev.clientX - gvLastTapX, dy = ev.clientY - gvLastTapY;
+    const isDoubleTap = gvLastTap !== 0 && (now - gvLastTap) < 300 && Math.hypot(dx, dy) < 25;
+    if (isDoubleTap) {
+      gvLastTap = 0;
+      ev.preventDefault();
+      const [wx, wy] = gvScreenToWorld(ev.clientX, ev.clientY);
+      const beforeK = gvView.k;
+      gvView.k = Math.min(4, Math.max(0.4, gvView.k * 2));
+      gvView.x = wx - (wx - gvView.x) * (gvView.k / beforeK);
+      gvView.y = wy - (wy - gvView.y) * (gvView.k / beforeK);
+      gvApplyTransform();
+      gvStatus("Double-tap zoom");
+      return;
+    }
+    gvLastTap = now; gvLastTapX = ev.clientX; gvLastTapY = ev.clientY;
     if (ev.shiftKey) {
       const [wx, wy] = gvScreenToWorld(ev.clientX, ev.clientY);
       gvBox = { x0: wx, y0: wy, x1: wx, y1: wy, el: null };
