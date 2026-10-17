@@ -1765,6 +1765,17 @@
   const GV_RENDER_NODES = 1500;
   const GV_RENDER_EDGES = 3000;
 
+  /* Icon ramp colors (manifest ramps). Used to tint icon glyphs by category;
+     light/dark tile variants fall back to these ramp colors. */
+  const RAMP_COLOR = {
+    amber: "#f59e0b", blue: "#078cff", coral: "#f97316", gray: "#6b7d94",
+    green: "#3ddc84", pink: "#e879f9", purple: "#8b5cf6", red: "#f06666",
+    teal: "#14b8a6",
+  };
+  /* Sprite `<use>` targets: inlined once from /app/assets/icons/glyphs/
+     rxscan-sprite.svg, cached in the graph <defs>. */
+  let spriteReady = false;
+
   const gv = {
     nodes: [], edges: [], byId: new Map(),
     positions: new Map(), hidden: new Set(), pinned: new Set(),
@@ -2143,10 +2154,57 @@
     return gvSvgEl("polygon", { points: pts(sides, -Math.PI / 2), fill, stroke, "stroke-width": 1.5, class: "gnode-shape" }, parent);
   }
 
+  /* Draw an icon glyph from the embedded sprite via `<use>`, never inline
+     SVG per node. Falls back to the caller when the sprite is unavailable. */
+  function gvDrawIcon(parent, icon, ramp, x, y, r, selected) {
+    const color = RAMP_COLOR[ramp] || GV_COLORS.network;
+    const use = gvSvgEl("use", {
+      href: `#rx-${icon}`,
+      x: (x - r).toFixed(1),
+      y: (y - r).toFixed(1),
+      width: (2 * r).toFixed(1),
+      height: (2 * r).toFixed(1),
+      fill: "none",
+      stroke: selected ? "#fff" : color,
+      "stroke-width": selected ? 2.5 : (r < 6 ? 1.2 : 2),
+      class: "gnode-shape gicon",
+    }, parent);
+    return use;
+  }
+
+  /* Inline the icon sprite symbols into the graph <defs> once, so every node
+     references them with `<use>` instead of duplicating SVG. Fail closed: the
+     shape renderer stays available if the sprite cannot be loaded. */
+  async function ensureSprite() {
+    if (spriteReady) return;
+    try {
+      const res = await fetch("/app/assets/icons/glyphs/rxscan-sprite.svg");
+      if (!res.ok) return;
+      const text = await res.text();
+      const doc = new DOMParser().parseFromString(text, "image/svg+xml");
+      const symbols = doc.querySelectorAll("symbol");
+      if (!symbols.length) return;
+      const svg = $("graph-canvas");
+      let defs = svg.querySelector("defs");
+      if (!defs) {
+        defs = document.createElementNS(GVNS, "defs");
+        svg.insertBefore(defs, svg.firstChild);
+      }
+      for (const sym of symbols) {
+        defs.appendChild(document.importNode(sym, true));
+      }
+      spriteReady = true;
+    } catch (_) {
+      spriteReady = false;
+    }
+  }
+
   function gvRender() {
     const svg = $("graph-canvas");
+    const defs = svg.querySelector("defs");
     while (svg.firstChild) svg.removeChild(svg.firstChild);
     const g = gvSvgEl("g", { "data-root": "1" }, svg);
+    if (defs) svg.insertBefore(defs, g);
     if (!gv.loaded) { gvStatus("No graph loaded."); return; }
     let visible = gvVisible();
     visible = gvAutoCluster(visible);
@@ -2155,6 +2213,7 @@
     const shownIds = new Set(nodes.map((n) => n.id));
     const posOf = (id) => gv.positions.get(id) || [500, 350];
     const query = $("graph-q").value.trim().toLowerCase();
+    const lightweight = gvView.k < 0.6 || window.innerWidth <= 760;
     for (const e of edges) {
       if (!shownIds.has(e.from) || !shownIds.has(e.to)) continue;
       const [x1, y1] = posOf(e.from), [x2, y2] = posOf(e.to);
@@ -2179,7 +2238,12 @@
       }, g);
       wrap.setAttribute("data-node", n.id);
       const r = kind === "cluster" ? Math.min(20, 6 + Math.sqrt(n.member_count || 1) * 2) : 8;
-      const shape = gvDrawShape(wrap, gvShape(kind), x, y, r, gvColor(kind));
+      const icon = n.icon || null;
+      const ramp = n.ramp || null;
+      const useIcon = spriteReady && icon && !lightweight && kind !== "cluster";
+      const shape = useIcon
+        ? gvDrawIcon(wrap, icon, ramp, x, y, r, gv.selection.has(n.id))
+        : gvDrawShape(wrap, gvShape(kind), x, y, r, gvColor(kind));
       shape.addEventListener("click", (ev) => { ev.stopPropagation(); gvSelectNode(n.id, ev.ctrlKey || ev.metaKey); });
       shape.addEventListener("dblclick", (ev) => { ev.stopPropagation(); gvExpandCluster(n.id); });
       wrap.addEventListener("click", (ev) => { ev.stopPropagation(); gvSelectNode(n.id, ev.ctrlKey || ev.metaKey); });
@@ -2209,16 +2273,43 @@
   function gvRenderLegend(nodes) {
     const ul = $("graph-legend");
     clear(ul);
-    const kinds = Array.from(new Set(nodes.map(gvKindOf))).sort();
-    for (const k of kinds) {
+    // Group visible nodes by manifest category, show one icon per category.
+    const byCat = new Map();
+    for (const n of nodes) {
+      const cat = n.category || "other";
+      if (!byCat.has(cat)) byCat.set(cat, []);
+      byCat.get(cat).push(n);
+    }
+    const cats = Array.from(byCat.keys()).sort();
+    for (const cat of cats) {
+      const members = byCat.get(cat);
+      const sample = members[0];
       const li = document.createElement("li");
-      const sw = document.createElement("span");
-      sw.className = "swatch";
-      sw.style.background = gvColor(k);
-      li.append(sw, document.createTextNode(k + " (" + gvShape(k) + ")"));
+      li.className = "legend-item";
+      const icon = sample.icon || null;
+      const ramp = sample.ramp || null;
+      if (icon && spriteReady) {
+        const sw = document.createElementNS(GVNS, "use");
+        sw.setAttribute("href", `#rx-${icon}`);
+        sw.setAttribute("width", "16");
+        sw.setAttribute("height", "16");
+        sw.setAttribute("fill", "none");
+        sw.setAttribute("stroke", RAMP_COLOR[ramp] || GV_COLORS.network);
+        sw.setAttribute("stroke-width", "2");
+        sw.setAttribute("class", "swatch");
+        li.appendChild(sw);
+      } else {
+        const sw = document.createElement("span");
+        sw.className = "swatch";
+        sw.style.background = sample ? gvColor(gvKindOf(sample)) : "#6b7d94";
+        li.appendChild(sw);
+      }
+      const label = document.createElement("span");
+      label.textContent = cat + " (" + members.length + ")";
+      li.appendChild(label);
       ul.appendChild(li);
     }
-    if (!kinds.length) ul.appendChild(el("li", "No entities — empty graph."));
+    if (!cats.length) ul.appendChild(el("li", "No entities — empty graph."));
     const solid = document.createElement("li");
     solid.textContent = "solid = observed · dashed = inferred · width = confidence";
     ul.appendChild(solid);
@@ -2308,6 +2399,7 @@
       gv.edges = data.edges || [];
       gv.byId = new Map(gv.nodes.map((n) => [n.id, n]));
       gv.truncated = !!data.truncated;
+      await ensureSprite();
       gv.hidden.clear(); gv.pinned.clear(); gv.selection.clear();
       for (const [superId, entry] of gv.collapsed) {
         if (entry.auto) gv.collapsed.delete(superId);

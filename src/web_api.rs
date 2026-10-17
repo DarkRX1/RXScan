@@ -309,6 +309,12 @@ pub struct GraphNodeDto {
     pub observation_count: u64,
     /// Display entity (`graph_view::DisplayKind`, additive).
     pub display_kind: String,
+    /// Icon name from the icon manifest (additive).
+    pub icon: Option<String>,
+    /// Manifest category for the icon (additive).
+    pub category: Option<String>,
+    /// Manifest color ramp for the icon (additive).
+    pub ramp: Option<String>,
     /// Strongest incident-edge confidence (`None` = unrated, additive).
     pub confidence: Option<u8>,
     /// Scope annotation (`in_scope`/`out_of_scope`/`scope_unknown`).
@@ -998,6 +1004,14 @@ fn static_asset(path: &str) -> Option<StaticAsset> {
             Some(StaticAsset {
                 content_type: "image/png",
                 body: include_bytes!("../app/assets/RXScanlogo.png"),
+            })
+        }
+        // Icon sprite: embedded once and cached by the GUI; referenced via
+        // `<use href="#rx-<icon>">` so glyphs are never duplicated per node.
+        "/app/assets/icons/glyphs/rxscan-sprite.svg" | "/icons/glyphs/rxscan-sprite.svg" => {
+            Some(StaticAsset {
+                content_type: "image/svg+xml; charset=utf-8",
+                body: include_bytes!("../app/assets/icons/glyphs/rxscan-sprite.svg"),
             })
         }
         "/favicon.png" | "/app/favicon.png" | "/assets/favicon.png" => Some(StaticAsset {
@@ -2793,16 +2807,28 @@ fn handle_project_graph(
     let nodes: Vec<GraphNodeDto> = view
         .nodes
         .iter()
-        .map(|node| GraphNodeDto {
-            id: node.id.clone(),
-            kind: node.stored_kind.clone(),
-            label: node.label.clone(),
-            first_seen_ms: node.first_seen_ms,
-            last_seen_ms: node.last_seen_ms,
-            observation_count: node.observations,
-            display_kind: node.kind.as_str().to_owned(),
-            confidence: node.link_confidence,
-            scope: node.scope.as_str().to_owned(),
+        .map(|node| {
+            let icon =
+                crate::graph_icons::node_icon(node.kind, &node.stored_kind, &node.attributes);
+            GraphNodeDto {
+                id: node.id.clone(),
+                kind: node.stored_kind.clone(),
+                label: node.label.clone(),
+                first_seen_ms: node.first_seen_ms,
+                last_seen_ms: node.last_seen_ms,
+                observation_count: node.observations,
+                display_kind: node.kind.as_str().to_owned(),
+                icon: icon.map(|icon| icon.to_owned()),
+                category: icon
+                    .and_then(crate::graph_icons::category_of)
+                    .map(|category| category.to_owned()),
+                ramp: icon
+                    .as_ref()
+                    .and_then(|icon| crate::graph_icons::ramp_of(icon))
+                    .map(|ramp| ramp.to_owned()),
+                confidence: node.link_confidence,
+                scope: node.scope.as_str().to_owned(),
+            }
         })
         .collect();
     let edges: Vec<GraphEdgeDto> = view

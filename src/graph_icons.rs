@@ -189,6 +189,118 @@ pub fn category_of(icon: &str) -> Option<&'static str> {
 }
 
 // ---------------------------------------------------------------------------
+// Icon ramp (color) -> theme color.
+// ---------------------------------------------------------------------------
+
+/// Manifest color ramp for an icon name.
+const ICON_RAMP: &[(&str, &str)] = &[
+    ("account", "pink"),
+    ("aircraft", "blue"),
+    ("api", "coral"),
+    ("asn", "teal"),
+    ("bank", "amber"),
+    ("bitcoin", "amber"),
+    ("botnet", "red"),
+    ("case", "blue"),
+    ("cctv", "gray"),
+    ("certificate", "blue"),
+    ("chat", "pink"),
+    ("cloud", "teal"),
+    ("container", "teal"),
+    ("court", "blue"),
+    ("credential", "amber"),
+    ("darkweb", "purple"),
+    ("database", "coral"),
+    ("device", "teal"),
+    ("dns-record", "purple"),
+    ("domain", "purple"),
+    ("drone", "gray"),
+    ("email", "blue"),
+    ("evidence", "amber"),
+    ("exploit", "red"),
+    ("file", "gray"),
+    ("finding", "red"),
+    ("firewall", "coral"),
+    ("forum", "pink"),
+    ("hacker", "red"),
+    ("hash", "gray"),
+    ("honeypot", "amber"),
+    ("host", "teal"),
+    ("https", "coral"),
+    ("id-document", "pink"),
+    ("image", "gray"),
+    ("ip", "teal"),
+    ("law-enforcement", "blue"),
+    ("leak", "red"),
+    ("location", "green"),
+    ("malware", "red"),
+    ("marketplace", "amber"),
+    ("mobile", "gray"),
+    ("network", "teal"),
+    ("news", "gray"),
+    ("organization", "pink"),
+    ("os", "gray"),
+    ("packet", "teal"),
+    ("person", "pink"),
+    ("phishing", "red"),
+    ("phone", "blue"),
+    ("port", "coral"),
+    ("proxy", "teal"),
+    ("ransomware", "red"),
+    ("router", "teal"),
+    ("sanctions", "red"),
+    ("satellite", "blue"),
+    ("scope", "green"),
+    ("service", "coral"),
+    ("social", "pink"),
+    ("software", "gray"),
+    ("ssh", "coral"),
+    ("subdomain", "purple"),
+    ("terrorist", "red"),
+    ("threat-group", "red"),
+    ("timeline", "gray"),
+    ("url", "purple"),
+    ("username", "pink"),
+    ("vehicle", "green"),
+    ("vessel", "blue"),
+    ("vpn", "teal"),
+    ("vulnerability", "red"),
+    ("wallet", "amber"),
+    ("watchlist", "amber"),
+    ("wifi", "teal"),
+];
+
+/// Manifest ramp for an icon name, or `None` when unknown.
+pub fn ramp_of(icon: &str) -> Option<&'static str> {
+    ICON_RAMP
+        .iter()
+        .find(|(name, _)| *name == icon)
+        .map(|(_, ramp)| *ramp)
+}
+
+/// Hex color for a ramp (RXScan palette). The GUI applies the active theme
+/// (light/dark tile variant or CSS token) on top of this base color.
+const RAMP_COLOR: &[(&str, &str)] = &[
+    ("amber", "#f59e0b"),
+    ("blue", "#078cff"),
+    ("coral", "#f97316"),
+    ("gray", "#6b7d94"),
+    ("green", "#3ddc84"),
+    ("pink", "#e879f9"),
+    ("purple", "#8b5cf6"),
+    ("red", "#f06666"),
+    ("teal", "#14b8a6"),
+];
+
+/// Theme base color for a ramp, or `None` when unknown.
+pub fn ramp_color(ramp: &str) -> Option<&'static str> {
+    RAMP_COLOR
+        .iter()
+        .find(|(name, _)| *name == ramp)
+        .map(|(_, color)| *color)
+}
+
+// ---------------------------------------------------------------------------
 // Unmapped-by-design register.
 // ---------------------------------------------------------------------------
 

@@ -438,3 +438,19 @@ tr.status-running td:nth-child(3) { color: var(--rx-cyan-bright); font-weight: 7
 .diff-controls select { width: auto; min-width: 10rem; }
 #p-diff-slider { width: 14rem; }
 #p-diff-summary { flex-basis: 100%; margin: 0.2rem 0; }
+
+/* Icon tiles in the link-analysis graph: sprite `<use>` glyphs tinted by the
+   manifest ramp; shape + label repeat what color shows, never color alone.
+   Lightweight markers (small dots) replace full tiles when zoomed far out or
+   on narrow viewports; reduced motion disables any extra filter. */
+.gnode-shape.gicon { vector-effect: non-scaling-stroke; }
+.gnode-wrap.selected .gnode-shape.gicon { stroke: #fff; stroke-width: 2.5; filter: drop-shadow(0 0 5px rgba(0, 239, 255, 0.9)); }
+.gnode-wrap:focus-visible .gnode-shape { stroke: var(--focus); stroke-width: 2.5; }
+.legend-item { display: flex; align-items: center; gap: 0.4rem; font-size: 0.8rem; color: var(--muted); border: 1px solid var(--rx-border); border-radius: 12px; padding: 0.15rem 0.6rem; margin: 0.1rem 0; }
+.legend-item .swatch { width: 16px; height: 16px; display: inline-block; flex: none; }
+@media (pointer: coarse) {
+  .gnode-shape.gicon { stroke-width: 3; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .gnode-wrap.selected .gnode-shape.gicon { filter: none; }
+}
