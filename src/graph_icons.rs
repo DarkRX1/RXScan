@@ -301,6 +301,97 @@ pub fn ramp_color(ramp: &str) -> Option<&'static str> {
 }
 
 // ---------------------------------------------------------------------------
+// Icon shape (manifest tile shape).
+// ---------------------------------------------------------------------------
+
+/// Manifest tile shape for an icon name. Used by the PNG rasterizer and by
+/// fallbacks so every format draws the same icon identity (shape + color).
+const ICON_SHAPE: &[(&str, &str)] = &[
+    ("account", "square"),
+    ("aircraft", "circle"),
+    ("api", "square"),
+    ("asn", "circle"),
+    ("bank", "square"),
+    ("bitcoin", "circle"),
+    ("botnet", "circle"),
+    ("case", "square"),
+    ("cctv", "square"),
+    ("certificate", "square"),
+    ("chat", "square"),
+    ("cloud", "circle"),
+    ("container", "square"),
+    ("court", "square"),
+    ("credential", "square"),
+    ("darkweb", "circle"),
+    ("database", "square"),
+    ("device", "square"),
+    ("dns-record", "square"),
+    ("domain", "circle"),
+    ("drone", "circle"),
+    ("email", "square"),
+    ("evidence", "square"),
+    ("exploit", "circle"),
+    ("file", "square"),
+    ("finding", "square"),
+    ("firewall", "square"),
+    ("forum", "square"),
+    ("hacker", "circle"),
+    ("hash", "circle"),
+    ("honeypot", "square"),
+    ("host", "circle"),
+    ("https", "square"),
+    ("id-document", "square"),
+    ("image", "square"),
+    ("ip", "circle"),
+    ("law-enforcement", "circle"),
+    ("leak", "circle"),
+    ("location", "circle"),
+    ("malware", "square"),
+    ("marketplace", "square"),
+    ("mobile", "square"),
+    ("network", "circle"),
+    ("news", "square"),
+    ("organization", "square"),
+    ("os", "square"),
+    ("packet", "square"),
+    ("person", "circle"),
+    ("phishing", "square"),
+    ("phone", "square"),
+    ("port", "square"),
+    ("proxy", "square"),
+    ("ransomware", "square"),
+    ("router", "square"),
+    ("sanctions", "circle"),
+    ("satellite", "circle"),
+    ("scope", "square"),
+    ("service", "square"),
+    ("social", "square"),
+    ("software", "square"),
+    ("ssh", "square"),
+    ("subdomain", "square"),
+    ("terrorist", "circle"),
+    ("threat-group", "square"),
+    ("timeline", "circle"),
+    ("url", "square"),
+    ("username", "circle"),
+    ("vehicle", "square"),
+    ("vessel", "circle"),
+    ("vpn", "circle"),
+    ("vulnerability", "square"),
+    ("wallet", "square"),
+    ("watchlist", "square"),
+    ("wifi", "circle"),
+];
+
+/// Manifest tile shape for an icon name, or `None` when unknown.
+pub fn shape_of(icon: &str) -> Option<&'static str> {
+    ICON_SHAPE
+        .iter()
+        .find(|(name, _)| *name == icon)
+        .map(|(_, shape)| *shape)
+}
+
+// ---------------------------------------------------------------------------
 // Unmapped-by-design register.
 // ---------------------------------------------------------------------------
 

@@ -283,6 +283,46 @@ fn cli_exports_all_formats_masked() {
 }
 
 #[test]
+fn graph_exports_contain_expected_icon() {
+    // The fixture graph stores a certificate entity (TlsObserved), which maps
+    // to the `certificate` manifest icon. Every export format must carry it.
+    let (path, _db) = tmp_db("icons");
+    let dir = path.parent().unwrap();
+    for format in ["json", "graphml", "svg", "html"] {
+        let out_path = dir.join(format!("icon.{format}"));
+        let out = run_graph(
+            &path,
+            &["--format", format, "--out", out_path.to_str().unwrap()],
+        );
+        assert!(
+            out.status.success(),
+            "{format}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let bytes = std::fs::read(&out_path).unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            text.contains("certificate"),
+            "{format} export missing expected icon 'certificate':\n{text}"
+        );
+    }
+    // PNG export draws the same icon: a valid image produced by the icon path.
+    let png_path = dir.join("icon.png");
+    let out = run_graph(
+        &path,
+        &["--format", "png", "--out", png_path.to_str().unwrap()],
+    );
+    assert!(
+        out.status.success(),
+        "png: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let png = std::fs::read(&png_path).unwrap();
+    assert_eq!(&png[0..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
+    assert!(png.len() > 100, "png export should render the icon");
+}
+
+#[test]
 fn cli_filters_layouts_and_errors() {
     let (path, _db) = tmp_db("filters");
     // Type filter narrows to requested kinds.

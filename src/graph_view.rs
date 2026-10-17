@@ -41,6 +41,10 @@ pub const MAX_VIEW_EVIDENCE: usize = 4;
 /// Maximum PNG dimension (width or height).
 pub const MAX_PNG_DIM: u32 = 4096;
 
+/// Embedded icon sprite: symbols defined once, referenced by `<use>` so
+/// glyphs are never duplicated per node in SVG/HTML exports.
+const ICON_SPRITE: &str = include_str!("../app/assets/icons/glyphs/rxscan-sprite.svg");
+
 // ---------------------------------------------------------------------------
 // Display entities.
 // ---------------------------------------------------------------------------
@@ -1924,6 +1928,11 @@ pub fn to_svg(
     out.push_str(&format!(
         "<rect width=\"{width}\" height=\"{height}\" fill=\"#010813\"/>\n"
     ));
+    // Icon symbols are defined once here and referenced by `<use>` below, so
+    // glyphs are never duplicated inline per node.
+    out.push_str("<defs>");
+    out.push_str(ICON_SPRITE);
+    out.push_str("</defs>");
     for edge in &view.edges {
         let (x1, y1) = place(&edge.from);
         let (x2, y2) = place(&edge.to);
@@ -1967,15 +1976,30 @@ pub fn to_svg(
             node.label.clone()
         };
         out.push_str("<g>\n");
-        shape_svg(
-            &mut out,
-            node.kind.shape(),
-            x,
-            y,
-            r,
-            node.kind.color(),
-            false,
-        );
+        // Draw the manifest icon via `<use>` when available; fall back to the
+        // kind shape so every node is always marked (shape + color never alone).
+        let icon = crate::graph_icons::node_icon(node.kind, &node.stored_kind, &node.attributes);
+        let ramp = icon.and_then(crate::graph_icons::ramp_of);
+        let color = ramp
+            .and_then(crate::graph_icons::ramp_color)
+            .unwrap_or(node.kind.color());
+        if node.kind != DisplayKind::Cluster {
+            if let Some(icon) = icon {
+                out.push_str(&format!(
+                    "<use href=\"#rx-{}\" x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" fill=\"none\" stroke=\"{}\" stroke-width=\"2\"/>\n",
+                    icon,
+                    x - r,
+                    y - r,
+                    2.0 * r,
+                    2.0 * r,
+                    color,
+                ));
+            } else {
+                shape_svg(&mut out, node.kind.shape(), x, y, r, color, false);
+            }
+        } else {
+            shape_svg(&mut out, node.kind.shape(), x, y, r, color, false);
+        }
         out.push_str(&format!(
             "<text x=\"{:.1}\" y=\"{:.1}\" fill=\"#f4f8ff\" font-size=\"11\" font-family=\"sans-serif\">{}</text>\n",
             x + r + 3.0,
@@ -2024,6 +2048,8 @@ pub fn to_html(view: &ViewGraph, positions: &BTreeMap<String, (f64, f64)>, title
         .iter()
         .map(|node| {
             let (x, y) = positions.get(&node.id).copied().unwrap_or((500.0, 350.0));
+            let icon =
+                crate::graph_icons::node_icon(node.kind, &node.stored_kind, &node.attributes);
             serde_json::json!({
                 "id": node.id,
                 "kind": node.kind.as_str(),
@@ -2037,6 +2063,9 @@ pub fn to_html(view: &ViewGraph, positions: &BTreeMap<String, (f64, f64)>, title
                 "member_count": node.member_count,
                 "x": x,
                 "y": y,
+                "icon": icon,
+                "ramp": icon.and_then(crate::graph_icons::ramp_of),
+                "category": icon.and_then(crate::graph_icons::category_of),
             })
         })
         .collect();
@@ -2082,6 +2111,7 @@ pub fn to_html(view: &ViewGraph, positions: &BTreeMap<String, (f64, f64)>, title
             ),
         )
         .replace("{{DATA}}", &data)
+        .replace("{{SPRITE}}", ICON_SPRITE)
 }
 
 const HTML_TEMPLATE: &str = r###"<!DOCTYPE html>
@@ -2119,7 +2149,7 @@ dl.kv{margin:0}dl.kv>div{display:flex;gap:.6rem;padding:.15rem 0}dl.kv dt{color:
 <label for="q">Search</label><input id="q" type="text" autocomplete="off">
 </div>
 <main>
-<svg id="scene" viewBox="0 0 1000 700" role="img" aria-label="RXScan evidence graph"></svg>
+<svg id="scene" viewBox="0 0 1000 700" role="img" aria-label="RXScan evidence graph"></svg>{{SPRITE}}
 <aside aria-live="polite"><h2>Detail</h2><p class="muted" id="empty">Select a node or edge.</p><dl class="kv" id="detail" hidden></dl></aside>
 </main>
 <ul class="legend" id="legend"></ul>
@@ -2163,6 +2193,7 @@ function showEdge(e){
 }
 var SHAPES={network:"hexagon",ip:"circle",host:"square",port_service:"diamond",software:"triangle",certificate:"pentagon",domain:"ellipse",url:"rounded_rect",username:"ring",account:"double_square",exposure:"triangle_down",evidence:"parallelogram",scope:"dashed_circle",cluster:"octagon"};
 var COLORS={network:"#078cff",ip:"#00efff",host:"#3ddc84",port_service:"#f0a04b",software:"#b07cc4",certificate:"#e5488f",domain:"#19f4ff",url:"#8fa9c2",username:"#e2e8f0",account:"#f4f8ff",exposure:"#f06666",evidence:"#6b7d94",scope:"#4a9eff",cluster:"#2a4a6b"};
+var RAMP_COLOR={amber:"#f59e0b",blue:"#078cff",coral:"#f97316",gray:"#6b7d94",green:"#3ddc84",pink:"#e879f9",purple:"#8b5cf6",red:"#f06666",teal:"#14b8a6"};
 function drawPoly(g,shape,x,y,r,fill){
   function pts(n,rot){var s=[];for(var i=0;i<n;i++){var a=rot+2*Math.PI*i/n;s.push((x+r*Math.cos(a)).toFixed(1)+","+(y+r*Math.sin(a)).toFixed(1));}return s.join(" ");}
   if(shape==="circle"){return el("circle",{cx:x,cy:y,r:r,fill:fill,stroke:"#010813","stroke-width":1.5},g);}
@@ -2194,9 +2225,25 @@ function render(){
   shown.slice(0,2000).forEach(function(n){
     n.shape_hint=SHAPES[n.kind]||"hexagon";
     var r=n.kind==="cluster"?Math.min(20,6+Math.sqrt(n.member_count||1)*2):7;
-    var c=drawPoly(g,n.shape_hint,n.x,n.y,r,COLORS[n.kind]||"#078cff");
-    c.style.cursor="pointer";
-    c.addEventListener("click",function(){showNode(n);});
+    var color=n.ramp&&RAMP_COLOR[n.ramp]?RAMP_COLOR[n.ramp]:(COLORS[n.kind]||"#078cff");
+    if(n.icon){
+      var use=document.createElementNS(NS,"use");
+      use.setAttribute("href","#rx-"+n.icon);
+      use.setAttribute("x",(n.x-r).toFixed(1));
+      use.setAttribute("y",(n.y-r).toFixed(1));
+      use.setAttribute("width",(2*r).toFixed(1));
+      use.setAttribute("height",(2*r).toFixed(1));
+      use.setAttribute("fill","none");
+      use.setAttribute("stroke",color);
+      use.setAttribute("stroke-width","2");
+      use.style.cursor="pointer";
+      use.addEventListener("click",function(){showNode(n);});
+      g.appendChild(use);
+    } else {
+      var c=drawPoly(g,n.shape_hint,n.x,n.y,r,color);
+      c.style.cursor="pointer";
+      c.addEventListener("click",function(){showNode(n);});
+    }
     var t=el("text",{x:n.x+r+3,y:n.y+4,"class":"glabel"},g);
     var label=String(n.label||n.id);
     t.textContent=label.length>28?label.slice(0,27)+"…":label;
@@ -2272,9 +2319,17 @@ pub fn to_png(
         } else {
             7
         };
-        let color = hex_rgb(node.kind.color());
+        let icon = crate::graph_icons::node_icon(node.kind, &node.stored_kind, &node.attributes);
+        let ramp = icon.and_then(crate::graph_icons::ramp_of);
+        let color_hex = ramp
+            .and_then(crate::graph_icons::ramp_color)
+            .unwrap_or(node.kind.color());
+        let shape = icon
+            .and_then(crate::graph_icons::shape_of)
+            .unwrap_or_else(|| node.kind.shape());
+        let color = hex_rgb(color_hex);
         let border = (color.0 / 3, color.1 / 3, color.2 / 3);
-        canvas.glyph(node.kind.shape(), x, y, r, color, border);
+        canvas.glyph(shape, x, y, r, color, border);
     }
     encode_png(width, height, &canvas.buf)
 }
