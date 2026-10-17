@@ -2634,42 +2634,48 @@ fn run_project(args: &[String]) {
     }
 }
 
-/// SQLite project graph commands (`--project-db` import target).
-///
-/// Usage:
-/// `rxscan project-db scans --db <path> [--json]`
-/// `rxscan project-db summary --db <path> [--json]`
-/// `rxscan project-db changes --db <path> <scan> [--json] [--limit N]`
-/// `rxscan project-db diff --db <path> <old-scan> <new-scan> [--json] [--limit N]`
-///
-/// Read-only except `diff`, which persists computed changes for the scan
-/// pair. Never touches the network; scope already enforced at scan time.
 fn run_evidence_bundle(args: &[String]) {
-    use rxscan::exposure::{mask_json, scrub_text};
-    use rxscan::project_db::ProjectDb;
-    use std::path::Path;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let usage = "rxscan evidence-bundle <project> --case-id ID [--operator NAME] --out <path>";
+    let usage =
+        "rxscan evidence-bundle <project> --case-id ID [--operator NAME] [--force] --out <path>";
     if args
         .get(2)
         .map(String::as_str)
-        .map(|s| s == "--help" || s == "-h")
-        .unwrap_or(false)
+        .is_some_and(|s| s == "--help" || s == "-h")
     {
-        out_line!("{}", usage);
+        out_line!("{usage}");
         return;
     }
-    let project: Option<&str> = args.get(2).map(String::as_str);
+    let mut iter = args[2..].iter().peekable();
+    let mut project: Option<&str> = None;
     let mut case_id: Option<&str> = None;
     let mut operator: Option<&str> = None;
     let mut out_dir: Option<&str> = None;
-    let mut iter = args[3..].iter().peekable();
+    let mut force = false;
     while let Some(arg) = iter.next() {
         match arg.as_str() {
-            "--case-id" => case_id = iter.next().map(String::as_str),
-            "--operator" => operator = iter.next().map(String::as_str),
-            "--out" => out_dir = iter.next().map(String::as_str),
+            "--case-id" => match iter.next() {
+                Some(v) => case_id = Some(v),
+                None => {
+                    err!("rxscan evidence-bundle: missing value for --case-id ({usage})");
+                    std::process::exit(2);
+                }
+            },
+            "--operator" => match iter.next() {
+                Some(v) => operator = Some(v),
+                None => {
+                    err!("rxscan evidence-bundle: missing value for --operator ({usage})");
+                    std::process::exit(2);
+                }
+            },
+            "--out" => match iter.next() {
+                Some(v) => out_dir = Some(v),
+                None => {
+                    err!("rxscan evidence-bundle: missing value for --out ({usage})");
+                    std::process::exit(2);
+                }
+            },
+            "--force" => force = true,
+            other if project.is_none() => project = Some(other),
             _ => {
                 err!("rxscan evidence-bundle: unexpected argument '{arg}' ({usage})");
                 std::process::exit(2);
@@ -2697,16 +2703,51 @@ fn run_evidence_bundle(args: &[String]) {
             std::process::exit(2);
         }
     };
+    if let Err(error) = run_evidence_bundle_inner(project, case_id, operator, out_dir, force) {
+        err!("rxscan evidence-bundle: {error}");
+        std::process::exit(1);
+    }
+}
 
-    let db = match ProjectDb::open(Path::new(project)) {
-        Ok(db) => db,
-        Err(error) => {
-            err!("rxscan evidence-bundle: cannot open project '{project}': {error}");
-            std::process::exit(1);
-        }
-    };
-    let evidence_items = db.evidence_items().unwrap_or_default();
-    let run_ids = db.scan_ids().unwrap_or_default();
+/// Build a masked, tamper-evident evidence bundle for a project.
+///
+/// Writes into a temporary directory beside the target and renames each
+/// file into place, so a failure never leaves a partial bundle behind.
+/// Fails when the project cannot be opened, evidence cannot be read, or
+/// any file cannot be written and verified. Refuses a non-empty output
+/// directory unless `--force` is given.
+fn run_evidence_bundle_inner(
+    project: &str,
+    case_id: &str,
+    operator: Option<&str>,
+    out_dir: &str,
+    force: bool,
+) -> Result<(), String> {
+    use rxscan::exposure::{mask_json, scrub_text};
+    use rxscan::project_db::ProjectDb;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let db = ProjectDb::open(Path::new(project))
+        .map_err(|error| format!("cannot open project '{project}': {error}"))?;
+    let evidence_items = db
+        .evidence_items()
+        .map_err(|error| format!("cannot read evidence items: {error}"))?;
+    let run_ids = db
+        .scan_ids()
+        .map_err(|error| format!("cannot read scan ids: {error}"))?;
+
+    // Record the stored scope definition per run, not just run ids.
+    let mut scopes = serde_json::Map::new();
+    for run in &run_ids {
+        let scope = db
+            .scope_of(run)
+            .map_err(|error| format!("cannot read scope for run '{run}': {error}"))?;
+        scopes.insert(
+            run.clone(),
+            scope.map_or(serde_json::Value::Null, |s| serde_json::json!(s)),
+        );
+    }
 
     let created = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2715,17 +2756,44 @@ fn run_evidence_bundle(args: &[String]) {
     let created_iso = format_utc(created);
 
     let out_path = PathBuf::from(out_dir);
-    let _ = std::fs::create_dir_all(&out_path);
+    if out_path.is_dir() {
+        let non_empty = std::fs::read_dir(&out_path)
+            .map(|rd| rd.flatten().next().is_some())
+            .unwrap_or(false);
+        if non_empty && !force {
+            return Err(format!(
+                "output directory '{out_dir}' is not empty; use --force to overwrite"
+            ));
+        }
+    } else if out_path.exists() {
+        return Err(format!(
+            "output path '{out_dir}' exists and is not a directory"
+        ));
+    }
+
+    // Build in a sibling temp directory; rename into place only once every
+    // file is written and verified, so a failure leaves nothing partial.
+    let parent = out_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let temp_dir = parent.join(format!(".rxscan-bundle-tmp-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir)
+        .map_err(|error| format!("cannot create temp directory: {error}"))?;
+    let remove_temp = || {
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    };
 
     let mut evidence_jsonl = String::new();
-    let mut evidence_ids: Vec<String> = Vec::new();
+    let mut evidence_ids = Vec::new();
     for item in &evidence_items {
         evidence_ids.push(item.id.to_string());
         let details: serde_json::Value = serde_json::from_str(&item.details_json)
-            .unwrap_or(serde_json::json!(item.details_json));
+            .unwrap_or_else(|_| serde_json::json!(item.details_json));
         let masked_details = mask_json(&details);
         let record = serde_json::json!({
-            "id": item.id,
+            "id": item.id.to_string(),
             "scan_run": scrub_text(&item.scan_run),
             "source": scrub_text(&item.source),
             "asset_id": scrub_text(&item.asset_id),
@@ -2733,45 +2801,64 @@ fn run_evidence_bundle(args: &[String]) {
             "details": masked_details,
             "timestamp_ms": item.timestamp_ms,
         });
-        evidence_jsonl.push_str(&serde_json::to_string(&record).unwrap_or_default());
+        let line = serde_json::to_string(&record)
+            .map_err(|error| format!("cannot serialize evidence record: {error}"))?;
+        evidence_jsonl.push_str(&line);
         evidence_jsonl.push('\n');
     }
 
     let bundle = serde_json::json!({
         "bundle_schema_version": 1,
         "tool": "rxscan",
-        "tool_version": "1.2.0",
+        "tool_version": env!("CARGO_PKG_VERSION"),
         "created_at": created_iso,
         "created_at_epoch": created,
         "case_id": case_id,
         "operator": operator,
-        "scope": {"runs": run_ids},
         "run_ids": run_ids,
+        "scopes": scopes,
         "evidence_count": evidence_items.len(),
         "evidence_ids": evidence_ids,
-        "files": ["bundle.json", "evidence.jsonl"],
         "note": "masked redacted copy of stored evidence; originals remain in the project database. RXScan does not claim legal admissibility, signing, or operator authentication."
     });
-    let bundle_json = serde_json::to_string_pretty(&bundle).unwrap_or_default();
+    let bundle_json = serde_json::to_string_pretty(&bundle)
+        .map_err(|_| "cannot serialize bundle.json".to_string())?;
 
-    let evidence_path = out_path.join("evidence.jsonl");
-    let _ = std::fs::write(&evidence_path, &evidence_jsonl);
-    let _ = std::fs::write(out_path.join("bundle.json"), &bundle_json);
+    write_verified(&temp_dir.join("evidence.jsonl"), evidence_jsonl.as_bytes())?;
+    write_verified(&temp_dir.join("bundle.json"), bundle_json.as_bytes())?;
 
-    // SHA-256 manifest over every file in the bundle directory.
     let mut entries: Vec<(String, String)> = Vec::new();
-    for entry in ["bundle.json", "evidence.jsonl"] {
-        let p = out_path.join(entry);
-        if let Ok(hash) = sha256_file(&p) {
-            entries.push((hash, entry.to_owned()));
-        }
+    for name in ["evidence.jsonl", "bundle.json"] {
+        let hash = sha256_file(&temp_dir.join(name))
+            .map_err(|error| format!("cannot hash {name}: {error}"))?;
+        entries.push((hash, name.to_owned()));
     }
     entries.sort();
     let mut manifest = String::new();
     for (hash, name) in &entries {
         manifest.push_str(&format!("{hash}  {name}\n"));
     }
-    let _ = std::fs::write(out_path.join("manifest.txt"), &manifest);
+    write_verified(&temp_dir.join("manifest.txt"), manifest.as_bytes())?;
+
+    // Bundle digest (sha256 of manifest.txt): record out-of-band to detect
+    // deliberate rewriting of manifest.txt plus files.
+    let digest = sha256_bytes(manifest.as_bytes());
+
+    // manifest.txt joins the manifest after it exists.
+    let hash = sha256_file(&temp_dir.join("manifest.txt"))
+        .map_err(|error| format!("cannot hash manifest.txt: {error}"))?;
+    entries.push((hash, "manifest.txt".to_owned()));
+    entries.sort();
+
+    if !out_path.is_dir() {
+        std::fs::create_dir_all(&out_path)
+            .map_err(|error| format!("cannot create output directory '{out_dir}': {error}"))?;
+    }
+    for (_, name) in &entries {
+        std::fs::rename(temp_dir.join(name), out_path.join(name))
+            .map_err(|error| format!("cannot move {name} into place: {error}"))?;
+    }
+    remove_temp();
 
     out_line!(
         "evidence bundle written to {} ({} evidence items, {} runs)",
@@ -2779,40 +2866,82 @@ fn run_evidence_bundle(args: &[String]) {
         evidence_items.len(),
         run_ids.len()
     );
+    out_line!("bundle digest (sha256 of manifest.txt): {digest}");
+    out_line!(
+        "record this digest out-of-band (case file/ticket); `verify-bundle --expect-digest`          compares against it to detect deliberate tampering"
+    );
+    Ok(())
+}
+
+/// Write `contents` to `path` and re-read to verify, so a silent write
+/// failure cannot produce a partial bundle.
+fn write_verified(path: &PathBuf, contents: &[u8]) -> Result<(), String> {
+    std::fs::write(path, contents)
+        .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+    let back = std::fs::read(path)
+        .map_err(|error| format!("cannot verify write of {}: {error}", path.display()))?;
+    if back != contents {
+        return Err(format!("write verification failed for {}", path.display()));
+    }
+    Ok(())
 }
 
 fn run_verify_bundle(args: &[String]) {
-    use std::collections::BTreeSet;
-
-    let usage = "rxscan verify-bundle <path>";
-    let help = args
+    let usage = "rxscan verify-bundle <path> [--expect-digest <hex>]";
+    if args
         .get(2)
         .map(String::as_str)
-        .map(|s| s == "--help" || s == "-h")
-        .unwrap_or(false);
-    let bundle_path = match args.get(2).map(String::as_str) {
-        Some(p) if !help => PathBuf::from(p),
-        _ => {
-            if help {
-                out_line!("{}", usage);
-                return;
+        .is_some_and(|s| s == "--help" || s == "-h")
+    {
+        out_line!("{usage}");
+        return;
+    }
+    let mut iter = args[2..].iter().peekable();
+    let mut bundle_path: Option<&str> = None;
+    let mut expect_digest: Option<&str> = None;
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--expect-digest" => match iter.next() {
+                Some(v) => expect_digest = Some(v),
+                None => {
+                    err!("rxscan verify-bundle: missing value for --expect-digest ({usage})");
+                    std::process::exit(2);
+                }
+            },
+            other if bundle_path.is_none() => bundle_path = Some(other),
+            _ => {
+                err!("rxscan verify-bundle: unexpected argument '{arg}' ({usage})");
+                std::process::exit(2);
             }
+        }
+    }
+    let bundle_path = match bundle_path {
+        Some(p) => p,
+        None => {
             err!("rxscan verify-bundle: missing <path> ({usage})");
             std::process::exit(2);
         }
     };
+    if let Err(error) = run_verify_bundle_inner(bundle_path, expect_digest) {
+        err!("rxscan verify-bundle: {error}");
+        std::process::exit(1);
+    }
+}
 
+/// Recomputes every hash in manifest.txt and fails on any mismatch, missing
+/// file, extra file, subdirectory, or symlink inside the bundle. Also checks
+/// bundle.json against evidence.jsonl (evidence_count and evidence ids) and,
+/// when `--expect-digest` is given, the sha256 of manifest.txt.
+fn run_verify_bundle_inner(bundle_path: &str, expect_digest: Option<&str>) -> Result<(), String> {
+    use std::collections::BTreeSet;
+
+    let bundle_path = PathBuf::from(bundle_path);
     let manifest_path = bundle_path.join("manifest.txt");
-    let manifest = match std::fs::read_to_string(&manifest_path) {
-        Ok(m) => m,
-        Err(_) => {
-            err!("rxscan verify-bundle: manifest.txt missing in {bundle_path:?}");
-            std::process::exit(1);
-        }
-    };
+    let manifest = std::fs::read_to_string(&manifest_path)
+        .map_err(|_| format!("manifest.txt missing in {bundle_path:?}"))?;
 
     let mut expected: Vec<(String, String)> = Vec::new();
-    for line in manifest.lines() {
+    for (lineno, line) in manifest.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -2821,61 +2950,131 @@ fn run_verify_bundle(args: &[String]) {
         let hash = parts.next().unwrap_or("").to_owned();
         let name = parts.next().unwrap_or("").trim().to_owned();
         if hash.is_empty() || name.is_empty() {
-            err!("rxscan verify-bundle: malformed manifest line: {line}");
-            std::process::exit(1);
+            return Err(format!("malformed manifest line {lineno}: {line}"));
+        }
+        if hash.len() != 64 || hash.as_bytes().iter().any(|b| !b.is_ascii_hexdigit()) {
+            return Err(format!("malformed manifest hash on line {lineno}: {hash}"));
         }
         expected.push((hash, name));
     }
 
+    // Reject subdirectories and symlinks; never follow symlinks.
     let mut actual: Vec<String> = Vec::new();
-    if let Ok(read_dir) = std::fs::read_dir(&bundle_path) {
-        for entry in read_dir.flatten() {
-            let p = entry.path();
-            if p.is_file() {
-                if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
-                    if name == "manifest.txt" {
-                        continue;
-                    }
-                    actual.push(name.to_owned());
-                }
-            }
+    for entry in std::fs::read_dir(&bundle_path)
+        .map_err(|_| format!("cannot read bundle directory {bundle_path:?}"))?
+    {
+        let entry = entry.map_err(|_| "cannot read bundle directory entry".to_string())?;
+        let meta = std::fs::symlink_metadata(entry.path()).map_err(|_| {
+            format!(
+                "cannot stat bundle entry '{}'",
+                entry.file_name().to_string_lossy()
+            )
+        })?;
+        if meta.file_type().is_symlink() {
+            return Err(format!(
+                "bundle contains symlink '{}'; refused",
+                entry.file_name().to_string_lossy()
+            ));
+        }
+        if meta.file_type().is_dir() {
+            return Err(format!(
+                "bundle contains subdirectory '{}'; refused",
+                entry.file_name().to_string_lossy()
+            ));
+        }
+        if !meta.file_type().is_file() {
+            return Err(format!(
+                "bundle entry '{}' is not a regular file; refused",
+                entry.file_name().to_string_lossy()
+            ));
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name != "manifest.txt" {
+            actual.push(name);
         }
     }
     actual.sort();
 
-    let mut ok = true;
     let expected_names: BTreeSet<&str> = expected.iter().map(|(_, n)| n.as_str()).collect();
     for (hash, name) in &expected {
         let p = bundle_path.join(name);
-        let actual_hash = match sha256_file(&p) {
-            Ok(h) => h,
-            Err(_) => {
-                err!("rxscan verify-bundle: missing file '{name}'");
-                ok = false;
-                continue;
+        let data = match std::fs::read(&p) {
+            Ok(data) => data,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(format!("missing file '{name}'"));
             }
+            Err(error) => return Err(format!("cannot read file '{name}': {error}")),
         };
-        if actual_hash != *hash {
-            err!("rxscan verify-bundle: hash mismatch for '{name}'");
-            ok = false;
+        if sha256_bytes(&data) != *hash {
+            return Err(format!("hash mismatch for '{name}'"));
         }
     }
     for name in &actual {
         if !expected_names.contains(name.as_str()) {
-            err!("rxscan verify-bundle: extra file '{name}'");
-            ok = false;
+            return Err(format!("extra file '{name}'"));
         }
     }
 
-    if ok {
-        out_line!("verify-bundle: {} file(s) verified OK", expected.len());
-    } else {
-        err!("rxscan verify-bundle: verification FAILED");
-        std::process::exit(1);
+    // bundle.json must agree with evidence.jsonl.
+    let bundle_text = std::fs::read_to_string(bundle_path.join("bundle.json"))
+        .map_err(|_| "bundle.json missing or unreadable")?;
+    let bundle: serde_json::Value = serde_json::from_str(&bundle_text)
+        .map_err(|_| "bundle.json is not valid JSON".to_string())?;
+    let evidence_count = bundle
+        .get("evidence_count")
+        .and_then(|v| v.as_u64())
+        .ok_or("bundle.json lacks evidence_count")?;
+    let evidence_ids: Vec<String> = bundle
+        .get("evidence_ids")
+        .and_then(|v| v.as_array())
+        .ok_or("bundle.json lacks evidence_ids")?
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+
+    let evidence_text = std::fs::read_to_string(bundle_path.join("evidence.jsonl"))
+        .map_err(|_| "evidence.jsonl missing or unreadable")?;
+    let lines: Vec<&str> = evidence_text.lines().filter(|l| !l.is_empty()).collect();
+    if lines.len() != evidence_count as usize {
+        return Err(format!(
+            "evidence_count {evidence_count} does not match evidence.jsonl line count {}",
+            lines.len()
+        ));
     }
+    let mut ids = Vec::new();
+    for line in &lines {
+        let record: serde_json::Value = serde_json::from_str(line)
+            .map_err(|_| "evidence.jsonl line is not valid JSON".to_string())?;
+        ids.push(
+            record
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or("evidence record lacks id")?
+                .to_string(),
+        );
+    }
+    let expected_set: BTreeSet<&str> = evidence_ids.iter().map(|s| s.as_str()).collect();
+    let actual_set: BTreeSet<&str> = ids.iter().map(|s| s.as_str()).collect();
+    if expected_set != actual_set {
+        return Err("evidence ids in bundle.json do not match evidence.jsonl".to_string());
+    }
+
+    if let Some(expected_digest) = expect_digest {
+        let manifest_bytes =
+            std::fs::read(&manifest_path).map_err(|_| "manifest.txt missing or unreadable")?;
+        let actual = sha256_bytes(&manifest_bytes);
+        if actual != expected_digest {
+            return Err(format!(
+                "bundle digest mismatch: expected {expected_digest}, got {actual}"
+            ));
+        }
+    }
+
+    out_line!("verify-bundle: {} file(s) verified OK", expected.len());
+    Ok(())
 }
 
-fn format_utc(epoch_secs: u64) -> String {
+pub(crate) fn format_utc(epoch_secs: u64) -> String {
     let days = (epoch_secs / 86_400) as i64;
     let rem = epoch_secs % 86_400;
     let z = days + 719_468;
@@ -2911,6 +3110,16 @@ fn sha256_bytes(data: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// SQLite project graph commands (`--project-db` import target).
+///
+/// Usage:
+/// `rxscan project-db scans --db <path> [--json]`
+/// `rxscan project-db summary --db <path> [--json]`
+/// `rxscan project-db changes --db <path> <scan> [--json] [--limit N]`
+/// `rxscan project-db diff --db <path> <old-scan> <new-scan> [--json] [--limit N]`
+///
+/// Read-only except `diff`, which persists computed changes for the scan
+/// pair. Never touches the network; scope already enforced at scan time.
 fn run_project_db(args: &[String]) {
     use rxscan::project_db::ProjectDb;
     let usage = "rxscan project-db scans|summary|changes|diff|explain --db <path> ...";
@@ -5276,5 +5485,28 @@ fn run_os_lab(args: &[String]) {
                 std::process::exit(2);
             })
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_utc;
+
+    #[test]
+    fn format_utc_covers_epoch_leap_day_year_end_and_past_2038() {
+        let cases = [
+            (0u64, "1970-01-01T00:00:00Z"),
+            (1_709_164_800, "2024-02-29T00:00:00Z"),
+            (1_735_689_599, "2024-12-31T23:59:59Z"),
+            (2_177_452_800, "2039-01-01T00:00:00Z"),
+            (1_792_243_740, "2026-10-17T13:29:00Z"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                format_utc(input),
+                expected,
+                "format_utc({input}) should be {expected}"
+            );
+        }
     }
 }

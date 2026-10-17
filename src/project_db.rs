@@ -22,7 +22,7 @@
 //!   (2 KiB excerpts), Full (8 KiB excerpts). Network bodies are never
 //!   stored wholesale.
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -1222,6 +1222,23 @@ impl ProjectDb {
         serde_json::from_str(&text).map_err(|error| ProjectDbError::InvalidInput(error.to_string()))
     }
 
+    /// Stored scope definition for one scan run (`scope_json`), or `None`
+    /// when the scan id is unknown. Used by the evidence bundle so the
+    /// recorded scope reflects what was actually authorized, not just run
+    /// ids.
+    pub fn scope_of(&self, scan_id: &str) -> Result<Option<String>, ProjectDbError> {
+        validate_id(scan_id, "scan")?;
+        let text: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT scope_json FROM scan_runs WHERE scan_id=?1",
+                params![scan_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(text)
+    }
+
     pub fn changes_since(
         &self,
         scan_new: &str,
@@ -1866,15 +1883,15 @@ fn row_to_observation(row: &rusqlite::Row<'_>) -> rusqlite::Result<ObservationRo
 }
 
 fn row_to_evidence_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<EvidenceItem> {
-    let confidence: i64 = row.get(5)?;
+    let confidence: i64 = row.get(4)?;
     Ok(EvidenceItem {
         id: row.get(0)?,
         scan_run: row.get(1)?,
         source: row.get(2)?,
         asset_id: row.get(3)?,
         confidence: confidence.clamp(0, 100) as u8,
-        details_json: row.get(6)?,
-        timestamp_ms: row.get(7)?,
+        details_json: row.get(5)?,
+        timestamp_ms: row.get(6)?,
     })
 }
 
