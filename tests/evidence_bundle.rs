@@ -452,31 +452,34 @@ fn evidence_bundle_force_refuses_unrelated_entries() {
 
     // (label, seed closure, name expected in the refusal)
     type ForeignCase = (&'static str, fn(&Path), &'static str);
-    let cases: [ForeignCase; 3] = [
-        (
-            "unrelated file",
-            |d: &Path| {
-                std::fs::write(d.join("notes.txt"), "keep me").unwrap();
-            },
-            "notes.txt",
-        ),
-        (
-            "subdirectory",
-            |d: &Path| {
-                std::fs::create_dir(d.join("archive")).unwrap();
-                std::fs::write(d.join("archive").join("old.json"), "{}").unwrap();
-            },
-            "archive",
-        ),
-        (
-            "symlink",
-            |d: &Path| {
-                #[cfg(unix)]
-                std::os::unix::fs::symlink("/etc/passwd", d.join("link")).unwrap();
-            },
-            "link",
-        ),
-    ];
+    let mut cases: Vec<ForeignCase> = Vec::new();
+    cases.push((
+        "unrelated file",
+        |d: &Path| {
+            std::fs::write(d.join("notes.txt"), "keep me").unwrap();
+        },
+        "notes.txt",
+    ));
+    cases.push((
+        "subdirectory",
+        |d: &Path| {
+            std::fs::create_dir(d.join("archive")).unwrap();
+            std::fs::write(d.join("archive").join("old.json"), "{}").unwrap();
+        },
+        "archive",
+    ));
+    // Appended, not gated in place: an inline `#[cfg(unix)]` inside the
+    // closure would leave the case present on Windows with an empty body, and
+    // the test would then assert a refusal against a directory holding
+    // nothing. Symlinks are a unix concept here, so the case is unix-only.
+    #[cfg(unix)]
+    cases.push((
+        "symlink",
+        |d: &Path| {
+            std::os::unix::fs::symlink("/etc/passwd", d.join("link")).unwrap();
+        },
+        "link",
+    ));
 
     for (label, seed, expect_name) in cases {
         let out_dir = root.join(label.replace(' ', "-"));
@@ -585,8 +588,21 @@ fn evidence_bundle_force_replaces_only_its_own_files() {
 #[test]
 fn verify_bundle_rejects_manifest_names_outside_the_bundle() {
     // A rewritten manifest must not be able to make verification hash files
-    // outside the bundle directory.
-    for name in ["../outside.txt", "/etc/passwd", "sub/child.json"] {
+    // outside the bundle directory. Rejection is by name and happens before
+    // any file is opened, so the hash is irrelevant here and the names below
+    // are never resolved against the filesystem -- which also keeps this
+    // test free of /etc/passwd and of any path-separator assumption.
+    // `..\outside.txt` is included because a Windows manifest can use a
+    // backslash separator, and the check must not care which one it is.
+    let hostile = [
+        "../outside.txt",
+        "..\\outside.txt",
+        "/etc/passwd",
+        "C:\\Windows\\win.ini",
+        "sub/child.json",
+        "sub\\child.json",
+    ];
+    for name in hostile {
         let root = tmp_dir("traversal");
         let out_dir = root.join("bundle");
         std::fs::create_dir_all(&out_dir).unwrap();
@@ -596,25 +612,11 @@ fn verify_bundle_rejects_manifest_names_outside_the_bundle() {
         )
         .unwrap();
         std::fs::write(out_dir.join("evidence.jsonl"), "").unwrap();
-        std::fs::write(root.join("outside.txt"), "outside\n").unwrap();
-
-        let target = if name.starts_with('/') {
-            "/etc/passwd".to_owned()
-        } else {
-            root.join(name)
-                .canonicalize()
-                .unwrap_or_else(|_| root.join(name))
-                .to_string_lossy()
-                .to_string()
-        };
-        let hash = std::fs::read(&target).map(|d| format!("{:x}", Sha256::digest(&d)));
-        let hash = match hash {
-            Ok(h) => h,
-            // /etc/passwd unreadable in this environment: any well-formed
-            // hash still exercises name rejection, which happens first.
-            Err(_) => "0".repeat(64),
-        };
-        std::fs::write(out_dir.join("manifest.txt"), format!("{hash}  {name}\n")).unwrap();
+        std::fs::write(
+            out_dir.join("manifest.txt"),
+            format!("{}  {name}\n", "a".repeat(64)),
+        )
+        .unwrap();
 
         let out = run_verify(&[out_dir.to_str().unwrap()])
             .output()
@@ -623,10 +625,10 @@ fn verify_bundle_rejects_manifest_names_outside_the_bundle() {
             !out.status.success(),
             "manifest naming '{name}' must be rejected"
         );
+        let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
-            String::from_utf8_lossy(&out.stderr).contains("not a bundle file"),
-            "unexpected error for '{name}': {}",
-            String::from_utf8_lossy(&out.stderr)
+            stderr.contains("not a bundle file") && stderr.contains(name),
+            "refusal for '{name}' should name it as not a bundle file, got: {stderr}"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -649,17 +651,42 @@ fn evidence_bundle_errors_leave_no_partial_bundle() {
     .expect("evidence-bundle runs");
     assert!(!out.status.success());
     assert!(!root.join("bundle-missing").exists());
+}
 
-    // Unwritable output path: error, nothing written.
+/// Unwritable output path: error, and no partial bundle.
+///
+/// Unix-only for two reasons, not one. Windows has no POSIX mode bits, so
+/// `from_mode(0o000)` does not exist and an ACL is required instead. And on
+/// unix, root bypasses discretionary access control, so the directory stays
+/// writable for uid 0 and the run would succeed, inverting the assertion.
+/// Gating the whole case avoids both a compile error and a runtime failure
+/// that looks like a product bug.
+#[cfg(unix)]
+#[test]
+fn evidence_bundle_unwritable_output_path_writes_nothing() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tmp_dir("unwritable");
     let db_path = root.join("proj.sqlite");
     fixture_db(&db_path);
     let read_only = root.join("read-only");
     std::fs::create_dir_all(&read_only).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&read_only, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    std::fs::set_permissions(&read_only, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    // Verify the precondition instead of assuming it: root bypasses mode
+    // bits, so for uid 0 the directory stays writable, the run succeeds and
+    // the assertion inverts. Probing is exact and needs no FFI.
+    let probe = read_only.join("probe");
+    if std::fs::write(&probe, "x").is_ok() {
+        let _ = std::fs::remove_file(&probe);
+        std::fs::set_permissions(&read_only, std::fs::Permissions::from_mode(0o0755)).unwrap();
+        eprintln!(
+            "skipping unwritable-output-path test: mode 000 did not deny writes (privileged user)"
+        );
+        return;
     }
+
     let unwritable = read_only.join("bundle");
     let out = run_bundle(&[
         db_path.to_str().unwrap(),
@@ -670,13 +697,21 @@ fn evidence_bundle_errors_leave_no_partial_bundle() {
     ])
     .output()
     .expect("evidence-bundle runs");
-    assert!(!out.status.success());
-    assert!(!unwritable.exists());
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&read_only, std::fs::Permissions::from_mode(0o0755));
-    }
-    // read-only dir stays empty (no partial bundle).
-    assert!(std::fs::read_dir(&read_only).unwrap().next().is_none());
+
+    // Restore before asserting so the temp dir can be cleaned up later.
+    let _ = std::fs::set_permissions(&read_only, std::fs::Permissions::from_mode(0o0755));
+
+    assert!(
+        !out.status.success(),
+        "an unwritable output path must fail: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        !unwritable.exists(),
+        "nothing may be created under an unwritable directory"
+    );
+    assert!(
+        std::fs::read_dir(&read_only).unwrap().next().is_none(),
+        "read-only dir stays empty (no partial bundle)"
+    );
 }

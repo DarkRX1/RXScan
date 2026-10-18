@@ -355,7 +355,11 @@ fn evidence_bundle_verify_roundtrip_and_tamper() {
     );
     let bundle_text = std::fs::read_to_string(out_dir.join("bundle.json")).unwrap();
     assert!(bundle_text.contains("CASE-1"), "case id recorded");
-    assert!(bundle_text.contains("1.2.0"), "tool version recorded");
+    assert!(
+        bundle_text.contains(env!("CARGO_PKG_VERSION")),
+        "tool version recorded: expected {}",
+        env!("CARGO_PKG_VERSION")
+    );
     assert!(
         bundle_text.contains("Z"),
         "UTC timestamp recorded (ISO8601)"
