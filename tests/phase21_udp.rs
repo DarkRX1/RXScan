@@ -122,8 +122,49 @@ fn bind_udp() -> (UdpSocket, u16) {
     (socket, port)
 }
 
-/// A certainly-closed loopback UDP port (bound then released).
-fn closed_udp_port() -> u16 {
+/// Loopback UDP ports reserved for the caller's whole lifetime.
+///
+/// Every port stays bound by a live socket that never sends or receives,
+/// so a probe to it is silence — never a response. Holding the sockets is
+/// what makes "unused" a fact instead of a race: a released port is
+/// bindable again the instant it is dropped, and a sibling test running on
+/// another thread (or the scanner's own ephemeral probe bind, which draws
+/// from the very same dynamic range) can take it and answer there.
+struct ReservedUdpPorts {
+    ports: Vec<u16>,
+    _sockets: Vec<UdpSocket>,
+}
+
+impl ReservedUdpPorts {
+    /// Reserve `count` distinct loopback UDP ports bound until dropped.
+    /// Distinctness is structural: a port that is still bound cannot be
+    /// handed out again, so the list needs no dedup and no release cycle.
+    fn reserve(count: usize) -> Self {
+        let mut sockets = Vec::with_capacity(count);
+        let mut ports = Vec::with_capacity(count);
+        for _ in 0..count {
+            let socket = UdpSocket::bind("127.0.0.1:0").expect("reserve loopback UDP port");
+            ports.push(socket.local_addr().unwrap().port());
+            sockets.push(socket);
+        }
+        Self {
+            ports,
+            _sockets: sockets,
+        }
+    }
+
+    fn ports(&self) -> &[u16] {
+        &self.ports
+    }
+}
+
+/// A loopback UDP port that is bound and immediately released.
+///
+/// Only for tests whose assertions are state-agnostic (aggregate
+/// accounting). Anything may bind or answer on such a port afterwards, so
+/// no test may infer a state from it — tests that assert `Closed` /
+/// `OpenOrFiltered` use [`ReservedUdpPorts`] instead.
+fn released_udp_port() -> u16 {
     let (socket, port) = bind_udp();
     drop(socket);
     std::thread::sleep(Duration::from_millis(20));
@@ -199,14 +240,54 @@ fn udp_retry_and_pressure_policy() {
 // ---------- scanner states ----------
 
 #[test]
-fn closed_loopback_reports_closed_or_filtered_v4() {
-    // Portable contract: Darwin/BSD need not deliver attributable ICMP
-    // refusal to the unconnected portable socket, so a known-unused port may
-    // honestly surface as Closed (refusal) or OpenOrFiltered (silence).
-    // Never infer Closed without refusal evidence; never return Open/Error.
+fn reserved_ports_stay_untakeable_and_unanswered() {
+    // The invariant every state-asserting UDP test here depends on: a
+    // reserved port is still bound for the whole test, so no sibling
+    // fixture running on another thread — and no ephemeral probe socket
+    // of the scanner itself — can occupy it and answer there.
+    let reserved = ReservedUdpPorts::reserve(8);
+    for port in reserved.ports() {
+        assert!(
+            UdpSocket::bind(("127.0.0.1", *port)).is_err(),
+            "reserved port {port} was re-bindable, so it is not reserved"
+        );
+    }
     let outcome = NativeUdpScanner.scan(
         "127.0.0.1".parse().unwrap(),
-        &[closed_udp_port()],
+        reserved.ports(),
+        &Wave1UdpProbes,
+        &scan_config(500, 0),
+    );
+    assert_eq!(outcome.probes.len(), reserved.ports().len());
+    assert_eq!(
+        outcome.open_count, 0,
+        "nothing may answer on a reserved port"
+    );
+    assert!(
+        outcome
+            .probes
+            .iter()
+            .all(|p| matches!(p.state, UdpPortState::Closed | UdpPortState::OpenOrFiltered)),
+        "reserved ports must be Closed or OpenOrFiltered, never Open/Error; observed {:?}",
+        outcome
+            .probes
+            .iter()
+            .map(|p| (p.port, p.state, p.detail.as_str()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn closed_loopback_reports_closed_or_filtered_v4() {
+    // Portable contract: Darwin/BSD need not deliver attributable ICMP
+    // refusal to the unconnected portable socket, so a port nothing may
+    // answer on may honestly surface as Closed (refusal) or
+    // OpenOrFiltered (silence). Never infer Closed without refusal
+    // evidence; never return Open/Error.
+    let reserved = ReservedUdpPorts::reserve(1);
+    let outcome = NativeUdpScanner.scan(
+        "127.0.0.1".parse().unwrap(),
+        reserved.ports(),
         &Wave1UdpProbes,
         &scan_config(500, 0),
     );
@@ -217,7 +298,7 @@ fn closed_loopback_reports_closed_or_filtered_v4() {
             probe.state,
             UdpPortState::Closed | UdpPortState::OpenOrFiltered
         ),
-        "unused loopback port must be Closed or OpenOrFiltered, got {:?}",
+        "reserved loopback port must be Closed or OpenOrFiltered, got {:?}",
         probe.state
     );
     match probe.state {
@@ -249,8 +330,9 @@ fn closed_loopback_reports_closed_or_filtered_v6() {
         }
     };
     let port = socket.local_addr().unwrap().port();
-    drop(socket);
-    std::thread::sleep(Duration::from_millis(20));
+    // Held (never released) for the whole scan: a released port is
+    // bindable again immediately, so nothing may answer on it.
+    let _reserved = socket;
     let outcome = NativeUdpScanner.scan(
         "::1".parse().unwrap(),
         &[port],
@@ -360,13 +442,15 @@ fn closed_ports_never_retry_but_silence_does() {
 
 #[test]
 fn window_bounds_sockets_and_cancellation_is_prompt() {
-    // Unused loopback ports through a width-4 window: all accounted, peak ≤ 4.
-    // Classification is kernel-dependent (Closed on refusal evidence,
-    // OpenOrFiltered on silence); the window/cancellation invariants must
-    // hold for either honest outcome.
-    let mut ports: Vec<u16> = (0..48).map(|_| closed_udp_port()).collect();
-    ports.sort_unstable();
-    ports.dedup();
+    // 48 loopback ports nothing may answer on, through a width-4 window:
+    // all accounted, peak ≤ 4. The sockets stay bound for the whole test
+    // (no release cycle), so no sibling test and no probe socket of the
+    // scanner itself can occupy one of these ports and turn it into a
+    // response. Classification is kernel-dependent (Closed on refusal
+    // evidence, OpenOrFiltered on silence); the window/cancellation
+    // invariants must hold for either honest outcome.
+    let reserved = ReservedUdpPorts::reserve(48);
+    let ports = reserved.ports();
     let config = UdpScanConfig::bounded(
         Duration::from_millis(500),
         4,
@@ -376,7 +460,7 @@ fn window_bounds_sockets_and_cancellation_is_prompt() {
     );
     let outcome = NativeUdpScanner.scan(
         "127.0.0.1".parse().unwrap(),
-        &ports,
+        ports,
         &Wave1UdpProbes,
         &config,
     );
@@ -391,7 +475,12 @@ fn window_bounds_sockets_and_cancellation_is_prompt() {
             .probes
             .iter()
             .all(|p| matches!(p.state, UdpPortState::Closed | UdpPortState::OpenOrFiltered)),
-        "unused ports must be Closed or OpenOrFiltered, never Open/Error"
+        "reserved ports must be Closed or OpenOrFiltered, never Open/Error; observed {:?}",
+        outcome
+            .probes
+            .iter()
+            .map(|p| (p.port, p.state, p.detail.as_str()))
+            .collect::<Vec<_>>()
     );
     assert!(
         outcome.probes.iter().all(|p| p.attempts == 1),
@@ -408,7 +497,7 @@ fn window_bounds_sockets_and_cancellation_is_prompt() {
     let config = UdpScanConfig::bounded(Duration::from_millis(500), 16, 0, None, token);
     let outcome = NativeUdpScanner.scan(
         "127.0.0.1".parse().unwrap(),
-        &ports,
+        ports,
         &Wave1UdpProbes,
         &config,
     );
@@ -991,13 +1080,12 @@ fn task_deadline_truncates_with_unscanned_accounting() {
 
 #[test]
 fn fd_usage_stays_bounded_without_leak() {
-    // 60 ports through a width-8 window: peak never exceeds the window.
-    // Leak check compares before/after inside this test with a margin for
-    // sibling parallel tests' fixtures (which hold their own sockets);
-    // a systematic per-port leak would still dwarf the margin.
-    let mut ports: Vec<u16> = (0..70).map(|_| closed_udp_port()).collect();
-    ports.sort_unstable();
-    ports.dedup();
+    // 70 reserved ports through a width-8 window: peak never exceeds the
+    // window. The fixtures' own sockets are part of the baseline (snapshot
+    // taken after reserving them) so a systematic per-port leak would still
+    // dwarf the margin.
+    let reserved = ReservedUdpPorts::reserve(70);
+    let ports = reserved.ports();
     let before = open_fd_count();
     let config = UdpScanConfig::bounded(
         Duration::from_millis(300),
@@ -1009,7 +1097,7 @@ fn fd_usage_stays_bounded_without_leak() {
     for _ in 0..3 {
         let outcome = NativeUdpScanner.scan(
             "127.0.0.1".parse().unwrap(),
-            &ports,
+            ports,
             &Wave1UdpProbes,
             &config,
         );
@@ -1045,9 +1133,11 @@ fn open_fd_count() -> Option<usize> {
 
 #[test]
 fn speed_changes_pressure_never_udp_semantics() {
-    // Same explicit ports at slow/balanced/100: identical state sets;
-    // only timeout/window pressure differs.
-    let closed = closed_udp_port();
+    // Same explicit port at slow/balanced/100: identical state sets;
+    // only timeout/window pressure differs. The port stays bound and
+    // unanswered for all three runs, so the three counts are comparable.
+    let reserved = ReservedUdpPorts::reserve(1);
+    let closed = reserved.ports()[0];
     let mut states = Vec::new();
     for speed in ["slow", "balanced", "100"] {
         let cli = Cli::try_parse_from([
@@ -1300,10 +1390,12 @@ fn retained_records_stay_compact_for_huge_scans() {
         "UdpProbe grew past the compact budget: {}",
         size_of::<UdpProbe>()
     );
-    // 300 loopback ports (mostly closed; parallel tests may rarely hold
-    // one, so assert invariants, not exact states). Deduped: release
-    // cycles can hand the same port back twice.
-    let mut ports: Vec<u16> = (0..320).map(|_| closed_udp_port()).collect();
+    // 300 loopback ports with state-agnostic assertions only (aggregate
+    // accounting), so released-and-reusable ports are acceptable here:
+    // whoever answers or answers not, the totals stay exact. Deliberately
+    // state-agnostic, because 300 simultaneously bound fixtures would
+    // spend the per-process descriptor budget other suites need.
+    let mut ports: Vec<u16> = (0..320).map(|_| released_udp_port()).collect();
     ports.sort_unstable();
     ports.dedup();
     ports.truncate(300);

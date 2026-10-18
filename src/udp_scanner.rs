@@ -109,6 +109,7 @@ mod linux_raw {
             optval: *mut c_void,
             optlen: *mut u32,
         ) -> c_int;
+        pub fn getsockname(fd: c_int, addr: *mut c_void, len: *mut u32) -> c_int;
         pub fn send(fd: c_int, buf: *const c_void, len: usize, flags: c_int) -> isize;
         pub fn recv(fd: c_int, buf: *mut c_void, len: usize, flags: c_int) -> isize;
         pub fn __errno_location() -> *mut c_int;
@@ -374,6 +375,25 @@ fn socket_error(fd: CInt) -> CInt {
         );
     }
     error
+}
+
+/// Local port of a bound probe socket (`None` if the kernel refuses).
+///
+/// `sockaddr_in` and `sockaddr_in6` share the first four bytes: a
+/// native-endian family followed by the network-order port, so one buffer
+/// reads either family. Needed because `connect` on an unbound UDP socket
+/// silently assigns an ephemeral port: when that assignment equals the
+/// port under probe the kernel loops our own datagram back (see
+/// [`probe_port_is_self_bound`]).
+#[cfg(target_os = "linux")]
+fn local_udp_port(fd: CInt) -> Option<u16> {
+    let mut addr = [0u8; 28];
+    let mut length = addr.len() as u32;
+    let called = unsafe { getsockname(fd, addr.as_mut_ptr() as *mut CVoid, &mut length) };
+    if called != 0 || length < 4 {
+        return None;
+    }
+    Some(u16::from_be_bytes([addr[2], addr[3]]))
 }
 
 #[cfg(target_os = "linux")]
@@ -712,7 +732,11 @@ fn scan_ports_udp(
                         MSG_NOSIGNAL,
                     )
                 };
-                if received > 0 {
+                // A datagram read on a socket bound to the probed port is
+                // our own probe looping back, not a response: discard it
+                // (already consumed, so no spin) and keep waiting for the
+                // attempt deadline like any other silence.
+                if received > 0 && !probe_port_is_self_bound(local_udp_port(*fd), item.port) {
                     let count = received as usize;
                     outcome.datagrams_received += 1;
                     let protocol = source.classify(item.port, &buffer[..count]);
@@ -894,7 +918,10 @@ fn scan_ports_udp(
                             MSG_NOSIGNAL,
                         )
                     };
-                    if received > 0 {
+                    // Same self-bound rule as the poll path: our own datagram read on a
+                    // socket that occupies the probed port is never a
+                    // response, so it falls through to silence handling.
+                    if received > 0 && !probe_port_is_self_bound(local_udp_port(*fd), item.port) {
                         let count = received as usize;
                         outcome.datagrams_received += 1;
                         let protocol = source.classify(item.port, &buffer[..count]);
@@ -1152,6 +1179,75 @@ pub fn decide_portable_recv_failure(
     }
 }
 
+/// Terminal decision for a portable `send_to` failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortableSendDecision {
+    /// Attributable refusal observed at send time: terminal `Closed`.
+    Closed,
+    /// Local failure: terminal `Error`, never retry.
+    Error,
+}
+
+/// Pure classifier for portable `send_to` failures. Production
+/// `scan_ports_udp_portable` branches on this; unit tests prove the
+/// mapping with synthetic `io::Error`s.
+///
+/// An ICMP port-unreachable is attributable closure evidence wherever the
+/// stack surfaces it. The Linux poll path already maps `ECONNREFUSED` on
+/// `send(2)` to `Closed`; Winsock surfaces the same refusal as
+/// `WSAECONNRESET (10054)` on `send_to` whenever the error is delivered
+/// before the call returns, and `normalize_io_error` maps both to
+/// `ConnectionRefused`. Classifying that as `Error` would report a
+/// responding host as a local failure, so the refusal keeps the same
+/// terminal `Closed` evidence it has on every other path.
+pub fn decide_portable_send_failure(error: &std::io::Error) -> PortableSendDecision {
+    match crate::platform::network::normalize_io_error(error) {
+        crate::execution::ErrorCategory::ConnectionRefused => PortableSendDecision::Closed,
+        _ => PortableSendDecision::Error,
+    }
+}
+
+/// True when this probe socket itself occupies the port being probed.
+///
+/// Every probe socket is bound to an OS-assigned ephemeral port, drawn
+/// from the same dynamic range a port list may come from. When that
+/// assignment lands on the target port, the kernel loops our own datagram
+/// back to this socket, and no other process can hold that port while we
+/// do — so a datagram arriving there is our own probe, never evidence
+/// that the target answered. Reporting `Open` from it would fabricate
+/// responsiveness. Only the exact `local == target` case is filtered, so a
+/// genuine reply whose source port coincides with some other ephemeral
+/// port is never discarded.
+fn probe_port_is_self_bound(local_port: Option<u16>, target_port: u16) -> bool {
+    local_port == Some(target_port)
+}
+
+/// Receive one response, discarding a datagram this socket sent to itself.
+///
+/// A probe socket bound to the very port it probes receives its own
+/// datagram back (see [`probe_port_is_self_bound`]); that copy is not a
+/// response and must not be classified. At most one copy is ever in flight
+/// per send, so discarding it cannot spin.
+#[allow(dead_code)]
+fn recv_response(
+    socket: &std::net::UdpSocket,
+    local_port: Option<u16>,
+    target_port: u16,
+    buffer: &mut [u8; 2048],
+) -> Result<usize, std::io::Error> {
+    loop {
+        match socket.recv_from(buffer) {
+            Ok((count, _)) => {
+                if probe_port_is_self_bound(local_port, target_port) {
+                    continue;
+                }
+                return Ok(count);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 /// Shared portable UDP logic, available on all platforms so Linux tests can
 /// prove concurrency/accounting without raw sockets.
 #[allow(dead_code)]
@@ -1234,6 +1330,7 @@ fn scan_ports_udp_portable(
                         }
                     };
                     let mut attempts: u32 = 1;
+                    let local_port = socket.local_addr().ok().map(|addr| addr.port());
                     loop {
                         if config.cancel.is_cancelled() {
                             let mut out = outcome.lock().unwrap_or_else(|e| e.into_inner());
@@ -1269,21 +1366,48 @@ fn scan_ports_udp_portable(
                             let category =
                                 crate::platform::network::normalize_io_error(&error);
                             let mut out = outcome.lock().unwrap_or_else(|e| e.into_inner());
-                            out.record(
-                                UdpProbe {
-                                    port,
-                                    state: UdpPortState::Error,
-                                    latency: started.elapsed(),
-                                    detail: format!(
-                                        "UDP send to {ip}:{port} failed ({category}): {error}"
-                                    ),
-                                    attempts,
-                                    protocol: None,
-                                    datagrams_sent: attempts,
-                                    datagrams_received: 0,
-                                },
-                                config.retain_detail,
-                            );
+                            match decide_portable_send_failure(&error) {
+                                // The datagram reached the host and the host
+                                // refused it: same terminal closure evidence
+                                // as a refusal observed on receive, never a
+                                // local `Error`.
+                                PortableSendDecision::Closed => {
+                                    out.closed_errors += 1;
+                                    out.datagrams_sent += u64::from(attempts);
+                                    out.record(
+                                        UdpProbe {
+                                            port,
+                                            state: UdpPortState::Closed,
+                                            latency: started.elapsed(),
+                                            detail: format!(
+                                                "UDP port unreachable on {ip}:{port} ({category}); host responded"
+                                            ),
+                                            attempts,
+                                            protocol: None,
+                                            datagrams_sent: attempts,
+                                            datagrams_received: 0,
+                                        },
+                                        config.retain_detail,
+                                    );
+                                }
+                                PortableSendDecision::Error => {
+                                    out.record(
+                                        UdpProbe {
+                                            port,
+                                            state: UdpPortState::Error,
+                                            latency: started.elapsed(),
+                                            detail: format!(
+                                                "UDP send to {ip}:{port} failed ({category}): {error}"
+                                            ),
+                                            attempts,
+                                            protocol: None,
+                                            datagrams_sent: attempts,
+                                            datagrams_received: 0,
+                                        },
+                                        config.retain_detail,
+                                    );
+                                }
+                            }
                             break;
                         }
                         {
@@ -1291,8 +1415,8 @@ fn scan_ports_udp_portable(
                             out.datagrams_sent += 1;
                         }
                         let mut buffer = [0u8; 2048];
-                        match socket.recv_from(&mut buffer) {
-                            Ok((count, _)) => {
+                        match recv_response(&socket, local_port, port, &mut buffer) {
+                            Ok(count) => {
                                 let protocol = source.classify(port, &buffer[..count]);
                                 let detail = match &protocol {
                                     Some(name) => format!(
@@ -1490,6 +1614,43 @@ mod tests {
         assert_ne!(UdpPortState::Open, UdpPortState::Closed);
         assert_ne!(UdpPortState::Closed, UdpPortState::OpenOrFiltered);
         assert_ne!(UdpPortState::OpenOrFiltered, UdpPortState::Error);
+    }
+
+    /// The Linux poll path reads the probe socket's own port so it can
+    /// refuse to treat a self-echoed datagram as evidence; the raw
+    /// lookup must return exactly the port `bind(0)` reported.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn probe_socket_local_port_is_read_back_exactly() {
+        use std::os::fd::AsRawFd;
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = socket.local_addr().unwrap().port();
+        assert_eq!(local_udp_port(socket.as_raw_fd()), Some(port));
+    }
+
+    /// The poll path connects each probe socket before sending, so its
+    /// self-echo case must be recognized there too: a socket connected to
+    /// the port it was assigned reports that exact port back, and the
+    /// kernel loops the probe into it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn connected_probe_socket_recognizes_its_own_echo() {
+        use std::os::fd::AsRawFd;
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = socket.local_addr().unwrap().port();
+        socket.connect(("127.0.0.1", port)).unwrap();
+        assert!(
+            probe_port_is_self_bound(local_udp_port(socket.as_raw_fd()), port),
+            "a probe socket connected to its own port must be recognized"
+        );
+        socket
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        socket.send(b"probe").unwrap();
+        let mut buffer = [0u8; 2048];
+        if let Ok(count) = socket.recv(&mut buffer) {
+            assert_eq!(&buffer[..count], b"probe", "control: own probe came back");
+        }
     }
 
     #[test]
@@ -1701,6 +1862,113 @@ mod tests {
             decide_portable_recv_failure(&local, 1, 1),
             PortableRecvDecision::Error
         );
+    }
+
+    /// Deterministic: an attributable refusal reported by `send_to` is the
+    /// same closure evidence as one reported by `recv_from`. Winsock
+    /// surfaces ICMP port-unreachable as `WSAECONNRESET (10054)` on send;
+    /// classifying that as `Error` would report a responding host as a
+    /// local failure, so it must stay `Closed` like every other path.
+    #[test]
+    fn refusal_on_send_is_closed_not_error() {
+        use std::io::{Error, ErrorKind};
+        // Windows: ICMP refusal delivered as WSAECONNRESET on send_to.
+        let winsock_reset = Error::from_raw_os_error(10054);
+        assert_eq!(
+            decide_portable_send_failure(&winsock_reset),
+            PortableSendDecision::Closed
+        );
+        // Windows: WSAECONNREFUSED form of the same evidence.
+        let winsock_refused = Error::from_raw_os_error(10061);
+        assert_eq!(
+            decide_portable_send_failure(&winsock_refused),
+            PortableSendDecision::Closed
+        );
+        // Unix errno parity.
+        let unix_refused = Error::new(ErrorKind::ConnectionRefused, "synthetic send refusal");
+        assert_eq!(
+            decide_portable_send_failure(&unix_refused),
+            PortableSendDecision::Closed
+        );
+        // Local failures stay `Error`: silence, permission and address
+        // failures say nothing about whether the port is open.
+        for error in [
+            Error::new(ErrorKind::TimedOut, "synthetic send silence"),
+            Error::new(ErrorKind::PermissionDenied, "synthetic denied send"),
+            Error::new(ErrorKind::AddrNotAvailable, "synthetic bad address"),
+            Error::new(ErrorKind::InvalidInput, "synthetic bad socket"),
+        ] {
+            assert_eq!(
+                decide_portable_send_failure(&error),
+                PortableSendDecision::Error,
+                "{error:?} is a local failure, not closure evidence"
+            );
+        }
+    }
+
+    /// Real sockets: a datagram this socket sent to its own port is not a
+    /// response. The Linux loopback stack delivers that copy even to a
+    /// connected socket, so reading it as evidence would fabricate `Open`
+    /// on any port whose probe bind happened to land on the probed port.
+    #[test]
+    fn self_echoed_probe_is_never_a_response() {
+        use std::io::ErrorKind;
+        use std::net::SocketAddr;
+        let loopback: IpAddr = "127.0.0.1".parse().unwrap();
+        let timeout = Some(Duration::from_millis(200));
+        let is_silence = |result: &Result<usize, std::io::Error>| matches!(result, Err(error) if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock));
+
+        // Probing the port this socket itself occupies.
+        let echoer = UdpSocket::bind("127.0.0.1:0").unwrap();
+        echoer.set_read_timeout(timeout).unwrap();
+        let own_port = echoer.local_addr().unwrap().port();
+        let own = SocketAddr::new(loopback, own_port);
+        let mut buffer = [0u8; 2048];
+        echoer.send_to(b"probe", own).unwrap();
+        match echoer.recv_from(&mut buffer) {
+            // Stack loops the probe back: prove the copy exists, then
+            // prove the scanner's read path never counts it.
+            Ok((count, _)) => {
+                assert_eq!(&buffer[..count], b"probe", "control: own probe came back");
+                echoer.send_to(b"probe", own).unwrap();
+                let echoed = recv_response(&echoer, Some(own_port), own_port, &mut buffer);
+                assert!(
+                    is_silence(&echoed),
+                    "own probe must never be read as a response, got {echoed:?}"
+                );
+            }
+            // Stack does not loop datagrams back to the sender: nothing to
+            // discard here, and the scanner's rule stays inert.
+            Err(error) if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {}
+            Err(error) => panic!("unexpected control receive failure: {error}"),
+        }
+
+        // A response from a different port is evidence, never filtered.
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        server.set_read_timeout(timeout).unwrap();
+        let server_port = server.local_addr().unwrap().port();
+        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        client
+            .send_to(b"hello", SocketAddr::new(loopback, server_port))
+            .unwrap();
+        let mut buffer = [0u8; 2048];
+        let count = recv_response(
+            &server,
+            Some(server_port.wrapping_add(1)),
+            server_port,
+            &mut buffer,
+        )
+        .unwrap();
+        assert_eq!(&buffer[..count], b"hello");
+
+        // An unknown local port (kernel refused the lookup) filters
+        // nothing: uncertain local state never discards real evidence.
+        client
+            .send_to(b"again", SocketAddr::new(loopback, server_port))
+            .unwrap();
+        let mut buffer = [0u8; 2048];
+        let count = recv_response(&server, None, server_port, &mut buffer).unwrap();
+        assert_eq!(&buffer[..count], b"again");
     }
 
     /// Deterministic: explicit `Closed`/`ConnectionRefused` evidence admits

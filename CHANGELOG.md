@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- UDP evidence: a datagram the scanner's own probe socket sent to the port
+  it was probing is no longer read as a response (both the native poll
+  scanner and the portable Windows/macOS scanner), so an ephemeral bind
+  that lands on a probed port can no longer fabricate `Open`. A refusal
+  reported by `send_to` (`WSAECONNRESET` on Windows) is classified as
+  `Closed`, the same closure evidence a refusal on receive produces,
+  instead of a local `Error`.
+- Test fixtures: UDP tests that assert port states now reserve their
+  loopback ports (the bound sockets are held for the test's duration)
+  instead of binding and releasing them. A released port is bindable
+  again immediately, so sibling tests running in parallel could occupy
+  one and answer on it.
 
 ## v1.2.0
 

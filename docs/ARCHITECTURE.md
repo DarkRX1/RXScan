@@ -71,6 +71,14 @@ target -> scope -> discovery -> scan -> service probes
 - UDP silence stays `open|filtered` because an unanswered datagram is
   consistent with filtering, loss, and rate-limiting — absence of a
   reply is not evidence of absence (`src/udp_discovery.rs`).
+- A UDP probe socket is bound to an OS-assigned ephemeral port, so it can
+  end up owning the very port it probes; the kernel then loops the probe
+  back and no other process can hold that port. That copy is the
+  scanner's own datagram, never evidence that the target answered, so it
+  is discarded instead of reported `Open`. Closure evidence keeps the
+  same meaning wherever the stack surfaces it: an ICMP port-unreachable
+  reported by `send_to` is `Closed`, like one reported by `recv`
+  (`src/udp_scanner.rs`).
 - `all_ports` / `all` means TCP 1–65535 in one bounded task; UDP has
   no full-range mode because unbounded UDP probing is a packet flood,
   not a scan (`src/ports.rs`).
