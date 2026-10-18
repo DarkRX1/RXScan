@@ -20,6 +20,7 @@ pub mod discovery;
 pub mod dns;
 pub mod document;
 pub mod entity_search;
+pub mod evidence_bundle;
 pub mod execution;
 pub mod explain;
 pub mod exposure;

@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use rxscan::project_db::{ProjectDb, RetentionMode};
+use sha2::{Digest, Sha256};
 
 fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_rxscan"))
@@ -168,6 +169,27 @@ fn fs_read_to_string(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|error| panic!("cannot read {path:?}: {error}"))
 }
 
+/// Re-hash `name` inside manifest.txt so a deliberately edited bundle file
+/// still passes the hash check, letting a deeper structural check be reached.
+fn rewrite_manifest_hash(bundle_dir: &Path, name: &str, contents: &str) {
+    let manifest_path = bundle_dir.join("manifest.txt");
+    let manifest = fs_read_to_string(&manifest_path);
+    let new_hash = format!("{:x}", Sha256::digest(contents.as_bytes()));
+    let mut rewritten = String::new();
+    for line in manifest.lines() {
+        let mut parts = line.splitn(2, char::is_whitespace);
+        let _hash = parts.next().unwrap_or("");
+        let entry = parts.next().unwrap_or("").trim();
+        if entry == name {
+            rewritten.push_str(&format!("{new_hash}  {entry}\n"));
+        } else if !entry.is_empty() {
+            rewritten.push_str(line);
+            rewritten.push('\n');
+        }
+    }
+    std::fs::write(&manifest_path, rewritten).unwrap();
+}
+
 #[test]
 fn evidence_bundle_tamper_detection() {
     let root = tmp_dir("tamper");
@@ -191,17 +213,20 @@ fn evidence_bundle_tamper_detection() {
             .success()
     );
 
-    // Tampered evidence.jsonl fails verification.
+    // Tampered evidence.jsonl fails verification, and the reported cause is the
+    // hash mismatch rather than an unrelated structural error.
     let ev_path = out_dir.join("evidence.jsonl");
     let mut ev = fs_read_to_string(&ev_path);
     ev.push_str("tampered-append-line\n");
     std::fs::write(&ev_path, &ev).unwrap();
+    let out = run_verify(&[out_dir.to_str().unwrap()])
+        .output()
+        .expect("verify-bundle runs");
+    assert!(!out.status.success(), "tampered evidence.jsonl must fail");
     assert!(
-        !run_verify(&[out_dir.to_str().unwrap()])
-            .output()
-            .unwrap()
-            .status
-            .success()
+        String::from_utf8_lossy(&out.stderr).contains("hash mismatch for 'evidence.jsonl'"),
+        "expected hash mismatch, got: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
 
     // Restore, then a missing file fails.
@@ -287,7 +312,8 @@ fn evidence_bundle_tamper_detection() {
         );
     }
 
-    // Restore, then evidence_count mismatch fails.
+    // Restore, then evidence_count mismatch fails. Rewritten through the JSON
+    // value so the assertion cannot pass on an unrelated extra-file error.
     run_bundle(&[
         db_path.to_str().unwrap(),
         "--case-id",
@@ -298,18 +324,30 @@ fn evidence_bundle_tamper_detection() {
     ])
     .output()
     .expect("evidence-bundle runs");
-    let mut bundle_text = fs_read_to_string(&out_dir.join("bundle.json"));
-    bundle_text = bundle_text.replace("\"evidence_count\": 1", "\"evidence_count\": 9");
-    std::fs::write(out_dir.join("bundle.json"), &bundle_text).unwrap();
+    let mut value: serde_json::Value =
+        serde_json::from_str(&fs_read_to_string(&out_dir.join("bundle.json"))).unwrap();
+    value["evidence_count"] = serde_json::json!(9);
+    let rewritten = serde_json::to_string_pretty(&value).unwrap();
+    std::fs::write(out_dir.join("bundle.json"), &rewritten).unwrap();
+    // Keep manifest.txt consistent with the edited file, so the count check
+    // is reached instead of the (earlier) hash check.
+    rewrite_manifest_hash(&out_dir, "bundle.json", &rewritten);
+    let out = run_verify(&[out_dir.to_str().unwrap()])
+        .output()
+        .expect("verify-bundle runs");
     assert!(
-        !run_verify(&[out_dir.to_str().unwrap()])
-            .output()
-            .unwrap()
-            .status
-            .success()
+        !out.status.success(),
+        "evidence_count mismatch must fail verification"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("does not match evidence.jsonl line count"),
+        "count mismatch must be the reported cause, got: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
 
-    // Restore, then evidence id mismatch fails.
+    // Restore, then evidence id mismatch fails. Parse and rewrite the JSON
+    // rather than string-replacing: bundle.json is pretty-printed and ids are
+    // strings, so a `"evidence_ids": [1]` literal never appears in it.
     run_bundle(&[
         db_path.to_str().unwrap(),
         "--case-id",
@@ -320,15 +358,29 @@ fn evidence_bundle_tamper_detection() {
     ])
     .output()
     .expect("evidence-bundle runs");
-    let mut bundle_text = fs_read_to_string(&out_dir.join("bundle.json"));
-    bundle_text = bundle_text.replace("\"evidence_ids\": [1]", "\"evidence_ids\": [9]");
-    std::fs::write(out_dir.join("bundle.json"), &bundle_text).unwrap();
+    let mut value: serde_json::Value =
+        serde_json::from_str(&fs_read_to_string(&out_dir.join("bundle.json"))).unwrap();
+    let original_ids = value["evidence_ids"].clone();
     assert!(
-        !run_verify(&[out_dir.to_str().unwrap()])
-            .output()
-            .unwrap()
-            .status
-            .success()
+        !original_ids.as_array().unwrap().is_empty(),
+        "fixture must record evidence ids for this check to mean anything"
+    );
+    value["evidence_ids"] = serde_json::json!(["not-a-real-id"]);
+    let rewritten = serde_json::to_string_pretty(&value).unwrap();
+    std::fs::write(out_dir.join("bundle.json"), &rewritten).unwrap();
+    rewrite_manifest_hash(&out_dir, "bundle.json", &rewritten);
+    let out = run_verify(&[out_dir.to_str().unwrap()])
+        .output()
+        .expect("verify-bundle runs");
+    assert!(
+        !out.status.success(),
+        "evidence id mismatch must fail verification"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr)
+            .contains("evidence ids in bundle.json do not match evidence.jsonl"),
+        "id mismatch must be the reported cause, got: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }
 
@@ -373,6 +425,100 @@ fn evidence_bundle_refuses_non_empty_output_dir() {
         String::from_utf8_lossy(&second.stderr)
     );
     assert!(out_dir.join("bundle.json").exists());
+}
+
+#[test]
+fn evidence_bundle_force_clears_stale_files_so_bundle_verifies() {
+    let root = tmp_dir("force-stale");
+    let db_path = root.join("proj.sqlite");
+    fixture_db(&db_path);
+
+    // A leftover file from an earlier bundle would otherwise survive --force
+    // and make the freshly written bundle fail its own verification.
+    let out_dir = root.join("bundle");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    std::fs::write(out_dir.join("stale.txt"), "stale").unwrap();
+    std::fs::create_dir(out_dir.join("stale-subdir")).unwrap();
+
+    let out = run_bundle(&[
+        db_path.to_str().unwrap(),
+        "--case-id",
+        "CASE-5",
+        "--force",
+        "--out",
+        out_dir.to_str().unwrap(),
+    ])
+    .output()
+    .expect("evidence-bundle runs");
+    assert!(
+        out.status.success(),
+        "--force should succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out_dir.join("stale.txt").exists(), "stale file cleared");
+    assert!(
+        !out_dir.join("stale-subdir").exists(),
+        "stale subdirectory cleared"
+    );
+
+    let verified = run_verify(&[out_dir.to_str().unwrap()])
+        .output()
+        .expect("verify-bundle runs");
+    assert!(
+        verified.status.success(),
+        "bundle written with --force must verify: {}",
+        String::from_utf8_lossy(&verified.stderr)
+    );
+}
+
+#[test]
+fn verify_bundle_rejects_manifest_names_outside_the_bundle() {
+    // A rewritten manifest must not be able to make verification hash files
+    // outside the bundle directory.
+    for name in ["../outside.txt", "/etc/passwd", "sub/child.json"] {
+        let root = tmp_dir("traversal");
+        let out_dir = root.join("bundle");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        std::fs::write(
+            out_dir.join("bundle.json"),
+            "{\"evidence_count\":0,\"evidence_ids\":[]}\n",
+        )
+        .unwrap();
+        std::fs::write(out_dir.join("evidence.jsonl"), "").unwrap();
+        std::fs::write(root.join("outside.txt"), "outside\n").unwrap();
+
+        let target = if name.starts_with('/') {
+            "/etc/passwd".to_owned()
+        } else {
+            root.join(name)
+                .canonicalize()
+                .unwrap_or_else(|_| root.join(name))
+                .to_string_lossy()
+                .to_string()
+        };
+        let hash = std::fs::read(&target).map(|d| format!("{:x}", Sha256::digest(&d)));
+        let hash = match hash {
+            Ok(h) => h,
+            // /etc/passwd unreadable in this environment: any well-formed
+            // hash still exercises name rejection, which happens first.
+            Err(_) => "0".repeat(64),
+        };
+        std::fs::write(out_dir.join("manifest.txt"), format!("{hash}  {name}\n")).unwrap();
+
+        let out = run_verify(&[out_dir.to_str().unwrap()])
+            .output()
+            .expect("verify-bundle runs");
+        assert!(
+            !out.status.success(),
+            "manifest naming '{name}' must be rejected"
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("not a bundle file"),
+            "unexpected error for '{name}': {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 #[test]
