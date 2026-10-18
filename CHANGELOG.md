@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## v1.2.1
+
+Patch release: UDP evidence correctness and deterministic UDP test
+fixtures. Backward compatible: CLI flags, JSON/JSONL schemas, graph and
+project databases, and artifact naming from v1.2.0 keep working
+unchanged, and nothing is added, removed, or renamed in this release.
 
 - UDP evidence: a datagram the scanner's own probe socket sent to the port
   it was probing is no longer read as a response (both the native poll

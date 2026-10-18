@@ -2,7 +2,7 @@
 
 > Historical note: this file records the Phase 0–15 baseline. It is not the
 > current capability list. Current behavior is documented in `README.md` and
-> `CHANGELOG.md` (Unreleased section covers host-discovery expansion, TCP
+> `CHANGELOG.md` (the v1.2 release sections cover host-discovery expansion, TCP
 > SYN modes, UDP discovery, DNS SRV, fingerprint packs, web technology
 > normalization, and the local web console). Statements below about missing
 > UDP/analysis/fingerprinting describe that historical baseline, not master.
