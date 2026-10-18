@@ -1645,28 +1645,13 @@ pub fn render_export(
 /// Nodes additionally carry `icon` and `category` from the icon manifest
 /// (additive; existing fields are unchanged).
 pub fn to_json(view: &ViewGraph) -> String {
-    let nodes: Vec<serde_json::Value> = view
+    // Nodes stream through `NodeWithIcon`, which appends the two additive
+    // fields. Building a `serde_json::Value` per node instead would
+    // materialize the whole graph twice and roughly halve export speed.
+    let nodes: Vec<NodeWithIcon<'_>> = view
         .nodes
         .iter()
-        .map(|node| {
-            let icon =
-                crate::graph_icons::node_icon(node.kind, &node.stored_kind, &node.attributes);
-            let category = icon.and_then(crate::graph_icons::category_of);
-            serde_json::json!({
-                "id": node.id,
-                "kind": node.kind.as_str(),
-                "stored_kind": node.stored_kind,
-                "label": node.label,
-                "link_confidence": node.link_confidence,
-                "scope": node.scope.as_str(),
-                "observations": node.observations,
-                "attributes": node.attributes,
-                "evidence": node.evidence,
-                "member_count": node.member_count,
-                "icon": icon,
-                "category": category,
-            })
-        })
+        .map(|node| NodeWithIcon { node })
         .collect();
     let payload = serde_json::json!({
         "graph_schema_version": VIEW_SCHEMA_VERSION,
@@ -1677,6 +1662,39 @@ pub fn to_json(view: &ViewGraph) -> String {
         "edges": view.edges,
     });
     serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_owned())
+}
+
+/// Serializes a `ViewNode` field-for-field, then appends the additive
+/// `icon` and `category` fields. Field names and order mirror the derived
+/// `Serialize` on `ViewNode`; `node_json_fields_are_complete` guards against
+/// the two drifting apart.
+struct NodeWithIcon<'a> {
+    node: &'a ViewNode,
+}
+
+impl Serialize for NodeWithIcon<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let node = self.node;
+        let icon = crate::graph_icons::node_icon(node.kind, &node.stored_kind, &node.attributes);
+        let category = icon.and_then(crate::graph_icons::category_of);
+        let mut out = serializer.serialize_struct("ViewNode", 14)?;
+        out.serialize_field("id", &node.id)?;
+        out.serialize_field("kind", &node.kind)?;
+        out.serialize_field("stored_kind", &node.stored_kind)?;
+        out.serialize_field("label", &node.label)?;
+        out.serialize_field("link_confidence", &node.link_confidence)?;
+        out.serialize_field("scope", &node.scope)?;
+        out.serialize_field("first_seen_ms", &node.first_seen_ms)?;
+        out.serialize_field("last_seen_ms", &node.last_seen_ms)?;
+        out.serialize_field("observations", &node.observations)?;
+        out.serialize_field("attributes", &node.attributes)?;
+        out.serialize_field("evidence", &node.evidence)?;
+        out.serialize_field("member_count", &node.member_count)?;
+        out.serialize_field("icon", &icon)?;
+        out.serialize_field("category", &category)?;
+        out.end()
+    }
 }
 
 fn xml_escape(text: &str) -> String {
@@ -2964,6 +2982,44 @@ mod tests {
         let expect = u32::from_be_bytes([zlib[at], zlib[at + 1], zlib[at + 2], zlib[at + 3]]);
         assert_eq!(expect, adler32(&out));
         out
+    }
+
+    /// `to_json` appends `icon`/`category` through `NodeWithIcon`, which
+    /// restates every `ViewNode` field by hand. If a field is added to
+    /// `ViewNode` and not mirrored there, it would silently vanish from the
+    /// canonical export: `first_seen_ms`/`last_seen_ms` were lost exactly
+    /// that way. This compares the two field sets directly.
+    #[test]
+    fn node_json_fields_are_complete() {
+        let (sources, edges) = fixture_sources();
+        let view = build_view(sources, edges, &ViewOptions::default());
+        let exported: serde_json::Value =
+            serde_json::from_str(&to_json(&view)).expect("to_json is valid JSON");
+        let node = exported["nodes"][0]
+            .as_object()
+            .expect("first node is an object")
+            .clone();
+        // Every ViewNode field must appear, plus exactly the two additive
+        // manifest fields.
+        let expected = [
+            "attributes",
+            "category",
+            "evidence",
+            "first_seen_ms",
+            "icon",
+            "id",
+            "kind",
+            "label",
+            "last_seen_ms",
+            "link_confidence",
+            "member_count",
+            "observations",
+            "scope",
+            "stored_kind",
+        ];
+        let mut actual: Vec<&str> = node.keys().map(String::as_str).collect();
+        actual.sort_unstable();
+        assert_eq!(actual, expected, "to_json node fields drifted");
     }
 
     #[test]
