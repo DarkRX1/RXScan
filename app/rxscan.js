@@ -854,6 +854,7 @@
       tr.append(portCell, stateCell, svcCell, el("td", details), el("td", "observed"));
       tbody.appendChild(tr);
     }
+    labelTableCells($("scan-table"));
     // OS inference from the core (no JS scoring): best candidate or
     // explicit Unknown per host, with confidence and limitations.
     const osList = $("scan-os");
@@ -1125,6 +1126,7 @@
       tr.append(el("td", label), el("td", (o.evidence || []).slice(0, 2).join(" · ") || "—"));
       tbody.appendChild(tr);
     }
+    labelTableCells($("search-table"));
     renderCoverage($("search-viz-coverage"), { entities: (data.entities || []).length, observations: obs.length, relationships: (data.relationships || []).length, network_scans: 0 });
     $("search-raw").textContent = JSON.stringify(data, null, 2);
   }
@@ -1211,6 +1213,7 @@
       );
       tbody.appendChild(tr);
     }
+    labelTableCells($("search-table"));
     const otherBox = $("search-other-details");
     if (otherBox && otherTbody) {
       if (!rest.length) {
@@ -1391,6 +1394,7 @@
       tr.append(el("td", ent.kind || "?"), el("td", ent.label || ent.id || "?"), el("td", String(ent.depth ?? "—")), el("td", String(ent.observations ?? "—")));
       etbody.appendChild(tr);
     }
+    labelTableCells($("inv-entities-table"));
     const evList = $("inv-evidence");
     clear(evList);
     const sample = r.entities_sample || [];
@@ -1694,6 +1698,9 @@
         tr.appendChild(act);
         tbody.appendChild(tr);
       }
+      // Must run after the rows exist: the stacked-card layout on narrow
+      // viewports renders each header via content: attr(data-label).
+      labelTableCells($("jobs-table"));
     } catch (_) {}
   }
   $("jobs-refresh").addEventListener("click", () => refreshJobs().catch(() => {}));
@@ -2333,6 +2340,31 @@
     div.append(dt, dd);
     dl.appendChild(div);
   }
+  function gvDetailFragment(rows) {
+    const frag = document.createDocumentFragment();
+    for (const [k, v] of rows) {
+      const div = document.createElement("div");
+      const dt = document.createElement("dt");
+      dt.textContent = k;
+      const dd = document.createElement("dd");
+      dd.textContent =
+        v === null || v === undefined || v === "" ? "—" : String(v);
+      div.append(dt, dd);
+      frag.appendChild(div);
+    }
+    return frag;
+  }
+  function labelTableCells(table) {
+    if (!table) return;
+    const labels = Array.from(table.querySelectorAll("thead th"), (th) =>
+      th.textContent.trim()
+    );
+    table.querySelectorAll("tbody tr").forEach((tr) => {
+      tr.querySelectorAll("td").forEach((td, i) => {
+        if (labels[i]) td.setAttribute("data-label", labels[i]);
+      });
+    });
+  }
   function gvSelectNode(id, additive) {
     if (!additive) gv.selection.clear();
     if (gv.selection.has(id)) gv.selection.delete(id);
@@ -2354,47 +2386,133 @@
     const e = gv.edges.find((x) => x.from === parts[0] && x.to === parts[1] && String(x.relation) === parts[2]);
     if (e) gvShowEdge(e);
   }
-  async function gvShowNode(id) {
-    const box = $("graph-inspect"), empty = $("graph-inspect-empty");
-    const rep = gvRep(id);
-    if (rep !== id) {
-      empty.hidden = true; box.hidden = false; clear(box);
-      const entry = gv.collapsed.get(rep);
-      gvKv(box, "collection", entry.label);
-      gvKv(box, "members", entry.members.length);
-      gvKv(box, "hint", "Double-click or right-click to expand.");
+  function gvDetailTarget() {
+    return window.innerWidth <= 760 ? "sheet" : "inspector";
+  }
+  function gvShowDetail(rows, fallback) {
+    if (gvDetailTarget() === "sheet") {
+      bottomSheetOpen(rows);
       return;
     }
-    try {
-      const detail = await api("/api/v1/projects/" + encodeURIComponent(activeProject()) + "/graph/node?node=" + encodeURIComponent(id));
-      empty.hidden = true; box.hidden = false; clear(box);
-      const n = detail.node || {};
-      gvKv(box, "label", n.label);
-      gvKv(box, "kind", gvKindOf(n) + " (" + (n.stored_kind || "?") + ")");
-      gvKv(box, "confidence", n.link_confidence === null || n.link_confidence === undefined ? "unrated (no incident relationships)" : n.link_confidence + " (strongest linked relationship)");
-      gvKv(box, "scope", n.scope);
-      gvKv(box, "observations", n.observations);
-      Object.keys(n.attributes || {}).sort().forEach((k) => gvKv(box, "attr " + k, n.attributes[k]));
-      (detail.evidence_chain || []).slice(0, 16).forEach((link, i) => {
-        gvKv(box, "evidence " + (i + 1), link.summary + " — " + link.module);
-      });
-      gvKv(box, "explanation", detail.explanation);
-    } catch (err) {
-      gvStatus("Detail unavailable: " + err.message);
-    }
-  }
-  function gvShowEdge(e) {
     const box = $("graph-inspect"), empty = $("graph-inspect-empty");
     empty.hidden = true; box.hidden = false; clear(box);
-    gvKv(box, "relationship", (e.display_relation || e.relation) + " (" + (e.stored_relation || e.relation) + ")");
-    gvKv(box, "style", e.observed === false ? "dashed (inferred)" : "solid (directly observed)");
-    gvKv(box, "confidence", e.confidence);
-    gvKv(box, "from", e.from);
-    gvKv(box, "to", e.to);
-    gvKv(box, "module", e.module);
-    gvKv(box, "scan run", e.scan_run);
-    (e.evidence || []).forEach((x, i) => gvKv(box, "evidence " + (i + 1), x));
+    for (const [k, v] of rows) gvKv(box, k, v);
+    if (fallback) fallback();
   }
+  async function gvShowNode(id) {
+    const rep = gvRep(id);
+    const rows = [];
+    if (rep !== id) {
+      const entry = gv.collapsed.get(rep);
+      rows.push(["collection", entry.label], ["members", entry.members.length], ["hint", "Double-click or right-click to expand."]);
+    } else {
+      try {
+        const detail = await api("/api/v1/projects/" + encodeURIComponent(activeProject()) + "/graph/node?node=" + encodeURIComponent(id));
+        const n = detail.node || {};
+        rows.push(["label", n.label]);
+        rows.push(["kind", gvKindOf(n) + " (" + (n.stored_kind || "?") + ")"]);
+        rows.push([
+          "confidence",
+          n.link_confidence === null || n.link_confidence === undefined
+            ? "unrated (no incident relationships)"
+            : n.link_confidence + " (strongest linked relationship)",
+        ]);
+        rows.push(["scope", n.scope]);
+        rows.push(["observations", n.observations]);
+        Object.keys(n.attributes || {}).sort().forEach((k) =>
+          rows.push(["attr " + k, n.attributes[k]])
+        );
+        (detail.evidence_chain || []).slice(0, 16).forEach((link, i) => {
+          rows.push(["evidence " + (i + 1), link.summary + " — " + link.module]);
+        });
+        rows.push(["explanation", detail.explanation]);
+      } catch (err) {
+        gvStatus("Detail unavailable: " + err.message);
+        return;
+      }
+    }
+    gvShowDetail(rows);
+  }
+  function gvShowEdge(e) {
+    const rows = [];
+    rows.push([
+      "relationship",
+      (e.display_relation || e.relation) + " (" + (e.stored_relation || e.relation) + ")",
+    ]);
+    rows.push(["style", e.observed === false ? "dashed (inferred)" : "solid (directly observed)"]);
+    rows.push(["confidence", e.confidence]);
+    rows.push(["from", e.from]);
+    rows.push(["to", e.to]);
+    rows.push(["module", e.module]);
+    rows.push(["scan run", e.scan_run]);
+    (e.evidence || []).forEach((x, i) => rows.push(["evidence " + (i + 1), x]));
+    gvShowDetail(rows);
+  }
+
+  /* -- bottom sheet detail panel (narrow viewports) ----------------------- */
+  const bottomSheet = $("bottom-sheet");
+  const bottomSheetDetail = $("bottom-sheet-detail");
+  function bottomSheetOpen(rows) {
+    if (!bottomSheet || !bottomSheetDetail) return;
+    clear(bottomSheetDetail);
+    bottomSheetDetail.appendChild(gvDetailFragment(rows));
+    bottomSheet.removeAttribute("hidden");
+    bottomSheet.className = "bottom-sheet open half";
+    gvStatus("Detail");
+  }
+  function bottomSheetClose() {
+    if (!bottomSheet) return;
+    bottomSheet.setAttribute("hidden", "");
+    bottomSheet.className = "bottom-sheet";
+    gvStatus("Detail closed");
+  }
+  if (bottomSheet) {
+    const handle = bottomSheet.querySelector(".bottom-sheet-handle");
+    const close = bottomSheet.querySelector(".bottom-sheet-close");
+    let state = 1; // 0=peek, 1=half, 2=full
+    const states = ["peek", "half", "full"];
+    function setState(s) {
+      state = s;
+      bottomSheet.className = "bottom-sheet open " + states[state];
+    }
+    if (handle) {
+      let dragY = 0;
+      handle.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        setState((state + 1) % 3);
+      });
+      handle.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" || ev.key === " ") {
+          ev.preventDefault();
+          setState((state + 1) % 3);
+        }
+      });
+      handle.addEventListener("pointerdown", (ev) => {
+        bottomSheet.setPointerCapture(ev.pointerId);
+        dragY = ev.clientY;
+      });
+      handle.addEventListener("pointermove", (ev) => {
+        dragY = ev.clientY;
+      });
+      handle.addEventListener("pointerup", (ev) => {
+        bottomSheet.releasePointerCapture(ev.pointerId);
+        const delta = ev.clientY - dragY;
+        if (Math.abs(delta) < 8) setState((state + 1) % 3);
+        else if (delta < -30) setState(2);
+        else if (delta > 30) setState(0);
+        else setState(1);
+      });
+    }
+    if (close) close.addEventListener("click", bottomSheetClose);
+    bottomSheet.addEventListener("click", (ev) => {
+      if (ev.target === bottomSheet) bottomSheetClose();
+    });
+  }
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape" && bottomSheet && !bottomSheet.hasAttribute("hidden")) {
+      bottomSheetClose();
+    }
+  });
 
   /* -- data ---------------------------------------------------------------- */
   async function gvLoad() {

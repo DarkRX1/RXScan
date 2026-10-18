@@ -373,29 +373,6 @@ tr.status-running td:nth-child(3) { color: var(--rx-cyan-bright); font-weight: 7
   .graph-split { grid-template-columns: 1fr; }
   .dash-identity { flex-wrap: wrap; }
 }
-@media (max-width: 760px) {
-  .shell { grid-template-columns: 1fr; }
-  .sidebar { position: static; min-height: 0; flex-direction: row; flex-wrap: wrap; align-items: center; border-right: none; border-bottom: 1px solid var(--line); }
-  .sidebar-brand { border-bottom: none; margin-bottom: 0; padding-bottom: 0.15rem; flex-basis: 100%; }
-  .sidebar-logo { width: 26px; height: 26px; }
-  .sidebar-note { display: none; }
-  .cards { grid-template-columns: 1fr; }
-  .grid-form { grid-template-columns: 1fr; }
-  .dash-logo { width: 44px; height: 44px; }
-  .table-wrap { margin-left: -0.5rem; margin-right: -0.5rem; }
-  /* Phone: stack provider grids, wrap key/value rows, keep tables readable */
-  .sources-grid { grid-template-columns: 1fr 1fr; }
-  .prov-filter { grid-template-columns: 1fr; }
-  .kv > div { flex-wrap: wrap; }
-  .kv dt { min-width: 0; }
-  .graph-toolbar select { width: 100%; max-width: 12rem; }
-  .viz .bar { max-width: 100%; }
-}
-@media (max-width: 420px) {
-  .sources-grid { grid-template-columns: 1fr; }
-  table.findings { font-size: 0.85rem; }
-  table.findings th, table.findings td { padding: 0.4rem 0.5rem; }
-}
 /* Touch: larger tap targets, graph gestures cooperate with page scroll */
 @media (pointer: coarse) {
   .sidebar a { padding: 0.7rem 0.9rem; }
@@ -455,34 +432,115 @@ tr.status-running td:nth-child(3) { color: var(--rx-cyan-bright); font-weight: 7
   .gnode-wrap.selected .gnode-shape.gicon { filter: none; }
 }
 
-/* Mobile: safe-area insets, no horizontal scroll at 360px, and 44px touch
-   targets. Stacked cards / bottom-sheet behaviour is handled by the existing
-   breakpoint stack; these rules keep the narrow viewport usable. */
+/* Mobile: safe-area insets, no horizontal scroll at any width, and
+   44px touch targets. Stacked cards / bottom-sheet behaviour below. */
 body { overflow-x: hidden; }
-@media (max-width: 360px) {
-  body { overflow-x: hidden; }
-  .shell { grid-template-columns: 1fr; min-width: 0; }
+
+/* Tablets: single-column shell, stacked grids, readable touch targets. */
+@media (max-width: 768px) {
+  .shell { grid-template-columns: 1fr; }
+  .sidebar {
+    position: static; min-height: 0; flex-direction: row; flex-wrap: wrap;
+    align-items: center; border-right: none; border-bottom: 1px solid var(--line);
+  }
+  .sidebar a { padding: 0.6rem 0.9rem; font-size: 0.9rem; }
+  .sidebar-brand { border-bottom: none; margin-bottom: 0; padding-bottom: 0.15rem; flex-basis: 100%; }
+  .sidebar-logo { width: 26px; height: 26px; }
+  .sidebar-note { display: none; }
+  .cards { grid-template-columns: 1fr; }
+  .grid-form { grid-template-columns: 1fr; }
+  .scan-target-row { grid-template-columns: 1fr; }
+  .search-modes { grid-template-columns: 1fr; }
+  .grid-2 { grid-template-columns: 1fr; }
+  .graph-split { grid-template-columns: 1fr; }
+  .dash-identity { flex-wrap: wrap; }
+  .table-wrap { margin-left: -0.5rem; margin-right: -0.5rem; }
+  .sources-grid { grid-template-columns: 1fr 1fr; }
+  .prov-filter { grid-template-columns: 1fr; }
+  .kv > div { flex-wrap: wrap; }
+  .kv dt { min-width: 0; }
+  .graph-toolbar select { width: 100%; max-width: 12rem; }
+  .viz .bar { max-width: 100%; }
+  #inv-graph, #p-graph { min-height: 260px; }
+}
+
+/* Phones: safe-area insets and 44px touch targets. */
+@media (max-width: 480px) {
   .workspace {
     padding-left: max(0.75rem, env(safe-area-inset-left));
     padding-right: max(0.75rem, env(safe-area-inset-right));
+    padding-bottom: max(1rem, env(safe-area-inset-bottom));
   }
   .workspace section { max-width: 100%; }
   .table-wrap {
     margin-left: max(-0.5rem, calc(-1 * env(safe-area-inset-left)));
     margin-right: max(-0.5rem, calc(-1 * env(safe-area-inset-right)));
   }
-  /* Larger node touch targets on narrow viewports (≥44px). */
-  #graph-canvas, #inv-graph, #p-graph { min-height: 260px; }
-  .gnode-wrap { padding: 6px; box-sizing: border-box; }
-  .gnode-shape { stroke-width: 3; }
-  button, .sidebar a, .tabs button, .graph-toolbar button {
+  button, .sidebar a, .tabs button, .graph-toolbar button,
+  .ctx-menu button {
     min-height: 44px; min-width: 44px;
   }
+  /* Graph nodes get ≥44px touch targets via padding around the shape. */
+  #graph-canvas, #inv-graph, #p-graph { min-height: 260px; }
+  .gnode-wrap { padding: 8px; box-sizing: border-box; }
+  .gnode-shape { stroke-width: 3; }
 }
-@media (max-width: 420px) {
-  body { overflow-x: hidden; }
-  .table-wrap {
-    margin-left: max(-0.5rem, calc(-1 * env(safe-area-inset-left)));
-    margin-right: max(-0.5rem, calc(-1 * env(safe-area-inset-right)));
+
+/* Findings tables become stacked cards on narrow viewports, showing
+   confidence, severity and target first (cell order is preserved from
+   markup; data-label comes from the column header via JavaScript). */
+@media (max-width: 600px) {
+  table.findings, table.findings thead, table.findings tbody,
+  table.findings tr, table.findings td { display: block; }
+  table.findings thead tr {
+    position: absolute; width: 1px; height: 1px;
+    overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  table.findings tr {
+    margin: 0 0 0.75rem; border: 1px solid var(--line);
+    border-radius: var(--radius); background: var(--panel); overflow: hidden;
+  }
+  table.findings td {
+    border: none; border-bottom: 1px solid var(--border-soft);
+    position: relative; padding-left: 45%; padding-top: 0.5rem;
+    padding-bottom: 0.5rem;
+  }
+  table.findings td:last-child { border-bottom: none; }
+  table.findings td:before {
+    position: absolute; left: 0.6rem; top: 0.5rem;
+    width: 40%; padding-right: 0.6rem;
+    white-space: nowrap; content: attr(data-label);
+    font-weight: 700; color: var(--muted); font-size: 0.8rem;
   }
 }
+
+/* Bottom sheet: detail panel on narrow viewports. Hidden on desktop. */
+.bottom-sheet {
+  position: fixed; inset: auto 0 0 0; z-index: 60;
+  display: none; flex-direction: column; height: 50vh; max-height: 60vh;
+  background: var(--rx-surface-2); border-top: 1px solid var(--line);
+  box-shadow: 0 -6px 24px rgba(0, 0, 0, 0.5);
+  transform: translateY(100%); transition: transform 0.2s ease;
+}
+@media (max-width: 760px) {
+  .bottom-sheet { display: flex; }
+  .bottom-sheet.open { transform: translateY(0); }
+  .bottom-sheet.peek { transform: translateY(88%); height: 12%; max-height: 12%; }
+  #graph-canvas, #inv-graph, #p-graph { min-height: 220px; }
+  /* Inspector aside is stacked below the canvas on desktop; on phones the
+     bottom sheet owns the detail view. */
+  #graph-inspect, #inv-inspect, #p-inspect { display: none; }
+}
+.bottom-sheet-handle {
+  margin: auto; width: 2.4rem; height: 0.4rem;
+  background: var(--muted); border-radius: 2rem;
+  margin-top: 0.5rem; cursor: pointer;
+}
+.bottom-sheet-close {
+  position: absolute; top: 0.5rem; right: 0.8rem;
+  background: transparent; border: none; color: var(--text);
+  font-size: 1.5rem; line-height: 1; padding: 0.2rem;
+}
+.bottom-sheet-content { flex: 1; overflow: auto; padding: 0.75rem; }
+.bottom-sheet-content .kv { margin: 0; }

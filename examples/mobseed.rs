@@ -1,6 +1,9 @@
-//! Temporary fixture seeder for mobile verification screenshots.
-//! Builds one project database with a small graph over reserved ranges
+//! Synthetic fixture seeder for the mobile verification screenshots.
+//!
+//! Writes one project database containing a small graph over reserved ranges
 //! (example domains, 192.0.2.0/24) and fake-but-masked secrets, then exits.
+//! Used by `scripts/mobile-screenshots.mjs`; see docs/MOBILE_SCREENSHOTS.md.
+//! Nothing here contacts the network: every value is synthetic.
 
 use rxscan::execution::{ModuleOutput, TaskId};
 use rxscan::graph::build_graph;

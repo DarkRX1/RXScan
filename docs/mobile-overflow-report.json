@@ -1,0 +1,70 @@
+[
+  {
+    "vp": "360x800",
+    "kind": "dashboard",
+    "noOverflow": true
+  },
+  {
+    "vp": "360x800",
+    "kind": "graph",
+    "noOverflow": true,
+    "nodes": 26
+  },
+  {
+    "vp": "360x800",
+    "kind": "sheet",
+    "noOverflow": true,
+    "state": "bottom-sheet open half"
+  },
+  {
+    "vp": "390x844",
+    "kind": "dashboard",
+    "noOverflow": true
+  },
+  {
+    "vp": "390x844",
+    "kind": "graph",
+    "noOverflow": true,
+    "nodes": 26
+  },
+  {
+    "vp": "390x844",
+    "kind": "sheet",
+    "noOverflow": true,
+    "state": "bottom-sheet open half"
+  },
+  {
+    "vp": "430x932",
+    "kind": "dashboard",
+    "noOverflow": true
+  },
+  {
+    "vp": "430x932",
+    "kind": "graph",
+    "noOverflow": true,
+    "nodes": 26
+  },
+  {
+    "vp": "430x932",
+    "kind": "sheet",
+    "noOverflow": true,
+    "state": "bottom-sheet open half"
+  },
+  {
+    "vp": "768x1024",
+    "kind": "dashboard",
+    "noOverflow": true
+  },
+  {
+    "vp": "768x1024",
+    "kind": "graph",
+    "noOverflow": true,
+    "nodes": 26
+  },
+  {
+    "vp": "768x1024",
+    "kind": "sheet",
+    "noOverflow": null,
+    "state": "not-opened(hidden)"
+  }
+]
