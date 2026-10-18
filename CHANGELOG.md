@@ -38,10 +38,18 @@ working (no schema migration required).
   is not verified locally (no NDK/SDK in this environment).
 - Evidence bundle: `rxscan evidence-bundle <project> --case-id ID --out
   <path>` writes a masked, tamper-evident bundle (bundle.json, masked
-  evidence items, SHA-256 manifest); `rxscan verify-bundle <path>`
-  recomputes every hash and fails on mismatch, extra, or missing files. The
-  masked bundle is a redacted copy, not the original evidence; RXScan does
-  not claim legal admissibility, signing, or operator authentication.
+  evidence items, SHA-256 manifest) and prints the SHA-256 of manifest.txt
+  as the bundle digest; record that digest out-of-band (case file, ticket).
+  `rxscan verify-bundle <path>` recomputes every hash and fails on a
+  mismatch, an extra, missing, or unexpected file, a subdirectory or
+  symlink, a manifest entry naming a path outside the bundle, or a
+  `bundle.json` that disagrees with `evidence.jsonl`;
+  `rxscan verify-bundle --expect-digest <hex>` additionally fails when the
+  recorded digest differs. Verification alone detects accidental change:
+  manifest.txt can be regenerated alongside the files, so deliberate
+  rewriting is only caught by the out-of-band digest. The masked bundle is a
+  redacted copy, not the original evidence; RXScan does not claim legal
+  admissibility, signing, or operator authentication.
 - Cleanup: scoped restatement/comment trimming on files added during 1.2.0
   and this mission; zero behavior change (full test suite passes
   unmodified).

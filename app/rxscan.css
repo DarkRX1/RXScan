@@ -432,8 +432,8 @@ tr.status-running td:nth-child(3) { color: var(--rx-cyan-bright); font-weight: 7
   .gnode-wrap.selected .gnode-shape.gicon { filter: none; }
 }
 
-/* Mobile: safe-area insets, no horizontal scroll at any width, and
-   44px touch targets. Stacked cards / bottom-sheet behaviour below. */
+/* Mobile: safe-area insets, horizontal scroll suppressed, and 44px touch
+   targets. Stacked cards / bottom-sheet behaviour below. */
 body { overflow-x: hidden; }
 
 /* Tablets: single-column shell, stacked grids, readable touch targets. */
@@ -486,9 +486,10 @@ body { overflow-x: hidden; }
   .gnode-shape { stroke-width: 3; }
 }
 
-/* Findings tables become stacked cards on narrow viewports, showing
-   confidence, severity and target first (cell order is preserved from
-   markup; data-label comes from the column header via JavaScript). */
+/* Findings tables become stacked cards on narrow viewports: each cell keeps
+   its markup order and takes its column header as a label, supplied by
+   JavaScript (`data-label`). The header row is hidden visually but kept for
+   screen readers. */
 @media (max-width: 600px) {
   table.findings, table.findings thead, table.findings tbody,
   table.findings tr, table.findings td { display: block; }
