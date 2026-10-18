@@ -19,9 +19,23 @@ rxscan verify-bundle ./case-014
 | `manifest.txt` | SHA-256 of `bundle.json` and `evidence.jsonl` |
 
 The bundle is a **redacted copy**. The originals stay in the project
-database. Secrets are masked before writing, and a non-empty output
-directory is refused unless `--force` is given (with `--force` the directory
-is cleared first, so a bundle never mixes old and new files).
+database. Secrets are masked before writing.
+
+A non-empty output directory is refused unless `--force` is given. `--force`
+means *replace the bundle this command wrote* — it never means *empty this
+directory*. Only `bundle.json`, `evidence.jsonl` and `manifest.txt` are
+removed; if the directory holds anything else (an unrelated file, a
+subdirectory, a symlink), the command refuses and writes nothing:
+
+```
+$ rxscan evidence-bundle ./notes --case-id C1 --force --out ./work
+rxscan evidence-bundle: output directory './work' holds entry 'notes.txt'
+this bundle does not own; point --out at a directory used only for bundles,
+or move them first
+```
+
+Point `--out` at a directory used only for bundles. This is deliberate: a
+mistyped `--out` must not destroy unrelated data.
 
 ## Recording the digest
 
@@ -65,6 +79,20 @@ party.
 - `evidence_count` disagreeing with the line count of `evidence.jsonl`, or
   the ids in `bundle.json` disagreeing with the records in it
 - a digest mismatch when `--expect-digest` is given
+
+## What evidence-bundle refuses
+
+`evidence-bundle` writes nothing and exits non-zero when:
+
+- the project cannot be opened, or the evidence cannot be read
+- the output directory holds anything other than a previous bundle (see
+  above), with or without `--force`
+- the output path exists and is not a directory
+- any file cannot be written and re-read successfully
+
+Files are staged in a temporary directory beside the target and moved into
+place only once every one is written and verified, so a failure never leaves
+a partial bundle behind.
 
 ## Limits
 

@@ -261,13 +261,18 @@ fn evidence_bundle_tamper_detection() {
     .output()
     .expect("evidence-bundle runs");
     std::fs::write(out_dir.join("extra.txt"), "extra").unwrap();
+    let out = run_verify(&[out_dir.to_str().unwrap()])
+        .output()
+        .expect("verify-bundle runs");
+    assert!(!out.status.success(), "extra file must fail verification");
     assert!(
-        !run_verify(&[out_dir.to_str().unwrap()])
-            .output()
-            .unwrap()
-            .status
-            .success()
+        String::from_utf8_lossy(&out.stderr).contains("extra file 'extra.txt'"),
+        "extra file must be the reported cause, got: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
+    // Remove it explicitly: --force refuses a directory holding entries the
+    // bundle does not own, so it can no longer act as a cleanup.
+    std::fs::remove_file(out_dir.join("extra.txt")).unwrap();
 
     // Restore, then a subdirectory fails.
     run_bundle(&[
@@ -281,13 +286,16 @@ fn evidence_bundle_tamper_detection() {
     .output()
     .expect("evidence-bundle runs");
     std::fs::create_dir(out_dir.join("subdir")).unwrap();
+    let out = run_verify(&[out_dir.to_str().unwrap()])
+        .output()
+        .expect("verify-bundle runs");
+    assert!(!out.status.success(), "subdirectory must fail verification");
     assert!(
-        !run_verify(&[out_dir.to_str().unwrap()])
-            .output()
-            .unwrap()
-            .status
-            .success()
+        String::from_utf8_lossy(&out.stderr).contains("subdirectory 'subdir'"),
+        "subdirectory must be the reported cause, got: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
+    std::fs::remove_dir(out_dir.join("subdir")).unwrap();
 
     // Restore, then a symlink fails.
     run_bundle(&[
@@ -303,13 +311,16 @@ fn evidence_bundle_tamper_detection() {
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink("/etc/passwd", out_dir.join("link")).unwrap();
+        let out = run_verify(&[out_dir.to_str().unwrap()])
+            .output()
+            .expect("verify-bundle runs");
+        assert!(!out.status.success(), "symlink must fail verification");
         assert!(
-            !run_verify(&[out_dir.to_str().unwrap()])
-                .output()
-                .unwrap()
-                .status
-                .success()
+            String::from_utf8_lossy(&out.stderr).contains("symlink 'link'"),
+            "symlink must be the reported cause, got: {}",
+            String::from_utf8_lossy(&out.stderr)
         );
+        std::fs::remove_file(out_dir.join("link")).unwrap();
     }
 
     // Restore, then evidence_count mismatch fails. Rewritten through the JSON
@@ -407,9 +418,14 @@ fn evidence_bundle_refuses_non_empty_output_dir() {
         !out_dir.join("bundle.json").exists(),
         "nothing written on refusal"
     );
+    assert!(
+        out_dir.join("stale.txt").exists(),
+        "the pre-existing file is left untouched"
+    );
 
-    // --force overwrites.
-    let second = run_bundle(&[
+    // --force does not buy its way past a file it does not own; see
+    // evidence_bundle_force_refuses_unrelated_entries for the full matrix.
+    let forced = run_bundle(&[
         db_path.to_str().unwrap(),
         "--case-id",
         "CASE-3",
@@ -420,30 +436,129 @@ fn evidence_bundle_refuses_non_empty_output_dir() {
     .output()
     .expect("evidence-bundle runs");
     assert!(
-        second.status.success(),
-        "--force should succeed: {}",
-        String::from_utf8_lossy(&second.stderr)
+        !forced.status.success(),
+        "--force must not delete an unrelated file"
     );
-    assert!(out_dir.join("bundle.json").exists());
+    assert!(out_dir.join("stale.txt").exists(), "stale file survives");
 }
 
 #[test]
-fn evidence_bundle_force_clears_stale_files_so_bundle_verifies() {
-    let root = tmp_dir("force-stale");
+fn evidence_bundle_force_refuses_unrelated_entries() {
+    // --force means "replace the bundle this command wrote", never "empty
+    // this directory". A mistyped --out must not destroy unrelated data.
+    let root = tmp_dir("force-foreign");
     let db_path = root.join("proj.sqlite");
     fixture_db(&db_path);
 
-    // A leftover file from an earlier bundle would otherwise survive --force
-    // and make the freshly written bundle fail its own verification.
-    let out_dir = root.join("bundle");
-    std::fs::create_dir_all(&out_dir).unwrap();
-    std::fs::write(out_dir.join("stale.txt"), "stale").unwrap();
-    std::fs::create_dir(out_dir.join("stale-subdir")).unwrap();
+    // (label, seed closure, name expected in the refusal)
+    type ForeignCase = (&'static str, fn(&Path), &'static str);
+    let cases: [ForeignCase; 3] = [
+        (
+            "unrelated file",
+            |d: &Path| {
+                std::fs::write(d.join("notes.txt"), "keep me").unwrap();
+            },
+            "notes.txt",
+        ),
+        (
+            "subdirectory",
+            |d: &Path| {
+                std::fs::create_dir(d.join("archive")).unwrap();
+                std::fs::write(d.join("archive").join("old.json"), "{}").unwrap();
+            },
+            "archive",
+        ),
+        (
+            "symlink",
+            |d: &Path| {
+                #[cfg(unix)]
+                std::os::unix::fs::symlink("/etc/passwd", d.join("link")).unwrap();
+            },
+            "link",
+        ),
+    ];
 
-    let out = run_bundle(&[
+    for (label, seed, expect_name) in cases {
+        let out_dir = root.join(label.replace(' ', "-"));
+        std::fs::create_dir_all(&out_dir).unwrap();
+        seed(&out_dir);
+
+        let out = run_bundle(&[
+            db_path.to_str().unwrap(),
+            "--case-id",
+            "CASE-5",
+            "--force",
+            "--out",
+            out_dir.to_str().unwrap(),
+        ])
+        .output()
+        .expect("evidence-bundle runs");
+
+        assert!(
+            !out.status.success(),
+            "--force must refuse a directory holding a {label}"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains(expect_name) && stderr.contains("does not own"),
+            "refusal for {label} should name {expect_name}, got: {stderr}"
+        );
+        assert!(
+            !out_dir.join("bundle.json").exists(),
+            "nothing written when refusing a {label}"
+        );
+        assert!(
+            out_dir.join(expect_name).exists(),
+            "the {label} must survive the refusal"
+        );
+    }
+}
+
+#[test]
+fn evidence_bundle_force_replaces_only_its_own_files() {
+    // A directory holding only a previous bundle is replaceable by --force,
+    // and the result still verifies.
+    let root = tmp_dir("force-owned");
+    let db_path = root.join("proj.sqlite");
+    fixture_db(&db_path);
+    let out_dir = root.join("bundle");
+
+    let first = run_bundle(&[
         db_path.to_str().unwrap(),
         "--case-id",
-        "CASE-5",
+        "CASE-6",
+        "--out",
+        out_dir.to_str().unwrap(),
+    ])
+    .output()
+    .expect("evidence-bundle runs");
+    assert!(first.status.success());
+
+    // Without --force the existing bundle is refused.
+    let no_force = run_bundle(&[
+        db_path.to_str().unwrap(),
+        "--case-id",
+        "CASE-6",
+        "--out",
+        out_dir.to_str().unwrap(),
+    ])
+    .output()
+    .expect("evidence-bundle runs");
+    assert!(
+        !no_force.status.success(),
+        "an existing bundle needs --force"
+    );
+    assert!(
+        String::from_utf8_lossy(&no_force.stderr).contains("already holds a bundle"),
+        "refusal should say the directory already holds a bundle, got: {}",
+        String::from_utf8_lossy(&no_force.stderr)
+    );
+
+    // With --force the previous bundle's files are replaced in place.
+    let forced = run_bundle(&[
+        db_path.to_str().unwrap(),
+        "--case-id",
+        "CASE-7",
         "--force",
         "--out",
         out_dir.to_str().unwrap(),
@@ -451,15 +566,11 @@ fn evidence_bundle_force_clears_stale_files_so_bundle_verifies() {
     .output()
     .expect("evidence-bundle runs");
     assert!(
-        out.status.success(),
-        "--force should succeed: {}",
-        String::from_utf8_lossy(&out.stderr)
+        forced.status.success(),
+        "--force must replace a bundle-only directory: {}",
+        String::from_utf8_lossy(&forced.stderr)
     );
-    assert!(!out_dir.join("stale.txt").exists(), "stale file cleared");
-    assert!(
-        !out_dir.join("stale-subdir").exists(),
-        "stale subdirectory cleared"
-    );
+    assert!(fs_read_to_string(&out_dir.join("bundle.json")).contains("CASE-7"));
 
     let verified = run_verify(&[out_dir.to_str().unwrap()])
         .output()

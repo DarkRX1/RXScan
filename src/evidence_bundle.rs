@@ -21,6 +21,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// outside the bundle (`../outside.txt`, `/etc/passwd`).
 const MANIFEST_FILES: [&str; 2] = ["bundle.json", "evidence.jsonl"];
 
+/// Every file a bundle writes, including manifest.txt. `--force` may replace
+/// exactly these and nothing else.
+const OWNED_FILES: [&str; 3] = ["bundle.json", "evidence.jsonl", "manifest.txt"];
+
 macro_rules! err_out {
     ($($arg:tt)*) => {{
         eprintln!($($arg)*);
@@ -113,7 +117,8 @@ pub fn run_evidence_bundle(args: &[String]) {
 /// file into place, so a failure never leaves a partial bundle behind.
 /// Fails when the project cannot be opened, evidence cannot be read, or
 /// any file cannot be written and verified. Refuses a non-empty output
-/// directory unless `--force` is given.
+/// directory unless `--force` is given; `--force` replaces only the files
+/// this command owns and refuses the directory if it holds anything else.
 fn run_evidence_bundle_inner(
     project: &str,
     case_id: &str,
@@ -149,20 +154,17 @@ fn run_evidence_bundle_inner(
     let created_iso = format_utc(created);
 
     let out_path = PathBuf::from(out_dir);
-    if out_path.is_dir() {
-        let non_empty = std::fs::read_dir(&out_path)
-            .map(|rd| rd.flatten().next().is_some())
-            .unwrap_or(false);
-        if non_empty && !force {
-            return Err(format!(
-                "output directory '{out_dir}' is not empty; use --force to overwrite"
-            ));
-        }
+    // Checked before any work: `--force` replaces only the files this
+    // command owns, so a mistyped `--out` cannot delete unrelated data.
+    let replaceable = if out_path.is_dir() {
+        owned_files_to_replace(&out_path, out_dir, force)?
     } else if out_path.exists() {
         return Err(format!(
             "output path '{out_dir}' exists and is not a directory"
         ));
-    }
+    } else {
+        Vec::new()
+    };
 
     // Build in a sibling temp directory; rename into place only once every
     // file is written and verified, so a failure leaves nothing partial.
@@ -245,11 +247,12 @@ fn run_evidence_bundle_inner(
     if !out_path.is_dir() {
         std::fs::create_dir_all(&out_path)
             .map_err(|error| format!("cannot create output directory '{out_dir}': {error}"))?;
-    } else if force {
-        // --force means this directory becomes a bundle. Keeping older files
-        // would produce a bundle that fails its own verification (extra
-        // file), so clear the directory before writing.
-        clear_directory(&out_path)?;
+    }
+    // Only files this command owns are removed; `owned_files_to_replace`
+    // already refused the directory if anything else was present.
+    for path in &replaceable {
+        std::fs::remove_file(path)
+            .map_err(|error| format!("cannot replace '{}': {error}", path.display()))?;
     }
     for (_, name) in &entries {
         std::fs::rename(temp_dir.join(name), out_path.join(name))
@@ -271,23 +274,53 @@ fn run_evidence_bundle_inner(
     Ok(())
 }
 
-/// Remove every entry inside `dir`, leaving the empty directory itself.
-fn clear_directory(dir: &Path) -> Result<(), String> {
+/// Decides which files an existing output directory may have replaced.
+///
+/// Returns the owned files present when writing may proceed. Refuses the
+/// directory outright when it holds anything this command did not create —
+/// unrelated files, subdirectories, or symlinks — because `--force` means
+/// "replace the previous bundle", never "empty this directory". Refusing
+/// keeps a mistyped `--out` from destroying data.
+fn owned_files_to_replace(dir: &Path, out_dir: &str, force: bool) -> Result<Vec<PathBuf>, String> {
     let entries = std::fs::read_dir(dir)
-        .map_err(|error| format!("cannot read output directory '{}': {error}", dir.display()))?;
+        .map_err(|error| format!("cannot read output directory '{out_dir}': {error}"))?;
+    let mut owned = Vec::new();
+    let mut foreign: Vec<String> = Vec::new();
     for entry in entries {
-        let entry =
-            entry.map_err(|error| format!("cannot read entry in '{}': {error}", dir.display()))?;
+        let entry = entry.map_err(|error| format!("cannot read entry in '{out_dir}': {error}"))?;
         let path = entry.path();
-        if path.is_dir() {
-            std::fs::remove_dir_all(&path)
-                .map_err(|error| format!("cannot remove '{}': {error}", path.display()))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let meta = std::fs::symlink_metadata(&path)
+            .map_err(|error| format!("cannot stat '{}': {error}", path.display()))?;
+        // Only a regular file with one of our own names is replaceable. A
+        // directory or symlink that borrows a bundle name is still refused,
+        // so nothing is ever removed recursively or through a link.
+        if OWNED_FILES.contains(&name.as_str()) && meta.file_type().is_file() {
+            owned.push(path);
         } else {
-            std::fs::remove_file(&path)
-                .map_err(|error| format!("cannot remove '{}': {error}", path.display()))?;
+            let kind = if meta.file_type().is_dir() {
+                "subdirectory"
+            } else {
+                "entry"
+            };
+            foreign.push(format!("{kind} '{name}'"));
         }
     }
-    Ok(())
+    if !foreign.is_empty() {
+        foreign.sort();
+        return Err(format!(
+            "output directory '{out_dir}' holds {} this bundle does not own; \
+             point --out at a directory used only for bundles, or move them first",
+            foreign.join(", ")
+        ));
+    }
+    if !owned.is_empty() && !force {
+        return Err(format!(
+            "output directory '{out_dir}' already holds a bundle; \
+             use --force to replace it"
+        ));
+    }
+    Ok(owned)
 }
 
 /// Write `contents` to `path` and re-read to verify, so a silent write

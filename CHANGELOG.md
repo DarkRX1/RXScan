@@ -40,6 +40,10 @@ working (no schema migration required).
   <path>` writes a masked, tamper-evident bundle (bundle.json, masked
   evidence items, SHA-256 manifest) and prints the SHA-256 of manifest.txt
   as the bundle digest; record that digest out-of-band (case file, ticket).
+  A non-empty output directory is refused unless `--force` is given, and
+  `--force` replaces only the bundle's own files: a directory holding
+  anything else (unrelated file, subdirectory, symlink) is refused so a
+  mistyped `--out` cannot destroy unrelated data.
   `rxscan verify-bundle <path>` recomputes every hash and fails on a
   mismatch, an extra, missing, or unexpected file, a subdirectory or
   symlink, a manifest entry naming a path outside the bundle, or a
