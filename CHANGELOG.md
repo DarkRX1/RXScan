@@ -1,30 +1,5 @@
 # Changelog
 
-## Unreleased (master, newer than v1.2.0)
-
-- Icon pack: the 74-icon manifest pack is integrated into the graph view,
-  reports, and exports (`app/assets/icons/`, covered by the existing
-  `app/**/*` packaging include). SVG safety and manifest/file-parity tests
-  guard the shipped icons; `manifest.json` is the single source of truth.
-  Graph JSON and GraphML gain additive `icon` and `category` fields; PNG
-  export draws the same icon identity (shape + ramp color) so all formats
-  agree. Attribution icons (hacker, threat-group, terrorist, botnet,
-  sanctions, law-enforcement, watchlist) are never assigned by heuristic.
-- Mobile: responsive breakpoints down to 360px (no horizontal scroll),
-  safe-area insets, 44px touch targets, double-tap zoom on the graph, and a
-  default 200-node render budget with an explicit "show more" control on
-  narrow viewports; headless-browser screenshots at 360x800 and 768x1024
-  are recorded under `docs/`. Android APK execution is not verified locally
-  (no NDK/SDK in this environment).
-- Evidence bundle: `rxscan evidence-bundle <project> --case-id ID --out
-  <path>` writes a masked, tamper-evident bundle (bundle.json, masked
-  evidence items, SHA-256 manifest); `rxscan verify-bundle <path>`
-  recomputes every hash and fails on mismatch, extra, or missing files. The
-  masked bundle is a redacted copy, not the original evidence; RXScan does
-  not claim legal admissibility, signing, or operator authentication.
-- Cleanup: scoped restatement/comment trimming on files added during 1.2.0
-  and this mission; zero behavior change (full test suite passes
-  unmodified).
 
 ## v1.2.0
 
@@ -44,6 +19,32 @@ working (no schema migration required).
   `GET /api/v1/projects/:name/diff`.
 - Secret-safe display masking across graph, exports, API, and reports;
   scope-gated stored-data expansion; bounded resources throughout.
+- Icon pack: the 74-icon manifest pack is integrated into the graph view,
+  reports, and exports (`app/assets/icons/`, covered by the existing
+  `app/**/*` packaging include). SVG safety and manifest/file-parity tests
+  guard the shipped icons; `manifest.json` is the single source of truth.
+  Graph JSON and GraphML gain additive `icon` and `category` fields; PNG
+  export draws the icon's shape and ramp color, not the glyph artwork (the
+  glyph appears in SVG, HTML and the GUI). Attribution icons
+  (hacker, threat-group, terrorist, botnet, sanctions, law-enforcement,
+  watchlist) are never assigned by heuristic.
+- Mobile: responsive breakpoints for phones (≤480px), stacked-card tables
+  (≤600px), a bottom-sheet detail panel (≤760px) and tablet layout (≤768px),
+  safe-area insets, 44px touch targets, double-tap zoom on the graph, and a
+  default 200-node render budget with an explicit "show more" control on
+  narrow viewports; headless-Chromium screenshots at 360x800, 390x844, 430x932
+  and 768x1024 (dashboard, graph with nodes, detail sheet) are recorded under
+  `docs/`, each verified to have no horizontal overflow. Android APK execution
+  is not verified locally (no NDK/SDK in this environment).
+- Evidence bundle: `rxscan evidence-bundle <project> --case-id ID --out
+  <path>` writes a masked, tamper-evident bundle (bundle.json, masked
+  evidence items, SHA-256 manifest); `rxscan verify-bundle <path>`
+  recomputes every hash and fails on mismatch, extra, or missing files. The
+  masked bundle is a redacted copy, not the original evidence; RXScan does
+  not claim legal admissibility, signing, or operator authentication.
+- Cleanup: scoped restatement/comment trimming on files added during 1.2.0
+  and this mission; zero behavior change (full test suite passes
+  unmodified).
 
 ## v1.1.0
 

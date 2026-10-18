@@ -33,8 +33,14 @@ app/assets/icons/
 ```
 
 PNG renders are deliberately NOT copied: PNG export is a dependency-free software
-rasterizer that draws shape/color glyphs directly, so it needs no PNG assets and
-leaving them out protects binary size.
+rasterizer that draws the icon identity (tile shape + ramp color) directly, so it
+needs no PNG assets and leaving them out protects binary size.
+
+**Limitation:** the PNG rasterizer draws the icon's shape and ramp color, not the
+glyph artwork. The glyph itself appears in SVG, HTML and the GUI exports (sprite
+`<use>` references). `rxscan graph --help` states the same thing for `--format
+png`. Adding glyph artwork to PNG would require an SVG path rasterizer, which
+this dependency-free exporter deliberately does not carry.
 
 ## Category table (generated from manifest.json — single source of truth)
 
