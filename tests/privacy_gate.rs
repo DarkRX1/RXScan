@@ -553,6 +553,12 @@ fn every_detector_fires_on_a_synthetic_sample() {
         ("env_assignment", "API_KEY=abc"),
         ("env_assignment", "  DB_PASSWORD=z"),
         ("env_assignment", "export GITHUB_TOKEN=y"),
+        // Must stay NON-reserved. `ip_is_reserved` drops reserved values, so a
+        // documentation address here would leave the detector with nothing to
+        // fire on and this test would assert nothing. See the Verification
+        // section of docs/PRIVACY_SCRUB_REPORT.md: this fixture is the one
+        // literal here that is a real routable address, and it needs a
+        // digest-keyed allowlist entry when the wildcard is tightened.
         ("public_ip", "connecting to 203.0.114.55 now"),
         ("phone", "call 415-555-2671 tomorrow"),
     ];
@@ -734,8 +740,9 @@ fn digest_matches_known_sha256_vectors() {
             "digest({input:?}) must stay byte-identical: the allowlist is keyed on it"
         );
     }
-    // Lowercase hex only, fixed width.
-    for sample in ["a", "", "abc", "/home/operator", "203.0.114.55"] {
+    // Lowercase hex only, fixed width. These samples are only digested, never
+    // scanned, so they may all use reserved values.
+    for sample in ["a", "", "abc", "/home/operator", "203.0.113.55"] {
         let d = digest(sample);
         assert_eq!(d.len(), 16, "digest width changed for {sample:?}");
         assert!(

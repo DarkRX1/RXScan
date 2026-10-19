@@ -196,11 +196,104 @@ exception; `no_unreviewed_privacy_findings_in_tracked_files` remains the
 authoritative check, and the known-answer vectors are a redundant guard
 against a future refactor.
 
+### Second review: a non-reserved address, and what the wildcard hides
+
+A follow-up review found that `tests/privacy_gate.rs` shipped a literal
+belonging to the `/24` block immediately above `203.0.113.0/24`. RFC 5737
+reserves only `192.0.2.0/24`, `198.51.100.0/24` and `203.0.113.0/24`, so the
+next block up is real routable space and that value should not ship.
+Following this report's own convention, the address is referred to by digest
+rather than quoted:
+
+```
+public_ip  tests/privacy_gate.rs  sha256:bc4159863dbc68b4
+```
+
+The file contained that literal twice, and the two cases are not equivalent:
+
+| Line | Context | Action |
+| --- | --- | --- |
+| 745 | `digest_matches_known_sha256_vectors`, the lowercase/width sample list | replaced with a reserved `203.0.113.55` |
+| 562 | `every_detector_fires_on_a_synthetic_sample`, the `public_ip` fixture | **cannot** be replaced; see below |
+
+Line 745 only feeds a value to `digest()`; the detector never sees it, so a
+reserved address is fine there and the literal is gone.
+
+Line 562 is the fixture that proves the `public_ip` detector fires at all, so
+it **must** be non-reserved. This was verified rather than assumed: putting a
+reserved `203.0.113.55` in that slot and running the test produces
+
+```
+detector `public_ip` failed to fire on its own synthetic sample
+test result: FAILED. 0 passed; 1 failed; exit 101
+```
+
+because `ip_is_reserved` filters reserved values out and the detector is left
+with nothing to match. A reserved address cannot be used to prove that a
+reserved-value filter is correct. **A public-IP detector self-test cannot be
+written without one non-reserved address**, so this literal is a deliberate
+requirement of the test, now marked with a comment at the call site. It is a
+string in a detector self-test and is never contacted by any code path. Every
+other file touched in this phase was scanned for non-reserved literals using a
+mirror of the detector's own `ip_is_reserved` logic; the line 562 fixture is
+the only one that remains.
+
+### The wildcard exempting `tests/privacy_gate.rs`
+
+The allowlist entry exempting the gate's own test file reads, verbatim:
+
+```
+*|tests/privacy_gate.rs|*|the privacy gate's own self-tests: this file defines the detector patterns and the synthetic samples they are proven against
+```
+
+The allowlist was **not** modified by this commit. Whether to tighten or
+retire this wildcard is a separate maintainer decision.
+
+It matters because a wildcard suppresses *every* detector for that path, not
+just the synthetic samples the entry describes. Re-running the gate with
+`allowed()` forced to fail, so the exemption is bypassed and nothing else is
+changed, shows the ten findings the wildcard hides in that one file. A patched
+copy of the script kept outside the repository was used for this; no tracked
+file was modified:
+
+| Detector | Line | Digest | What is actually there |
+| --- | --- | --- | --- |
+| `email` | 709 | `4022aae8fc2a4629` | the planted-leak canary address |
+| `forge_token` | 545 | `1db61e13c133f7d9` | synthetic forge-token fixture |
+| `home_path` | 535 | `53a8fcca9845a83e` | a `/home/` operator-path fixture |
+| `home_path` | 536 | `cf05319ae9007aa7` | a `/Users/` operator-path fixture |
+| `home_path` | 735 | `53a8fcca9845a83e` | the same value, as a known-answer digest vector |
+| `home_path` | 745 | `53a8fcca9845a83e` | the same value, as a digest-formatting sample |
+| `phone` | 563 | `48c1cea5f658e895` | a NANP-formatted phone fixture |
+| `private_key` | 537 | `8bcac7908eb95041` | bare PEM header fixture |
+| `public_ip` | 425 | `ad754b3cdaad9067` | out-of-range rejection fixture |
+| `public_ip` | 562 | `bc4159863dbc68b4` | the real routable address described above |
+
+Nine of those ten are the gate's own vocabulary and are exactly what the
+allowlist entry claims to cover: synthetic patterns, canaries and known-answer
+vectors that exist so the detectors can be proven. The tenth, line 562, is the
+one real routable address, and it is the one the wildcard is currently the only
+thing standing behind.
+
+Quoting the values rather than their digests was attempted in an earlier draft
+of this section and the gate immediately reported seven findings against it,
+which is the detector set doing its job on its own documentation. This section
+therefore carries digests only, as the rest of the allowlist does.
+
+**A privacy-gate PASS is therefore not, on its own, evidence about
+`tests/privacy_gate.rs`.** The gate reported `0 findings across 656 tracked
+files` while this file was carrying a non-reserved address, because the file
+was never examined. Two consequences follow for any future tightening: every
+row above needs either a digest-keyed entry or a rewrite to reserved
+vocabulary, and the line 562 fixture needs a reviewed entry specifically, since
+no reserved substitute exists.
+
 ### Standing rule
 
 Never record a clippy or gate result from a run that did not compile the
 changed code. Pin the toolchain, and treat a suspiciously fast clippy run as
-a failure to verify rather than a success.
+a failure to verify rather than a success. A green gate run is likewise not
+evidence about any file a wildcard exempts.
 
 ## Quarantine
 
