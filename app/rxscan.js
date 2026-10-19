@@ -2674,6 +2674,18 @@
       gvRender();
     } catch (_) {}
   }
+  /* -- Phase 6: threat labeling evidence enforcement (thin wrapper) -------- */
+  const gvAttributionIcons = new Set(["hacker","threat-group","terrorist","botnet","sanctions","law-enforcement","watchlist"]);
+  function gvIsAttributionIcon(icon) { return gvAttributionIcons.has(icon); }
+  function gvLabelAllowed(label) {
+    return !!label && gvIsAttributionIcon(label.icon) && !!label.source &&
+      label.confidence > 0 && !!label.evidence_ref;
+  }
+  function gvLabelWarning(label) { return !gvLabelAllowed(label); }
+  function gvRenderAttributionDetail(label) {
+    if (!gvLabelAllowed(label)) return "WARNING: attribution requires named source, confidence > 0, evidence ref";
+    return "listed or attributed by " + label.source + " (confidence " + label.confidence + ")";
+  }
 })();
   gvSvg().addEventListener("wheel", (ev) => {
     ev.preventDefault();

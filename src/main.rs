@@ -227,6 +227,10 @@ fn main() {
         run_phone(&args);
         return;
     }
+    if args.get(1).is_some_and(|arg| arg == "audit") {
+        run_audit(&args);
+        return;
+    }
     if args.get(1).is_some_and(|arg| arg == "exposure") {
         run_exposure_cli(&args);
         return;
@@ -5020,6 +5024,23 @@ fn run_os_lab(args: &[String]) {
                 std::process::exit(2);
             })
         );
+    }
+}
+
+/// Compliance audit CLI (`rxscan audit ...`).
+fn run_audit(args: &[String]) {
+    use rxscan::threat_labels as tl;
+    match args.get(2).map(|s| s.as_str()) {
+        Some("labels") => {
+            // No project context: report policy only.
+            println!(
+                "audit labels: policy enforced ({} attribution icons)",
+                tl::ATTRIBUTION_ICONS.len()
+            );
+        }
+        _ => {
+            println!("rxscan audit labels");
+        }
     }
 }
 

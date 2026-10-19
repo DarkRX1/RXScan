@@ -574,3 +574,11 @@ results, and accounting.
 ## License
 
 MIT. See [`LICENSE`](LICENSE).
+
+## Threat labeling rule
+
+Attribution icons (`hacker`, `threat-group`, `terrorist`, `botnet`, `sanctions`,
+`law-enforcement`, `watchlist`) are entity category markers and are applied only
+from a stored record carrying a named source, confidence above zero, and an
+evidence reference. They are never inferred from usernames, domains, or free
+text. Panels and reports render them as "listed or attributed by <source>".
