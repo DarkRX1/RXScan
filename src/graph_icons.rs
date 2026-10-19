@@ -648,7 +648,8 @@ const UNMAPPED_BY_DESIGN: &[(&str, &str)] = &[
 
 /// Attribution icons that must never appear in the automatic mapping table.
 #[allow(dead_code)] // used only by the exhaustiveness test
-const ATTRIBUTION_ICONS: &[&str] = &[
+/// Attribution icon identifiers, re-exported by `threat_labels`.
+pub const ATTRIBUTION_ICONS: &[&str] = &[
     "hacker",
     "threat-group",
     "terrorist",

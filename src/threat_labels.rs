@@ -6,15 +6,7 @@
 
 use std::collections::BTreeMap;
 
-pub const ATTRIBUTION_ICONS: &[&str] = &[
-    "hacker",
-    "threat-group",
-    "terrorist",
-    "botnet",
-    "sanctions",
-    "law-enforcement",
-    "watchlist",
-];
+pub use crate::graph_icons::ATTRIBUTION_ICONS;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ThreatLabelError {
@@ -139,6 +131,17 @@ pub fn warning_state(label: &AttributionLabel) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn threat_labels_does_not_redefine_attribution_icons() {
+        let needle = concat!("pub const ", "ATTRIBUTION_ICONS");
+        let src = include_str!("threat_labels.rs");
+        assert!(
+            !src.contains(needle),
+            "ATTRIBUTION_ICONS must be defined only in graph_icons.rs"
+        );
+    }
+
     use super::*;
 
     #[test]
