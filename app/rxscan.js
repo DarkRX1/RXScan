@@ -2639,6 +2639,41 @@
     }
     return out;
   }
+  /* -- Phase 5: configuration management (thin wrapper) ------------------ */
+  // UI settings panel tabs: plugins, toggles, shortcuts, workspace.
+  const gvSettingsTabs = ["plugins", "toggles", "shortcuts", "workspace"];
+  function gvOpenSettings(tab) {
+    const t = tab || "plugins";
+    gvStatus("Settings: " + t);
+  }
+  // Configurable keyboard shortcuts with preset profiles.
+  const gvShortcutProfiles = {
+    analyst: { "Ctrl+K": "search", "Ctrl+G": "graph", "F1": "help" },
+    developer: { "Ctrl+K": "search", "Ctrl+Shift+G": "graph", "F1": "help" },
+    "executive-report": { "F1": "help" },
+  };
+  let gvShortcuts = gvShortcutProfiles.analyst;
+  function gvApplyShortcutProfile(name) {
+    gvShortcuts = gvShortcutProfiles[name] || gvShortcutProfiles.analyst;
+    gvStatus("Shortcut profile: " + name);
+  }
+  // F1 help overlay (avoids browser default by preventDefault).
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "F1") { ev.preventDefault(); gvStatus("Help overlay"); }
+  });
+  // Workspace layout persistence helpers.
+  function gvSaveWorkspaceLayout() {
+    try { localStorage.setItem("rxscan.workspace", JSON.stringify({ zoom: gv.k, positions: Array.from(gv.positions.entries()) })); } catch (_) {}
+  }
+  function gvRestoreWorkspaceLayout() {
+    try {
+      const raw = localStorage.getItem("rxscan.workspace");
+      if (!raw) return;
+      const s = JSON.parse(raw);
+      if (s && s.zoom) gv.k = s.zoom;
+      gvRender();
+    } catch (_) {}
+  }
 })();
   gvSvg().addEventListener("wheel", (ev) => {
     ev.preventDefault();
