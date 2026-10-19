@@ -223,6 +223,10 @@ fn main() {
         run_investigate(&args);
         return;
     }
+    if args.get(1).is_some_and(|arg| arg == "phone") {
+        run_phone(&args);
+        return;
+    }
     if args.get(1).is_some_and(|arg| arg == "exposure") {
         run_exposure_cli(&args);
         return;
@@ -5016,5 +5020,29 @@ fn run_os_lab(args: &[String]) {
                 std::process::exit(2);
             })
         );
+    }
+}
+
+/// Phone investigation CLI (`rxscan phone ...`).
+fn run_phone(args: &[String]) {
+    use rxscan::phone_investigation as phone;
+    match args.get(2).map(|s| s.as_str()) {
+        Some("analyze") => {
+            let number = args.get(3).cloned().unwrap_or_default();
+            match phone::analyze(&number) {
+                Ok(p) => println!("{}", p.e164),
+                Err(e) => {
+                    eprintln!("rxscan phone analyze: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Some("contacts-export") => {
+            print!("{}", phone::to_csv(&[]));
+        }
+        _ => {
+            println!("rxscan phone analyze <number>");
+            println!("rxscan phone contacts-export");
+        }
     }
 }

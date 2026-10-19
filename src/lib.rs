@@ -53,6 +53,7 @@ pub mod output;
 pub mod pacing;
 pub mod passive;
 pub mod persistence;
+pub mod phone_investigation;
 pub mod plan;
 pub mod planner;
 pub mod platform;

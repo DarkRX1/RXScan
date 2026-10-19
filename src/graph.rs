@@ -62,6 +62,7 @@ pub enum EntityKind {
     Provider,
     IdentityHypothesis,
     Software,
+    PhoneNumber,
 }
 
 impl std::fmt::Display for EntityKind {
@@ -99,6 +100,7 @@ impl std::fmt::Display for EntityKind {
             Self::Provider => "provider",
             Self::IdentityHypothesis => "identity_hypothesis",
             Self::Software => "software",
+            Self::PhoneNumber => "phone_number",
         };
         f.write_str(name)
     }
@@ -141,6 +143,7 @@ impl EntityKind {
             "provider" => Some(Self::Provider),
             "identity_hypothesis" => Some(Self::IdentityHypothesis),
             "software" => Some(Self::Software),
+            "phone_number" => Some(Self::PhoneNumber),
             _ => None,
         }
     }

@@ -202,7 +202,7 @@ pub fn display_kind_of(kind: crate::graph::EntityKind) -> DisplayKind {
         K::Certificate | K::SshHostKey | K::PublicKey => DisplayKind::Certificate,
         K::Domain | K::DnsRecord => DisplayKind::Domain,
         K::WebEndpoint | K::Document | K::ArchiveSnapshot | K::Repository => DisplayKind::Url,
-        K::Username | K::EmailAddress => DisplayKind::Username,
+        K::Username | K::EmailAddress | K::PhoneNumber => DisplayKind::Username,
         K::Account | K::Organization | K::IdentityHypothesis => DisplayKind::Account,
         K::Exposure | K::ExposureSource => DisplayKind::Exposure,
     }
