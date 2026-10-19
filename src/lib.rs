@@ -56,6 +56,7 @@ pub mod persistence;
 pub mod plan;
 pub mod planner;
 pub mod platform;
+pub mod plugin_registry;
 pub mod ports;
 pub mod probes;
 pub mod project;

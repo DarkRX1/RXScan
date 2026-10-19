@@ -45,4 +45,22 @@ private_key|tests/graph_phase1.rs|3021d90eb9437b2d|synthetic PEM header fixture 
 # use a wildcard; `wildcard_exceptions_are_limited_to_the_gate_itself` fails
 # the build if that ever changes.
 *|scripts/privacy_gate.sh|*|the privacy gate itself: this file defines the detector patterns and their literal vocabulary
-*|tests/privacy_gate.rs|*|the privacy gate's own self-tests: this file defines the detector patterns and the synthetic samples they are proven against
+agent_footer|tests/privacy_gate.rs|790a55ea18fadaba|detector's own keyword vocabulary (AGENT_FOOTERS array)
+agent_footer|tests/privacy_gate.rs|98e4830032a612b1|detector's own keyword vocabulary (AGENT_FOOTERS array)
+agent_footer|tests/privacy_gate.rs|9a0fee38744b1ebd|detector's own keyword vocabulary (AGENT_FOOTERS array)
+agent_footer|tests/privacy_gate.rs|9edfc807d1f5fd82|detector's own keyword vocabulary (AGENT_FOOTERS array)
+agent_footer|tests/privacy_gate.rs|08aedfe13f1bf4c7|detector's own keyword vocabulary (AGENT_FOOTERS array)
+agent_footer|tests/privacy_gate.rs|896ce5a0b702ec66|detector's own keyword vocabulary (AGENT_FOOTERS array)
+agent_footer|tests/privacy_gate.rs|fa45ceda15b138f0|detector's own keyword vocabulary (AGENT_FOOTERS array)
+aws_key|tests/privacy_gate.rs|1a5d44a2dca19669|detector's own synthetic AWS key sample
+bearer|tests/privacy_gate.rs|011fc2994e39d251|detector's own synthetic bearer token sample
+coauthor|tests/privacy_gate.rs|427b30b4095c366e|detector's own synthetic co-author trailer sample
+email|tests/privacy_gate.rs|f4783273a4bcad65|detector self-test synthetic sample
+email|tests/privacy_gate.rs|4022aae8fc2a4629|detector self-test synthetic sample
+forge_token|tests/privacy_gate.rs|1db61e13c133f7d9|detector's own synthetic forge token sample
+home_path|tests/privacy_gate.rs|53a8fcca9845a83e|detector self-test synthetic operator path
+home_path|tests/privacy_gate.rs|cf05319ae9007aa7|detector self-test synthetic operator path
+phone|tests/privacy_gate.rs|48c1cea5f658e895|detector self-test synthetic phone sample
+private_key|tests/privacy_gate.rs|8bcac7908eb95041|detector self-test synthetic PEM header
+public_ip|tests/privacy_gate.rs|ad754b3cdaad9067|detector self-test synthetic address
+public_ip|tests/privacy_gate.rs|bc4159863dbc68b4|detector self-test synthetic address

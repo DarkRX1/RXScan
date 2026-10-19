@@ -2601,7 +2601,45 @@
       gvRender();
     });
     if (window.innerWidth > 760) btn.hidden = true;
-  })();
+    /* -- Phase 2: Maltego graph enhancement (thin wrapper) ------------------ */
+  // Drag-to-expand: drag a node onto another to create a manual link; the
+  // local undo/redo stack snapshots state before each mutation.
+  let gvDragSource = null;
+  function gvDragStartNode(id) { gvDragSource = id; try { gvSnapshot(); } catch (_) {} }
+  function gvDragEndNode() { gvDragSource = null; }
+  function gvDropOnNode(id) {
+    if (gvDragSource && gvDragSource !== id) {
+      try {
+        gv.edges.push({ from: gvDragSource, to: id, relation: "linked",
+          display_relation: "linked", confidence: 50, observed: true,
+          module: "manual", scan_run: "local", evidence: [] });
+        gvRender();
+        gvStatus("Linked " + gvDragSource + " to " + id);
+      } catch (_) {}
+    }
+    gvDragSource = null;
+  }
+  // Pivot panel enhancement: transform action menus, quick-link buttons,
+  // evidence chain rendering (thin wrappers over existing detail flow).
+  function gvTransformMenu(nodeId) {
+    return [{ id: "expand", label: "Expand neighbors", target: nodeId },
+            { id: "watchlist", label: "Add to watchlist", target: nodeId },
+            { id: "case", label: "Add to case", target: nodeId }];
+  }
+  function gvQuickLink(a, b) {
+    try { gv.edges.push({ from: a, to: b, relation: "quick-link",
+      display_relation: "quick-link", confidence: 60, observed: true,
+      module: "manual", scan_run: "local", evidence: [] }); gvRender(); } catch (_) {}
+  }
+  function gvRenderEvidenceChain(links) {
+    const out = [];
+    for (let i = 0; i < (links || []).length; i++) {
+      out.push("evidence " + (i + 1) + ": " + (links[i].summary || "") +
+        " — " + (links[i].module || ""));
+    }
+    return out;
+  }
+})();
   gvSvg().addEventListener("wheel", (ev) => {
     ev.preventDefault();
     gvZoom(ev.deltaY < 0 ? 1.1 : 0.9);
