@@ -114,7 +114,7 @@ fn load_allowlist() -> Vec<Exception> {
 fn is_allowlisted(id: &str, path: &str, value: &str, exceptions: &[Exception]) -> bool {
     let dg = digest(value);
     exceptions.iter().any(|e| {
-        if e.id != id {
+        if e.id != id && e.id != "*" {
             return false;
         }
         let path_ok = e.path == path
@@ -597,7 +597,7 @@ fn allowlist_entries_are_well_formed_and_current() {
     let tracked: HashSet<String> = tracked_files().into_iter().collect();
     for e in &exceptions {
         assert!(
-            PATTERN_IDS.contains(&e.id.as_str()) || e.id == "denylist",
+            PATTERN_IDS.contains(&e.id.as_str()) || e.id == "*" || e.id == "denylist",
             "allowlist names an unknown detector id: {}",
             e.id
         );
@@ -611,10 +611,35 @@ fn allowlist_entries_are_well_formed_and_current() {
             "allowlist entry references a path that is not tracked: {}",
             e.path
         );
-        assert_eq!(
-            e.digest_prefix.len(),
-            16,
-            "allowlist digests must be a 16-char SHA-256 prefix: {}",
+        if e.digest_prefix != "*" {
+            assert_eq!(
+                e.digest_prefix.len(),
+                16,
+                "allowlist digests must be a 16-char SHA-256 prefix: {}",
+                e.digest_prefix
+            );
+        }
+    }
+}
+
+/// A wildcard exception silently re-opens a whole file to any finding, so it
+/// is permitted only for the gate's own files and nowhere else. Without this
+/// test, the easiest way to make the gate green would be to sprinkle `*`
+/// entries across the tree.
+#[test]
+fn wildcard_exceptions_are_limited_to_the_gate_itself() {
+    const GATE_FILES: &[&str] = &["scripts/privacy_gate.sh", "tests/privacy_gate.rs"];
+    for e in load_allowlist() {
+        let id_is_wild = e.id == "*";
+        let digest_is_wild = e.digest_prefix == "*";
+        if !(id_is_wild || digest_is_wild) {
+            continue;
+        }
+        assert!(
+            GATE_FILES.contains(&e.path.as_str()),
+            "wildcard exception names a file outside the gate itself: {}|{}|{}",
+            e.id,
+            e.path,
             e.digest_prefix
         );
     }

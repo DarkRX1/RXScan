@@ -112,7 +112,7 @@ in tests. No rotation is indicated.
   keys** in any commit.
 - **No private key material** in any commit. The `-----BEGIN ... PRIVATE
   KEY-----` headers present are synthetic masker fixtures.
-- **No absolute Windows user paths** (`C:\Users\...`) in any commit.
+- **No absolute Windows user paths** in any commit.
 - **No `.env`, session artifacts or editor backups** in any commit.
 
 ## Maintainer-run options (documentation only — not executed)

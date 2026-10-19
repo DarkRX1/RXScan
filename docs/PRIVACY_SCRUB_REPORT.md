@@ -71,7 +71,7 @@ weaken an existing test or falsify a factual record, so none were touched.
 | --- | --- |
 | `scripts/privacy_gate.sh` | Operator-facing POSIX `sh` scanner over tracked files. Generic patterns only; contains no project-specific or literal deny terms. Exits non-zero on any finding. |
 | `scripts/privacy_gate.allowlist` | Reviewed exceptions, keyed on the **value digest**, never on the path. |
-| `tests/privacy_gate.rs` | The same policy enforced natively in Rust on every OS in the CI matrix, with no new dependency. Eight tests, including one that fails the build if the two implementations drift apart. |
+| `tests/privacy_gate.rs` | The same policy enforced natively in Rust on every OS in the CI matrix, with no new dependency. Nine tests, including one that fails the build if the two implementations drift apart and one that confines wildcard exceptions to the gate itself. |
 | `.gitignore` | `privacy-denylist.local.txt` is ignored. |
 | `.github/workflows/ci.yml` | A dedicated `privacy-gate` job, so a red privacy lane blocks merge independently of the build matrix. |
 
@@ -85,6 +85,26 @@ to clear one known fixture. Keying on the SHA-256 prefix of the matched value
 means clearing `tests/graph_phase1.rs`'s reviewed PEM header leaves the file
 fully watched: planting a *different* private key there still fails the gate.
 This behaviour is asserted by test and was verified by hand.
+
+### The gate scans itself
+
+Once `scripts/privacy_gate.sh` and `tests/privacy_gate.rs` became tracked, the
+gate immediately reported 24 findings inside its own source: the regex
+literals, and the synthetic samples the detectors are proven against. A
+secret scanner that cannot hold its own vocabulary is either useless or has to
+be silenced wholesale.
+
+The resolution is deliberately narrow. Structural exceptions use a `*` in the
+id and digest columns, and
+`wildcard_exceptions_are_limited_to_the_gate_itself` fails the build if a
+wildcard ever names any file other than the gate's own two. Adding a `*` entry
+for `src/tls.rs` was tried and correctly failed the build. Without that test,
+the easiest way to make the gate green would have been to sprinkle wildcards
+across the tree, which is exactly the shortcut this guard removes.
+
+One report line was reworded rather than allowlisted: the history report
+mentioned absolute Windows user paths in prose, which tripped the same
+detector. Documentation should not need a privacy exception.
 
 ### Detector self-tests
 

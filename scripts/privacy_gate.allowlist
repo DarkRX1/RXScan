@@ -37,3 +37,12 @@ public_ip|tests/phase28_entities.rs|ad754b3cdaad9067|synthetic out-of-range IPv4
 public_ip|tests/project_graph.rs|f1412386aa8db257|public recursive resolver used as an explicit scan-target fixture in graph tests
 private_key|src/exposure.rs|3021d90eb9437b2d|secret-masker self-test: synthetic PEM header proving scrub_text() redacts key material
 private_key|tests/graph_phase1.rs|3021d90eb9437b2d|synthetic PEM header fixture proving the masker redacts key material in evidence payloads
+
+# --- Structural exceptions -------------------------------------------------
+# The two files below DEFINE the detector vocabulary: they contain the regexes
+# and the synthetic samples the detectors are proven against. Scanning them
+# would flag the gate's own patterns. These are the ONLY entries permitted to
+# use a wildcard; `wildcard_exceptions_are_limited_to_the_gate_itself` fails
+# the build if that ever changes.
+*|scripts/privacy_gate.sh|*|the privacy gate itself: this file defines the detector patterns and their literal vocabulary
+*|tests/privacy_gate.rs|*|the privacy gate's own self-tests: this file defines the detector patterns and the synthetic samples they are proven against

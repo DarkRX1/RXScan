@@ -52,14 +52,16 @@ git ls-files > "$WORK/tracked"
 #
 # Exceptions are keyed on the *value digest*, never on the path alone, so
 # clearing one known fixture never blinds the detector to a different value
-# appearing in that same file later. Use `*` as the digest only for values
-# that are structural (for example a forbidden-path needle list, where the
-# literal is the detector's own vocabulary rather than data).
+# appearing in that same file later. A `*` in the id or digest column marks a
+# STRUCTURAL exception and may be used only for the gate's own files, which
+# define the detector vocabulary and would otherwise flag their own patterns.
+# `tests/privacy_gate.rs` fails the build if that wildcard ever names anything
+# else.
 allowed() {
   [ -f "$ALLOWLIST" ] || return 1
   awk -F'|' -v id="$1" -v path="$2" -v dg="$3" '
     /^[[:space:]]*#/ || NF < 3 { next }
-    $1 != id { next }
+    $1 != id && $1 != "*" { next }
     {
       p = $2
       n = length(p)
