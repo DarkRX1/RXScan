@@ -1,6 +1,27 @@
 # Changelog
 
+## v1.3.0
+
+Phase 1-6 enhancement release. Backward compatible with v1.2.x schemas.
+
+- Privacy gate: permanent generic secret/identity scanner over tracked files,
+  digest-keyed allowlist, wildcard confined to the gate itself.
+- Maltego graph enhancement: icon parity test, plugin registry module,
+  drag-to-expand links, pivot panel transform menus, evidence chain rendering.
+- Mobile and iOS support: responsive CSS breakpoints documented, iOS evaluation
+  report, iOS CI workflow, mobile testing matrix.
+- Phone investigation module: EntityKind::PhoneNumber, E.164 normalization,
+  country-code detection, carrier lookup, SMS/MMS metadata (no content storage
+  without encryption flag), VCF/CSV export, `rxscan phone` CLI.
+- Configuration management: plugin/toggle/shortcut/workspace JSON schemas with
+  validation, migration from older formats, settings panel, shortcut profiles,
+  workspace persistence.
+- Threat labeling evidence enforcement: attribution icons only from stored
+  evidence with named source, confidence > 0, evidence ref; `rxscan audit labels`;
+  README rule documented.
+
 ## v1.2.1
+
 
 Patch release: UDP evidence correctness and deterministic UDP test
 fixtures. Backward compatible: CLI flags, JSON/JSONL schemas, graph and
