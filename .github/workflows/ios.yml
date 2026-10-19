@@ -1,0 +1,30 @@
+name: iOS build (macOS)
+
+on:
+  push:
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  pull_request:
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ios-rust:
+    name: rust core (aarch64-apple-ios)
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.85.0
+          targets: aarch64-apple-ios
+      - run: cargo check --locked --target aarch64-apple-ios
+      - run: cargo build --locked --target aarch64-apple-ios --lib

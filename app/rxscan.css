@@ -1,3 +1,12 @@
+/* Phase 3 responsive breakpoints (mobile-first documentation):
+   - <=1000px: two-column grids collapse, graph split stacks
+   - <=768px:  tablet shell (single column, stacked grids, 260px graphs)
+   - <=600px:  findings tables become stacked cards with data-label
+   - <=480px:  phone safe-area insets, 44px touch targets, bottom sheet
+   - <=760px:  bottom-sheet detail panel owns inspector on phones
+   - pointer: coarse: larger tap targets, graph gestures cooperate with scroll
+   - prefers-reduced-motion: disable animations/transitions
+*/
 /* RXScan local GUI — reconnaissance & evidence console.
    Visual identity derived from RXScanlogo.png: near-black / deep navy
    surfaces with electric cyan + bright blue emphasis. Large surfaces stay
