@@ -15,6 +15,11 @@ target/
 scan.jsonl
 scan.rxscan
 .env
+# Maintainer-owned literal deny terms for scripts/privacy_gate.sh. The
+# committed gate is fully effective without this file; it only adds
+# project-specific literals (name, handle, hostname) that must never be
+# written down in a commit.
+privacy-denylist.local.txt
 # Personal portfolio is a separate project and must never be re-added here.
 # Defense-in-depth: ignore portfolio paths if they are ever recreated.
 /index.html

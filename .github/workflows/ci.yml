@@ -171,3 +171,15 @@ jobs:
         with:
           node-version: "22"
       - run: node --check app/rxscan.js
+
+  # The privacy gate runs as its own job so a red privacy lane blocks merge
+  # independently of the build matrix. It is deliberately cheap (no compile)
+  # and needs only git and a POSIX shell. The Rust half of the same policy
+  # runs inside the rust-matrix lanes via `cargo test`.
+  privacy:
+    name: privacy-gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Identity/secret scan over tracked files
+        run: sh scripts/privacy_gate.sh

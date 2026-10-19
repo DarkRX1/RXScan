@@ -1,0 +1,39 @@
+# RXScan privacy gate - reviewed exceptions.
+#
+# Format: <detector-id>|<path>|<value-sha256-prefix>|<reason>
+#
+# Exceptions are keyed on the VALUE DIGEST, never on the path alone. Clearing
+# one known fixture therefore never blinds the detector to a different value
+# appearing in that same file later. A digest of `*` is reserved for values
+# that are structural (a forbidden-path needle list, say) rather than data,
+# and should be avoided: it re-opens the whole file.
+#
+# Every entry below was reviewed by hand. The matched value is never recorded
+# here - only its SHA-256 prefix - so this file is safe to commit.
+#
+# Adding an entry is a reviewed decision. Do not add one to make a gate green
+# without recording why the value is safe to ship.
+bearer|src/exposure.rs|e3cada7c6ef7dff1|secret-masker self-test: synthetic bearer token proving scrub_text() redacts Authorization headers
+email|src/ssh.rs|d689292e28b92b6d|upstream SSH vendor identifier parsed from real banner output in the fingerprint table (not maintainer contact)
+email|src/ssh.rs|5b414b9e55bf3805|upstream SSH vendor identifier parsed from real banner output in the fingerprint table (not maintainer contact)
+public_ip|src/entity_search.rs|ad754b3cdaad9067|synthetic out-of-range IPv4 fixture asserting malformed addresses are rejected
+public_ip|src/graph.rs|f1412386aa8db257|public recursive resolver used as an explicit scan-target fixture in graph tests
+public_ip|src/neighbor.rs|838c4c2573848f58|public recursive resolver used as an explicit discovery fixture
+public_ip|src/search.rs|e14759884124ebda|IANA example-domain address used as a documentation-reserved search fixture
+public_ip|src/tls.rs|be12903a12316514|SYN-reserve / source-rate fingerprint fixtures: synthetic vendor-range addresses that must be recognised as scan sources
+public_ip|src/tls.rs|ca8d0f2548ed0fe7|SYN-reserve / source-rate fingerprint fixtures: synthetic vendor-range addresses that must be recognised as scan sources
+public_ip|src/tls.rs|65f79bbe1a18361c|SYN-reserve / source-rate fingerprint fixtures: synthetic vendor-range addresses that must be recognised as scan sources
+public_ip|src/tls.rs|e9ec165c059f1c8d|SYN-reserve / source-rate fingerprint fixtures: synthetic vendor-range addresses that must be recognised as scan sources
+public_ip|src/tls.rs|51a7ca63d60deb15|SYN-reserve / source-rate fingerprint fixtures: synthetic vendor-range addresses that must be recognised as scan sources
+public_ip|src/tls.rs|36a32eea23e09979|SYN-reserve / source-rate fingerprint fixtures: synthetic vendor-range addresses that must be recognised as scan sources
+public_ip|src/tls.rs|2fbcc5a1d2db7697|SYN-reserve / source-rate fingerprint fixtures: synthetic vendor-range addresses that must be recognised as scan sources
+public_ip|src/tls.rs|886cc6ae5bc1522d|SYN-reserve / source-rate fingerprint fixtures: synthetic vendor-range addresses that must be recognised as scan sources
+public_ip|src/tls.rs|1d67516ee8cb54e0|SYN-reserve / source-rate fingerprint fixtures: synthetic vendor-range addresses that must be recognised as scan sources
+public_ip|src/tls.rs|0765b378eb3654a8|SYN-reserve / source-rate fingerprint fixtures: synthetic vendor-range addresses that must be recognised as scan sources
+public_ip|src/tls.rs|570220476d25afb8|SYN-reserve / source-rate fingerprint fixtures: synthetic vendor-range addresses that must be recognised as scan sources
+public_ip|src/tls.rs|4066731b91747d35|SYN-reserve / source-rate fingerprint fixtures: synthetic vendor-range addresses that must be recognised as scan sources
+public_ip|tests/fingerprint_corpus.rs|8f7ea451bcf0b013|fingerprint-corpus fixture address for vendor banner matching
+public_ip|tests/phase28_entities.rs|ad754b3cdaad9067|synthetic out-of-range IPv4 fixture mirroring the entity_search rejection case
+public_ip|tests/project_graph.rs|f1412386aa8db257|public recursive resolver used as an explicit scan-target fixture in graph tests
+private_key|src/exposure.rs|3021d90eb9437b2d|secret-masker self-test: synthetic PEM header proving scrub_text() redacts key material
+private_key|tests/graph_phase1.rs|3021d90eb9437b2d|synthetic PEM header fixture proving the masker redacts key material in evidence payloads
