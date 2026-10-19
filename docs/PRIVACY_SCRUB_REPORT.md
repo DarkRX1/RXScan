@@ -124,10 +124,83 @@ fictitious phone number in the same line.
 
 ## Verification
 
-- `sh scripts/privacy_gate.sh` -> PASS, 0 findings across 651 tracked files.
-- `cargo test --test privacy_gate` -> 8 passed, 0 failed.
-- Baseline test count unchanged; see the phase commit message for the final
-  full-suite result.
+### Correction: the earlier Phase 1 clippy claim was a false pass
+
+The previous revision of this section reported only the shell gate and the
+privacy-gate test. It did **not** report a clippy run, and no clippy result
+from that phase can be relied upon. The clippy check reported as passing was a
+**false pass** for two compounding reasons:
+
+- **It never re-linted anything.** Clippy printed `Finished` in 0.15s straight
+  from cache, without recompiling or linting the changed code. A sub-second
+  clippy run after an edit means the run is not evidence of anything.
+- **It was the wrong toolchain.** The run used the default local toolchain
+  (`rustc 1.99.0`). CI pins **1.85.0** (`.github/workflows/ci.yml`). A green run
+  on any other toolchain is not evidence about the pinned one.
+
+`digest()` in `tests/privacy_gate.rs` was therefore never verified. Reproduced
+against the pinned toolchain, `3c615cd` fails:
+
+```
+error: use of `format!` to build up a string from an iterator
+  --> tests/privacy_gate.rs:79:5
+  = note: `-D clippy::format-collect` implied by `-D warnings`
+exit code 101
+```
+
+The cause was `out.iter().take(8).map(|b| format!("{b:02x}")).collect()`,
+which allocates a `String` per byte. It now appends into one buffer via
+`std::fmt::Write`. The two forms are byte-identical: both produce 16 lowercase
+hex characters of the leading 8 SHA-256 bytes. `scripts/privacy_gate.allowlist`
+was **not** touched to accommodate this.
+
+To prove the clippy invocation genuinely lints this file rather than trusting
+its exit code, the bug was temporarily reintroduced after the fix landed:
+clippy then failed with the same `format_collect` error and exit code 101. The
+passing run below is therefore known to have compiled and linted the changed
+code, not to have short-circuited on cache.
+
+Two further figures in the previous section were stale, carried over from the
+pre-phase commit `8fdbe82`:
+
+- `8 passed` was wrong. The committed `tests/privacy_gate.rs` at `3c615cd`
+  contains **9** tests, not 8.
+- `651 tracked files` was the count at `8fdbe82`. The phase added five tracked
+  files, so the committed count is **656**.
+
+### Corrected results
+
+All commands below were run with the **pinned 1.85.0** toolchain.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Clippy | `cargo +1.85.0 clippy --all-targets --all-features --locked -- -D warnings` | exit 0 |
+| Format | `cargo +1.85.0 fmt --check` | exit 0 |
+| Shell gate | `sh scripts/privacy_gate.sh` | PASS, 0 findings across 656 tracked files |
+| Gate test | `cargo +1.85.0 test --test privacy_gate` | 10 passed, 0 failed |
+| Full suite | `cargo +1.85.0 test --all-targets` | 1358 passed, 0 failed, 0 ignored |
+
+**The pinned-toolchain clippy exit code is 0.**
+
+The previous claim that the baseline test count was unchanged is corrected
+here: it is not. The full suite is **1357 passed at `3c615cd`** and **1358
+passed** with this change, a net `+1` from the added
+`digest_matches_known_sha256_vectors` test. Both numbers were measured by
+stashing the change and re-running the suite, not inferred.
+
+`digest_matches_known_sha256_vectors` pins `digest` against five SHA-256
+prefixes computed independently with `sha256sum`. Every entry in
+`scripts/privacy_gate.allowlist` is keyed on this function's output, so a
+change of even one hex character would silently re-label every reviewed
+exception; `no_unreviewed_privacy_findings_in_tracked_files` remains the
+authoritative check, and the known-answer vectors are a redundant guard
+against a future refactor.
+
+### Standing rule
+
+Never record a clippy or gate result from a run that did not compile the
+changed code. Pin the toolchain, and treat a suspiciously fast clippy run as
+a failure to verify rather than a success.
 
 ## Quarantine
 

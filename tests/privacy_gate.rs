@@ -73,10 +73,19 @@ fn tracked_files() -> Vec<String> {
 }
 
 fn digest(value: &str) -> String {
+    use std::fmt::Write as _;
+
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());
     let out = hasher.finalize();
-    out.iter().take(8).map(|b| format!("{b:02x}")).collect()
+
+    // Append into one buffer rather than allocating a String per byte
+    // (clippy::format_collect).
+    let mut hex = String::with_capacity(16);
+    for byte in out.iter().take(8) {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
 }
 
 /// A reviewed exception from the committed allowlist.
@@ -705,6 +714,38 @@ fn a_planted_leak_is_detected() {
 }
 
 /// Guard the helper used by every other test.
+/// Locks `digest` to known SHA-256 prefixes. Every entry in
+/// `scripts/privacy_gate.allowlist` is keyed on this function's output, so a
+/// silent change here would silently re-open every reviewed exception.
+/// The vectors below were computed with `sha256sum`, independently of this
+/// code, so they cannot be satisfied by a bug in `digest` itself.
+#[test]
+fn digest_matches_known_sha256_vectors() {
+    for (input, expected) in [
+        ("", "e3b0c44298fc1c14"),
+        ("a", "ca978112ca1bbdca"),
+        ("abc", "ba7816bf8f01cfea"),
+        ("operator@example.test", "8a39ca2160d1a170"),
+        ("/home/operator", "53a8fcca9845a83e"),
+    ] {
+        assert_eq!(
+            digest(input),
+            expected,
+            "digest({input:?}) must stay byte-identical: the allowlist is keyed on it"
+        );
+    }
+    // Lowercase hex only, fixed width.
+    for sample in ["a", "", "abc", "/home/operator", "203.0.114.55"] {
+        let d = digest(sample);
+        assert_eq!(d.len(), 16, "digest width changed for {sample:?}");
+        assert!(
+            d.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "digest must be lowercase hex: {d}"
+        );
+    }
+}
+
 #[test]
 fn digest_is_stable_and_value_preserving() {
     assert_eq!(digest(""), digest(""));
