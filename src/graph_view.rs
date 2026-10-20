@@ -55,6 +55,7 @@ const ICON_SPRITE: &str = include_str!("../app/assets/icons/glyphs/rxscan-sprite
 #[serde(rename_all = "snake_case")]
 pub enum DisplayKind {
     Network,
+    Contact,
     Ip,
     Host,
     PortService,
@@ -74,6 +75,7 @@ impl DisplayKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Network => "network",
+            Self::Contact => "contact",
             Self::Ip => "ip",
             Self::Host => "host",
             Self::PortService => "port_service",
@@ -120,6 +122,7 @@ impl DisplayKind {
     pub fn all() -> &'static [DisplayKind] {
         &[
             Self::Network,
+            Self::Contact,
             Self::Ip,
             Self::Host,
             Self::PortService,
@@ -153,6 +156,7 @@ impl DisplayKind {
             Self::Evidence => "#6b7d94",
             Self::Scope => "#4a9eff",
             Self::Cluster => "#2a4a6b",
+            Self::Contact => "#7dd3fc",
         }
     }
 
@@ -174,6 +178,7 @@ impl DisplayKind {
             Self::Evidence => "parallelogram",
             Self::Scope => "dashed_circle",
             Self::Cluster => "octagon",
+            Self::Contact => "circle",
         }
     }
 }
@@ -202,7 +207,8 @@ pub fn display_kind_of(kind: crate::graph::EntityKind) -> DisplayKind {
         K::Certificate | K::SshHostKey | K::PublicKey => DisplayKind::Certificate,
         K::Domain | K::DnsRecord => DisplayKind::Domain,
         K::WebEndpoint | K::Document | K::ArchiveSnapshot | K::Repository => DisplayKind::Url,
-        K::Username | K::EmailAddress | K::PhoneNumber => DisplayKind::Username,
+        K::Username | K::EmailAddress => DisplayKind::Username,
+        K::PhoneNumber => DisplayKind::Contact,
         K::Account | K::Organization | K::IdentityHypothesis => DisplayKind::Account,
         K::Exposure | K::ExposureSource => DisplayKind::Exposure,
     }
@@ -3048,5 +3054,14 @@ mod tests {
             ]
         );
         assert_eq!(expand_neighbors(&view, "ip:192.0.2.10", 1).len(), 1);
+    }
+
+    #[test]
+    fn phone_does_not_collapse_to_username() {
+        use crate::graph::EntityKind;
+        assert_ne!(
+            display_kind_of(EntityKind::PhoneNumber),
+            DisplayKind::Username
+        );
     }
 }

@@ -1760,13 +1760,13 @@
     network: "#078cff", ip: "#00efff", host: "#3ddc84", port_service: "#f0a04b",
     software: "#b07cc4", certificate: "#e5488f", domain: "#19f4ff", url: "#8fa9c2",
     username: "#e2e8f0", account: "#f4f8ff", exposure: "#f06666", evidence: "#6b7d94",
-    scope: "#4a9eff", cluster: "#2a4a6b",
+    scope: "#4a9eff", cluster: "#2a4a6b", contact: "#7dd3fc",
   };
   const GV_SHAPES = {
     network: "hexagon", ip: "circle", host: "square", port_service: "diamond",
     software: "triangle", certificate: "pentagon", domain: "ellipse", url: "rounded_rect",
     username: "ring", account: "double_square", exposure: "triangle_down", evidence: "parallelogram",
-    scope: "dashed_circle", cluster: "octagon",
+    scope: "dashed_circle", cluster: "octagon", contact: "circle",
   };
   const GV_KINDS = Object.keys(GV_COLORS).filter((k) => k !== "cluster");
   const GV_RENDER_NODES = 1500;

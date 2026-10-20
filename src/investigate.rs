@@ -116,6 +116,7 @@ pub enum SeedKind {
     Domain,
     Url,
     Email,
+    Phone,
     Ip,
     Asn,
     Repository,
@@ -129,6 +130,7 @@ impl SeedKind {
             Self::Domain => "domain",
             Self::Url => "url",
             Self::Email => "email",
+            Self::Phone => "phone",
             Self::Ip => "ip",
             Self::Asn => "asn",
             Self::Repository => "repository",
@@ -295,6 +297,10 @@ impl InvestigationConfig {
                 crate::search::SearchEntity::email(&self.seed_value, 0)
                     .map_err(|e| e.to_string())?;
             }
+            SeedKind::Phone => {
+                crate::phone_investigation::normalize_e164(&self.seed_value)
+                    .map_err(|e| e.to_string())?;
+            }
             SeedKind::Ip => {
                 crate::search::SearchEntity::ip_address(&self.seed_value, 0)
                     .map_err(|e| e.to_string())?;
@@ -352,6 +358,11 @@ pub fn repository_entity_id(canonical_url: &str) -> String {
 /// Canonical email identity.
 pub fn email_entity_id(email: &str) -> String {
     format!("email:{}", email.trim().to_ascii_lowercase())
+}
+
+/// Canonical phone identity.
+pub fn phone_entity_id(phone: &str) -> String {
+    format!("phone:{}", phone.trim())
 }
 
 /// Canonical organization identity from a forge owner/name.
@@ -3688,6 +3699,21 @@ impl<'a> InvestigationEngine<'a> {
                     observations: 1,
                 }
             }
+            SeedKind::Phone => {
+                let raw = self.config.seed_value.trim();
+                let canonical = crate::phone_investigation::normalize_e164(raw)
+                    .unwrap_or_else(|_| raw.to_owned());
+                InvestigationEntity {
+                    id: phone_entity_id(&canonical),
+                    kind: EntityKind::PhoneNumber,
+                    label: raw.to_owned(),
+                    canonical_value: canonical.clone(),
+                    attributes: BTreeMap::from([("phone".to_owned(), canonical)]),
+                    depth: 0,
+                    provenance,
+                    observations: 1,
+                }
+            }
             SeedKind::Ip => {
                 let raw = self.config.seed_value.trim();
                 let canonical = raw
@@ -4315,6 +4341,7 @@ impl<'a> InvestigationEngine<'a> {
                 self.entities.get(&seed_id).map(|e| e.depth).unwrap_or(0),
             ),
             SeedKind::Url
+            | SeedKind::Phone
             | SeedKind::Ip
             | SeedKind::Asn
             | SeedKind::Repository
@@ -5110,6 +5137,7 @@ fn render_human_inner(
         SeedKind::Domain => "Domain",
         SeedKind::Url => "Url",
         SeedKind::Email => "Email",
+        SeedKind::Phone => "Phone",
         SeedKind::Ip => "Ip",
         SeedKind::Asn => "Asn",
         SeedKind::Repository => "Repository",

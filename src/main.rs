@@ -3966,6 +3966,7 @@ fn run_investigate(args: &[String]) {
     let mut domain: Option<String> = None;
     let mut url: Option<String> = None;
     let mut email: Option<String> = None;
+    let mut phone: Option<String> = None;
     let mut ip: Option<String> = None;
     let mut asn: Option<String> = None;
     let mut repo: Option<String> = None;
@@ -4004,13 +4005,14 @@ fn run_investigate(args: &[String]) {
                     || domain.is_some()
                     || url.is_some()
                     || email.is_some()
+                    || phone.is_some()
                     || ip.is_some()
                     || asn.is_some()
                     || repo.is_some()
                     || org.is_some()
                 {
                     err!(
-                        "rxscan investigate: only one of --username, --domain, --url, --email, --ip, --asn, --repo, --org"
+                        "rxscan investigate: only one of --username, --domain, --url, --email, --phone, --ip, --asn, --repo, --org"
                     );
                     std::process::exit(2);
                 }
@@ -4026,13 +4028,14 @@ fn run_investigate(args: &[String]) {
                     || domain.is_some()
                     || url.is_some()
                     || email.is_some()
+                    || phone.is_some()
                     || ip.is_some()
                     || asn.is_some()
                     || repo.is_some()
                     || org.is_some()
                 {
                     err!(
-                        "rxscan investigate: only one of --username, --domain, --url, --email, --ip, --asn, --repo, --org"
+                        "rxscan investigate: only one of --username, --domain, --url, --email, --phone, --ip, --asn, --repo, --org"
                     );
                     std::process::exit(2);
                 }
@@ -4048,13 +4051,14 @@ fn run_investigate(args: &[String]) {
                     || domain.is_some()
                     || url.is_some()
                     || email.is_some()
+                    || phone.is_some()
                     || ip.is_some()
                     || asn.is_some()
                     || repo.is_some()
                     || org.is_some()
                 {
                     err!(
-                        "rxscan investigate: only one of --username, --domain, --url, --email, --ip, --asn, --repo, --org"
+                        "rxscan investigate: only one of --username, --domain, --url, --email, --phone, --ip, --asn, --repo, --org"
                     );
                     std::process::exit(2);
                 }
@@ -4070,17 +4074,41 @@ fn run_investigate(args: &[String]) {
                     || domain.is_some()
                     || url.is_some()
                     || email.is_some()
+                    || phone.is_some()
                     || ip.is_some()
                     || asn.is_some()
                     || repo.is_some()
                     || org.is_some()
                 {
                     err!(
-                        "rxscan investigate: only one of --username, --domain, --url, --email, --ip, --asn, --repo, --org"
+                        "rxscan investigate: only one of --username, --domain, --url, --email, --phone, --ip, --asn, --repo, --org"
                     );
                     std::process::exit(2);
                 }
                 email = Some(value);
+            }
+            "--phone" | "--phone-number" => {
+                index += 1;
+                let Some(value) = args.get(index).cloned() else {
+                    err!("rxscan investigate: --phone requires a value");
+                    std::process::exit(2);
+                };
+                if username.is_some()
+                    || domain.is_some()
+                    || url.is_some()
+                    || email.is_some()
+                    || phone.is_some()
+                    || ip.is_some()
+                    || asn.is_some()
+                    || repo.is_some()
+                    || org.is_some()
+                {
+                    err!(
+                        "rxscan investigate: only one of --username, --domain, --url, --email, --phone, --ip, --asn, --repo, --org"
+                    );
+                    std::process::exit(2);
+                }
+                phone = Some(value);
             }
             "--ip" => {
                 index += 1;
@@ -4092,13 +4120,14 @@ fn run_investigate(args: &[String]) {
                     || domain.is_some()
                     || url.is_some()
                     || email.is_some()
+                    || phone.is_some()
                     || ip.is_some()
                     || asn.is_some()
                     || repo.is_some()
                     || org.is_some()
                 {
                     err!(
-                        "rxscan investigate: only one of --username, --domain, --url, --email, --ip, --asn, --repo, --org"
+                        "rxscan investigate: only one of --username, --domain, --url, --email, --phone, --ip, --asn, --repo, --org"
                     );
                     std::process::exit(2);
                 }
@@ -4114,13 +4143,14 @@ fn run_investigate(args: &[String]) {
                     || domain.is_some()
                     || url.is_some()
                     || email.is_some()
+                    || phone.is_some()
                     || ip.is_some()
                     || asn.is_some()
                     || repo.is_some()
                     || org.is_some()
                 {
                     err!(
-                        "rxscan investigate: only one of --username, --domain, --url, --email, --ip, --asn, --repo, --org"
+                        "rxscan investigate: only one of --username, --domain, --url, --email, --phone, --ip, --asn, --repo, --org"
                     );
                     std::process::exit(2);
                 }
@@ -4136,13 +4166,14 @@ fn run_investigate(args: &[String]) {
                     || domain.is_some()
                     || url.is_some()
                     || email.is_some()
+                    || phone.is_some()
                     || ip.is_some()
                     || asn.is_some()
                     || repo.is_some()
                     || org.is_some()
                 {
                     err!(
-                        "rxscan investigate: only one of --username, --domain, --url, --email, --ip, --asn, --repo, --org"
+                        "rxscan investigate: only one of --username, --domain, --url, --email, --phone, --ip, --asn, --repo, --org"
                     );
                     std::process::exit(2);
                 }
@@ -4158,13 +4189,14 @@ fn run_investigate(args: &[String]) {
                     || domain.is_some()
                     || url.is_some()
                     || email.is_some()
+                    || phone.is_some()
                     || ip.is_some()
                     || asn.is_some()
                     || repo.is_some()
                     || org.is_some()
                 {
                     err!(
-                        "rxscan investigate: only one of --username, --domain, --url, --email, --ip, --asn, --repo, --org"
+                        "rxscan investigate: only one of --username, --domain, --url, --email, --phone, --ip, --asn, --repo, --org"
                     );
                     std::process::exit(2);
                 }
@@ -4447,17 +4479,30 @@ fn run_investigate(args: &[String]) {
         err!("rxscan investigate: --json and --jsonl conflict");
         std::process::exit(2);
     }
-    let (seed_kind, seed_value) = match (username, domain, url, email, ip, asn, repo, org) {
-        (Some(value), None, None, None, None, None, None, None) => (inv::SeedKind::Username, value),
-        (None, Some(value), None, None, None, None, None, None) => (inv::SeedKind::Domain, value),
-        (None, None, Some(value), None, None, None, None, None) => (inv::SeedKind::Url, value),
-        (None, None, None, Some(value), None, None, None, None) => (inv::SeedKind::Email, value),
-        (None, None, None, None, Some(value), None, None, None) => (inv::SeedKind::Ip, value),
-        (None, None, None, None, None, Some(value), None, None) => (inv::SeedKind::Asn, value),
-        (None, None, None, None, None, None, Some(value), None) => {
+    let (seed_kind, seed_value) = match (username, domain, url, email, phone, ip, asn, repo, org) {
+        (Some(value), None, None, None, None, None, None, None, None) => {
+            (inv::SeedKind::Username, value)
+        }
+        (None, Some(value), None, None, None, None, None, None, None) => {
+            (inv::SeedKind::Domain, value)
+        }
+        (None, None, Some(value), None, None, None, None, None, None) => {
+            (inv::SeedKind::Url, value)
+        }
+        (None, None, None, Some(value), None, None, None, None, None) => {
+            (inv::SeedKind::Email, value)
+        }
+        (None, None, None, None, Some(value), None, None, None, None) => {
+            (inv::SeedKind::Phone, value)
+        }
+        (None, None, None, None, None, Some(value), None, None, None) => (inv::SeedKind::Ip, value),
+        (None, None, None, None, None, None, Some(value), None, None) => {
+            (inv::SeedKind::Asn, value)
+        }
+        (None, None, None, None, None, None, None, Some(value), None) => {
             (inv::SeedKind::Repository, value)
         }
-        (None, None, None, None, None, None, None, Some(value)) => {
+        (None, None, None, None, None, None, None, None, Some(value)) => {
             (inv::SeedKind::Organization, value)
         }
         _ => {

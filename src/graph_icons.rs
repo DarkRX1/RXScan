@@ -30,6 +30,7 @@ use crate::graph_view::DisplayKind;
 /// rendered as a collapsed group and carries no entity icon.
 const ICON_OF_KIND: &[(&DisplayKind, &str)] = &[
     (&DisplayKind::Network, "network"),
+    (&DisplayKind::Contact, "phone"),
     (&DisplayKind::Ip, "ip"),
     (&DisplayKind::Host, "host"),
     (&DisplayKind::PortService, "service"),
@@ -562,10 +563,6 @@ const UNMAPPED_BY_DESIGN: &[(&str, &str)] = &[
     ),
     (
         "phishing",
-        "not a distinct DisplayKind in the 1.2.0 graph contract; stored under one of the 13 base kinds",
-    ),
-    (
-        "phone",
         "not a distinct DisplayKind in the 1.2.0 graph contract; stored under one of the 13 base kinds",
     ),
     (
