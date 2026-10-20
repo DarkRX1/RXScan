@@ -946,3 +946,16 @@ fn scan_result_carries_evidence_backed_details() {
     assert!(first.get("http_title").is_some() || first.get("technologies").is_some());
     server.stop();
 }
+
+#[test]
+fn icon_sprite_is_served_and_contains_symbols() {
+    let server = TestServer::start();
+    let response = get(&server, "/app/assets/icons/glyphs/rxscan-sprite.svg");
+    assert_eq!(response.status, 200, "sprite must serve");
+    let ct = response.header("content-type").unwrap_or("").to_owned();
+    assert!(ct.starts_with("image/svg+xml"), "sprite content-type: {ct}");
+    let text = String::from_utf8_lossy(&response.body);
+    assert!(text.contains("<symbol"), "sprite must contain symbols");
+    assert!(text.contains("id=\"rx-"), "sprite must use rx- symbol ids");
+    server.stop();
+}

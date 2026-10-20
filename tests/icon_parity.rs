@@ -108,3 +108,61 @@ fn staging_has_no_missing_shared_assets_when_present() {
         "some committed assets are absent from staging"
     );
 }
+
+#[test]
+fn rust_display_kind_icons_resolve_to_shipped_glyphs() {
+    use rxscan::graph_icons;
+    use rxscan::graph_view::DisplayKind;
+    let manifest: std::collections::BTreeMap<String, serde_json::Value> =
+        serde_json::from_str(&std::fs::read_to_string(
+            format!("{}/app/assets/icons/manifest.json", env!("CARGO_MANIFEST_DIR")),
+        ).unwrap()).unwrap();
+    let icons_dir = format!("{}/app/assets/icons", env!("CARGO_MANIFEST_DIR"));
+    for kind in DisplayKind::all() {
+        if let Some(icon) = graph_icons::icon_of(*kind) {
+            assert!(
+                manifest.contains_key(icon),
+                "Rust icon '{icon}' for {kind} missing from manifest"
+            );
+            let path = format!("{}/glyphs/{}.svg", icons_dir, icon);
+            assert!(
+                std::path::Path::new(&path).is_file(),
+                "Rust icon '{icon}' for {kind} has no glyph file"
+            );
+        }
+    }
+}
+
+#[test]
+fn manifest_keys_match_on_disk_glyphs() {
+    let icons_dir = format!("{}/app/assets/icons", env!("CARGO_MANIFEST_DIR"));
+    let manifest: std::collections::BTreeMap<String, serde_json::Value> =
+        serde_json::from_str(&std::fs::read_to_string(
+            format!("{}/manifest.json", icons_dir),
+        ).unwrap()).unwrap();
+    for (key, entry) in &manifest {
+        let glyph = entry.get("glyph").and_then(|v| v.as_str()).unwrap();
+        let path = format!("{}/glyphs/{}.svg", icons_dir, glyph);
+        assert!(
+            std::path::Path::new(&path).is_file(),
+            "manifest key '{key}' glyph '{glyph}' missing on disk"
+        );
+    }
+    // every glyph file is referenced by some manifest entry
+    let mut referenced: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for entry in manifest.values() {
+        if let Some(g) = entry.get("glyph").and_then(|v| v.as_str()) {
+            referenced.insert(format!("{}.svg", g));
+        }
+    }
+    let glyphs_dir = format!("{}/glyphs", icons_dir);
+    for entry in std::fs::read_dir(&glyphs_dir).unwrap().flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.ends_with(".svg") && name != "rxscan-sprite.svg" {
+            assert!(
+                referenced.contains(&name),
+                "orphan glyph file with no manifest reference: {name}"
+            );
+        }
+    }
+}
