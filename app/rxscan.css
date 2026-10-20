@@ -554,3 +554,13 @@ body { overflow-x: hidden; }
 }
 .bottom-sheet-content { flex: 1; overflow: auto; padding: 0.75rem; }
 .bottom-sheet-content .kv { margin: 0; }
+
+/* Phase B mobile: safe-area insets for fixed bars and bottom sheet; prevent
+   horizontal overflow at 320px viewports. */
+.topbar { padding-left: max(0.75rem, env(safe-area-inset-left)); padding-right: max(0.75rem, env(safe-area-inset-right)); }
+.bottom-sheet { padding-bottom: max(0.5rem, env(safe-area-inset-bottom)); }
+.brand-logo, .sidebar-logo, .dash-logo { flex-shrink: 0; max-width: 100%; height: auto; }
+@media (max-width: 320px) {
+  .brand-sub { display: none; }
+  .topbar-inner { flex-wrap: wrap; gap: 0.5rem; }
+}
