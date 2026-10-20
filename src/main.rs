@@ -3987,6 +3987,7 @@ fn run_investigate(args: &[String]) {
     let mut categories = std::collections::BTreeSet::<String>::new();
     let mut project_db: Option<std::path::PathBuf> = None;
     let mut exposure = false;
+    let mut breach = false;
     let mut exposure_dataset: Option<std::path::PathBuf> = None;
     let mut network = false;
     let mut scopes: Vec<String> = Vec::new();
@@ -4378,6 +4379,7 @@ fn run_investigate(args: &[String]) {
                 };
                 exposure_dataset = Some(value.into());
             }
+            "--breach" => breach = true,
             "--network" => network = true,
             "--scope" => {
                 index += 1;
@@ -4531,6 +4533,7 @@ fn run_investigate(args: &[String]) {
     config.excluded_providers = excluded;
     config.categories = categories;
     config.exposure = exposure;
+    config.breach = breach;
     config.exposure_dataset = exposure_dataset;
     config.network = network;
     config.scopes = scopes;

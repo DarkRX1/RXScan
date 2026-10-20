@@ -5,6 +5,7 @@ pub mod archive;
 pub mod arp;
 pub mod assets;
 pub mod baseline;
+pub mod breach_exposure;
 pub mod capabilities;
 pub mod cli;
 pub mod confidence;

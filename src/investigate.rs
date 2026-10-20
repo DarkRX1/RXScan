@@ -177,6 +177,8 @@ pub struct InvestigationConfig {
     /// identifiers to third parties run ONLY when this is true; ordinary
     /// passive investigation never performs them.
     pub exposure: bool,
+    /// Opt-in breach/leak exposure lookup (licensed providers only).
+    pub breach: bool,
     /// Operator-supplied local exposure dataset (local-only, never uploaded).
     pub exposure_dataset: Option<std::path::PathBuf>,
     /// Explicit authorized network bridge. Without this, `network_scans`
@@ -225,6 +227,7 @@ impl InvestigationConfig {
             excluded_providers: BTreeSet::new(),
             categories: BTreeSet::new(),
             exposure: false,
+            breach: false,
             exposure_dataset: None,
             network: false,
             scopes: Vec::new(),
