@@ -106,6 +106,7 @@ fn graph_kind(kind: SearchEntityKind) -> EntityKind {
     match kind {
         SearchEntityKind::Username => EntityKind::Username,
         SearchEntityKind::EmailAddress => EntityKind::EmailAddress,
+        SearchEntityKind::PhoneNumber => EntityKind::PhoneNumber,
         SearchEntityKind::Domain => EntityKind::Domain,
         SearchEntityKind::Hostname => EntityKind::Hostname,
         SearchEntityKind::IpAddress => EntityKind::IpAddress,
@@ -403,6 +404,7 @@ pub fn execute_entity_search(
         // through the same local canonicalization here only for `--explain`
         // style planning without provider contact.
         SearchEntityKind::Username => SearchEntity::username(value, started_at)?,
+        SearchEntityKind::PhoneNumber => SearchEntity::phone(value, started_at)?,
         other => {
             return Err(SearchError::InvalidEntity(format!(
                 "passive search does not yet support {} (see `rxscan investigate transforms`)",

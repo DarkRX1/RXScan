@@ -889,6 +889,7 @@ pub enum SearchEntityKind {
     Url,
     Account,
     Organization,
+    PhoneNumber,
     NetworkEndpoint,
     Service,
     WebEndpoint,
@@ -917,6 +918,7 @@ impl SearchEntityKind {
         match self {
             Self::Username => "username",
             Self::EmailAddress => "email_address",
+            Self::PhoneNumber => "phone_number",
             Self::Domain => "domain",
             Self::Hostname => "hostname",
             Self::IpAddress => "ip_address",
@@ -1026,6 +1028,31 @@ impl SearchEntity {
             last_observed: timestamp,
             confidence: None,
             attributes,
+        })
+    }
+
+    /// Canonical phone identity: `phone:<e164>`.
+    ///
+    /// E.164 normalization via [`crate::phone_investigation::normalize_e164`].
+    /// Unparseable input is kept verbatim, matching the investigate seed path.
+    pub fn phone(value: &str, timestamp: u64) -> Result<Self, SearchError> {
+        let display = value.trim();
+        if display.is_empty() || display.len() > 64 || display.chars().any(char::is_control) {
+            return Err(SearchError::InvalidEntity(
+                "phone must be 1..=64 printable characters".to_owned(),
+            ));
+        }
+        let canonical = crate::phone_investigation::normalize_e164(display)
+            .unwrap_or_else(|_| display.to_owned());
+        Ok(Self {
+            id: crate::assets::public_entity_id("phone_number", &canonical),
+            kind: SearchEntityKind::PhoneNumber,
+            canonical_value: canonical.clone(),
+            display_value: display.to_owned(),
+            first_observed: timestamp,
+            last_observed: timestamp,
+            confidence: None,
+            attributes: BTreeMap::from([("phone".to_owned(), canonical)]),
         })
     }
 

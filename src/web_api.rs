@@ -1247,7 +1247,7 @@ fn build_investigation_config(
     let Some(kind) = SeedKind::parse(kind_text) else {
         return Err(ApiErrorBody::new(
             "invalid_entity",
-            "entity_type must be one of username, domain, url, email, ip, asn, repository, organization",
+            "entity_type must be one of username, email, domain, hostname, ip, asn, url, repository, organization, phone",
         ));
     };
     let value = request.value.as_deref().unwrap_or("").trim().to_owned();
@@ -1785,6 +1785,7 @@ fn normalize_search_kind(text: &str) -> Option<&'static str> {
         "repo" | "repository" => Some("repository"),
         "org" | "organization" => Some("organization"),
         "username" => Some("username"),
+        "phone" | "phone_number" => Some("phone"),
         _ => None,
     }
 }
@@ -1801,6 +1802,7 @@ fn search_entity_kind(kind: &str) -> Option<crate::search::SearchEntityKind> {
         "repository" => Some(K::Repository),
         "organization" => Some(K::Organization),
         "username" => Some(K::Username),
+        "phone" | "phone_number" => Some(K::PhoneNumber),
         _ => None,
     }
 }
@@ -3294,7 +3296,7 @@ fn handle_search_sync(state: &Arc<ServerState>, stream: &mut TcpStream, rid: u64
             rid,
             &ApiErrorBody::new(
                 "invalid_entity",
-                "entity_type must be one of username, email, domain, hostname, ip, asn, url, repository, organization",
+                "entity_type must be one of username, email, domain, hostname, ip, asn, url, repository, organization, phone",
             ),
         );
         return;

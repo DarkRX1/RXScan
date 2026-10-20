@@ -885,7 +885,7 @@
   });
 
   /* -- search ------------------------------------------------------------------ */
-  const PASSIVE_KINDS = ["email", "domain", "hostname", "ip", "asn", "url", "repository", "organization"];
+  const PASSIVE_KINDS = ["email", "phone", "domain", "hostname", "ip", "asn", "url", "repository", "organization"];
   // SOURCES: category registry from the API (same as CLI `search categories`).
   // No hardcoded category list here: the core owns categories, the GUI renders them.
   let searchCategoryCache = [];
